@@ -76,7 +76,7 @@ RAM_END_EXCL = 0x84000000
 FIRST_STAGE_MAX = 20 * 1024
 USB_TIMEOUT_MS = 5000
 
-DEFAULT_BOOTARGS = "init=/usr/bin/carlinkit_otalib root=/dev/initrd mem=64M@0x0 console=ttyS2,3000000n8 rootfstype=erofs rw clk_ignore_unused lpj=549888 driver_async_probe=dwc2,jz4740-mmc c2a_boot=recovery"
+DEFAULT_BOOTARGS = "init=/usr/bin/carlinkit_otalib root=/dev/initrd mem=64M@0x0 console=ttyS2,3000000n8 rootfstype=erofs rw lpj=549888 driver_async_probe=dwc2,jz4740-mmc c2a_boot=recovery"
 
 @dataclass
 class StageLayout:

@@ -3084,7 +3084,7 @@ CONFIG_TRACING_SUPPORT=y
 # CONFIG_EARLY_PRINTK is not set
 CONFIG_USE_GENERIC_EARLY_PRINTK_8250=y
 CONFIG_CMDLINE_BOOL=y
-CONFIG_CMDLINE="init=/usr/bin/carlinkit_otalib norandmaps slub_max_order=0 slub_min_objects=4 mem=64M@0x0 console=ttyS2,3000000n8 root=/dev/mtdblock_bbt_ro2 rootfstype=erofs rw quiet driver_async_probe=dwc2,jz4740-mmc clk_ignore_unused lpj=549888"
+CONFIG_CMDLINE="init=/usr/bin/carlinkit_otalib norandmaps slub_max_order=0 slub_min_objects=4 mem=64M@0x0 console=ttyS2,3000000n8 root=/dev/mtdblock_bbt_ro2 rootfstype=erofs rw quiet driver_async_probe=dwc2,jz4740-mmc lpj=549888"
 CONFIG_CMDLINE_OVERRIDE=y
 CONFIG_DEBUG_ZBOOT=y
 CONFIG_ZBOOT_INGENIC_UART=2
