@@ -1,0 +1,29 @@
+Date: Tue, 18 Aug 2026 06:25:00 +0200
+Subject: [PATCH 34/36] clk: ingenic: x1600: fix SADC gate bit
+
+SADC and UART0 are assigned to the same CLKGR0 bit 14 even though
+they are independent clocks. Disabling the unused SADC clock can
+therefore gate the active UART0 clock and break the console.
+
+Use bit 13 for SADC, matching the hardware clock layout and leaving
+bit 14 exclusively assigned to UART0.
+---
+ drivers/clk/ingenic/x1600-cgu.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/clk/ingenic/x1600-cgu.c b/drivers/clk/ingenic/x1600-cgu.c
+index ae4be18d4..5fd362c84 100644
+--- a/drivers/clk/ingenic/x1600-cgu.c
++++ b/drivers/clk/ingenic/x1600-cgu.c
+@@ -496,7 +496,7 @@ static const struct ingenic_cgu_clk_info x1600_cgu_clocks[] = {
+ 	[X1600_CLK_SADC] = {
+ 		"sadc", CGU_CLK_GATE,
+ 		.parents = { X1600_CLK_EXCLK, -1, -1, -1 },
+-		.gate = { CGU_REG_CLKGR0, 14 },
++		.gate = { CGU_REG_CLKGR0, 13 },
+ 	},
+ 
+ 	[X1600_CLK_UART0] = {
+-- 
+2.55.0
+

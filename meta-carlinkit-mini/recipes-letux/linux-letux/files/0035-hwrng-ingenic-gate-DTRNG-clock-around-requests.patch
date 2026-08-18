@@ -1,0 +1,152 @@
+Date: Tue, 18 Aug 2026 06:25:00 +0200
+Subject: [PATCH 35/36] hwrng: ingenic: gate DTRNG clock around requests
+
+Keep CFG_GEN_EN managed by the hwrng init and cleanup lifecycle, with
+a posted-write readback before gating the clock. Enable the functional
+clock only while those callbacks or a read request access registers.
+
+Fill each request with complete 32-bit words, using sleepable polling
+for blocking reads and a short bounded atomic poll for non-blocking
+reads. Preserve partial data when a later word times out and use memcpy
+so the destination buffer need not be aligned.
+---
+ drivers/char/hw_random/ingenic-trng.c | 71 ++++++++++++++++++++++-----
+ 1 file changed, 58 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/char/hw_random/ingenic-trng.c b/drivers/char/hw_random/ingenic-trng.c
+index d19ef61eb..1dcd43bb5 100644
+--- a/drivers/char/hw_random/ingenic-trng.c
++++ b/drivers/char/hw_random/ingenic-trng.c
+@@ -15,6 +15,7 @@
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
++#include <linux/string.h>
+ 
+ /* DTRNG register offsets */
+ #define TRNG_REG_CFG_OFFSET			0x00
+@@ -29,6 +30,7 @@
+ 
+ struct ingenic_trng {
+ 	void __iomem *base;
++	struct clk *clk;
+ 	struct hwrng rng;
+ };
+ 
+@@ -36,10 +38,18 @@ static int ingenic_trng_init(struct hwrng *rng)
+ {
+ 	struct ingenic_trng *trng = container_of(rng, struct ingenic_trng, rng);
+ 	unsigned int ctrl;
++	int ret;
++
++	ret = clk_prepare_enable(trng->clk);
++	if (ret)
++		return ret;
+ 
+ 	ctrl = readl(trng->base + TRNG_REG_CFG_OFFSET);
+ 	ctrl |= CFG_GEN_EN;
+ 	writel(ctrl, trng->base + TRNG_REG_CFG_OFFSET);
++	readl(trng->base + TRNG_REG_CFG_OFFSET);
++
++	clk_disable_unprepare(trng->clk);
+ 
+ 	return 0;
+ }
+@@ -48,35 +58,70 @@ static void ingenic_trng_cleanup(struct hwrng *rng)
+ {
+ 	struct ingenic_trng *trng = container_of(rng, struct ingenic_trng, rng);
+ 	unsigned int ctrl;
++	int ret;
++
++	ret = clk_prepare_enable(trng->clk);
++	if (ret) {
++		pr_err("%s: Cannot enable DTRNG clock: %d\n", __func__, ret);
++		return;
++	}
+ 
+ 	ctrl = readl(trng->base + TRNG_REG_CFG_OFFSET);
+ 	ctrl &= ~CFG_GEN_EN;
+ 	writel(ctrl, trng->base + TRNG_REG_CFG_OFFSET);
++	readl(trng->base + TRNG_REG_CFG_OFFSET);
++
++	clk_disable_unprepare(trng->clk);
+ }
+ 
+ static int ingenic_trng_read(struct hwrng *rng, void *buf, size_t max, bool wait)
+ {
+ 	struct ingenic_trng *trng = container_of(rng, struct ingenic_trng, rng);
+-	u32 *data = buf;
++	u8 *data = buf;
++	size_t done = 0;
++	u32 value;
+ 	u32 status;
+ 	int ret;
+ 
+-	ret = readl_poll_timeout(trng->base + TRNG_REG_STATUS_OFFSET, status,
+-				 status & STATUS_RANDOM_RDY, 10, 1000);
+-	if (ret == -ETIMEDOUT) {
+-		pr_err("%s: Wait for DTRNG data ready timeout\n", __func__);
++	max -= max % sizeof(value);
++	if (!max)
++		return 0;
++
++	ret = clk_prepare_enable(trng->clk);
++	if (ret)
+ 		return ret;
+-	}
+ 
+-	*data = readl(trng->base + TRNG_REG_RANDOMNUM_OFFSET);
++	while (done < max) {
++		if (wait) {
++			ret = readl_poll_timeout(trng->base + TRNG_REG_STATUS_OFFSET,
++					 status, status & STATUS_RANDOM_RDY,
++					 10, 1000);
++		} else {
++			/*
++			 * The clock is gated per request, so an immediate status check
++			 * could repeatedly return -EAGAIN before generation resumes.
++			 * Use a short bounded poll without keeping the clock enabled
++			 * between requests.
++			 */
++			ret = readl_poll_timeout_atomic(
++				trng->base + TRNG_REG_STATUS_OFFSET, status,
++				status & STATUS_RANDOM_RDY, 1, 100);
++		}
++		if (ret)
++			break;
++
++		value = readl(trng->base + TRNG_REG_RANDOMNUM_OFFSET);
++		memcpy(data + done, &value, sizeof(value));
++		done += sizeof(value);
++	}
+ 
+-	return 4;
++	clk_disable_unprepare(trng->clk);
++	return done ? done : ret;
+ }
+ 
+ static int ingenic_trng_probe(struct platform_device *pdev)
+ {
+ 	struct ingenic_trng *trng;
+-	struct clk *clk;
+ 	int ret;
+ 
+ 	trng = devm_kzalloc(&pdev->dev, sizeof(*trng), GFP_KERNEL);
+@@ -88,10 +133,10 @@ static int ingenic_trng_probe(struct platform_device *pdev)
+ 		return dev_err_probe(&pdev->dev, PTR_ERR(trng->base),
+ 				     "%s: Failed to map DTRNG registers\n", __func__);
+ 
+-	clk = devm_clk_get_enabled(&pdev->dev, NULL);
+-	if (IS_ERR(clk))
+-		return dev_err_probe(&pdev->dev, PTR_ERR(clk),
+-				     "%s: Cannot get and enable DTRNG clock\n", __func__);
++	trng->clk = devm_clk_get(&pdev->dev, NULL);
++	if (IS_ERR(trng->clk))
++		return dev_err_probe(&pdev->dev, PTR_ERR(trng->clk),
++				     "%s: Cannot get DTRNG clock\n", __func__);
+ 
+ 	trng->rng.name = pdev->name;
+ 	trng->rng.init = ingenic_trng_init;
+-- 
+2.55.0
+

@@ -1,0 +1,79 @@
+Date: Tue, 18 Aug 2026 06:25:00 +0200
+Subject: [PATCH 36/36] i2c: jz4780: gate clock around transfers
+
+---
+ drivers/i2c/busses/i2c-jz4780.c | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/i2c/busses/i2c-jz4780.c b/drivers/i2c/busses/i2c-jz4780.c
+index 664a5471d..8c39fe906 100644
+--- a/drivers/i2c/busses/i2c-jz4780.c
++++ b/drivers/i2c/busses/i2c-jz4780.c
+@@ -573,6 +573,7 @@ static inline int jz4780_i2c_xfer_read(struct jz4780_i2c *i2c,
+ 	memset(buf, 0, len);
+ 
+ 	spin_lock_irqsave(&i2c->lock, flags);
++	reinit_completion(&i2c->trans_waitq);
+ 
+ 	i2c->stop_hold = 0;
+ 	i2c->is_write = 0;
+@@ -632,6 +633,7 @@ static inline int jz4780_i2c_xfer_write(struct jz4780_i2c *i2c,
+ 	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&i2c->lock, flags);
++	reinit_completion(&i2c->trans_waitq);
+ 
+ 	if (idx < (cnt - 1))
+ 		i2c->stop_hold = 1;
+@@ -694,6 +696,10 @@ static int jz4780_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg *msg,
+ 	int ret = 0;
+ 	struct jz4780_i2c *i2c = adap->algo_data;
+ 
++	ret = clk_prepare_enable(i2c->clk);
++	if (ret)
++		return ret;
++
+ 	ret = jz4780_i2c_prepare(i2c);
+ 	if (ret) {
+ 		dev_err(&i2c->adap.dev, "I2C prepare failed\n");
+@@ -721,6 +727,8 @@ static int jz4780_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg *msg,
+ 
+ out:
+ 	jz4780_i2c_cleanup(i2c);
++	synchronize_irq(i2c->irq);
++	clk_disable_unprepare(i2c->clk);
+ 	return ret;
+ }
+ 
+@@ -792,7 +800,7 @@ static int jz4780_i2c_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, i2c);
+ 
+-	i2c->clk = devm_clk_get_enabled(&pdev->dev, NULL);
++	i2c->clk = devm_clk_get(&pdev->dev, NULL);
+ 	if (IS_ERR(i2c->clk))
+ 		return PTR_ERR(i2c->clk);
+ 
+@@ -809,6 +817,11 @@ static int jz4780_i2c_probe(struct platform_device *pdev)
+ 		dev_err(&pdev->dev, "clock-frequency minimum is 1000\n");
+ 		return ret;
+ 	}
++
++	ret = clk_prepare_enable(i2c->clk);
++	if (ret)
++		return ret;
++
+ 	jz4780_i2c_set_speed(i2c);
+ 
+ 	dev_info(&pdev->dev, "Bus frequency is %d KHz\n", i2c->speed);
+@@ -820,6 +833,7 @@ static int jz4780_i2c_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	jz4780_i2c_writew(i2c, JZ4780_I2C_INTM, 0x0);
++	clk_disable_unprepare(i2c->clk);
+ 
+ 	ret = platform_get_irq(pdev, 0);
+ 	if (ret < 0)
+-- 
+2.55.0
+

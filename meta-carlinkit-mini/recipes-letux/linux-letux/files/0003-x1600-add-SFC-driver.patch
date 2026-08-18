@@ -1,10 +1,23 @@
+Date: Tue, 18 Aug 2026 05:40:52 +0200
 Subject: [PATCH] x1600: add SFC driver
 
+Keep the SFC functional clock gated while the controller is idle.
+Enable it only while configuring a device or executing a SPI memory
+request. Mask and drain interrupts, then synchronize the IRQ before
+disabling the clock. Initialize the controller to a stopped, masked
+state before registering its interrupt handler.
+---
+ drivers/spi/Kconfig           |    9 +
+ drivers/spi/Makefile          |    1 +
+ drivers/spi/spi-ingenic-sfc.c | 1107 +++++++++++++++++++++++++++++++++
+ 3 files changed, 1117 insertions(+)
+ create mode 100644 drivers/spi/spi-ingenic-sfc.c
+
 diff --git a/drivers/spi/Kconfig b/drivers/spi/Kconfig
-index 823797217..2038f96b2 100644
+index 1872f9d54..864e2b292 100644
 --- a/drivers/spi/Kconfig
 +++ b/drivers/spi/Kconfig
-@@ -484,6 +484,15 @@ config SPI_INGENIC
+@@ -518,6 +518,15 @@ config SPI_INGENIC
  	  To compile this driver as a module, choose M here: the module
  	  will be called spi-ingenic.
  
@@ -21,10 +34,10 @@ index 823797217..2038f96b2 100644
  	tristate
  
 diff --git a/drivers/spi/Makefile b/drivers/spi/Makefile
-index a9b1bc259..61f4d5452 100644
+index 1f7c06a30..2916d0254 100644
 --- a/drivers/spi/Makefile
 +++ b/drivers/spi/Makefile
-@@ -68,6 +68,7 @@ obj-$(CONFIG_SPI_HISI_SFC_V3XX)		+= spi-hisi-sfc-v3xx.o
+@@ -72,6 +72,7 @@ obj-$(CONFIG_SPI_HISI_SFC_V3XX)		+= spi-hisi-sfc-v3xx.o
  obj-$(CONFIG_SPI_IMG_SPFI)		+= spi-img-spfi.o
  obj-$(CONFIG_SPI_IMX)			+= spi-imx.o
  obj-$(CONFIG_SPI_INGENIC)		+= spi-ingenic.o
@@ -34,10 +47,10 @@ index a9b1bc259..61f4d5452 100644
  obj-$(CONFIG_SPI_INTEL_PLATFORM)	+= spi-intel-platform.o
 diff --git a/drivers/spi/spi-ingenic-sfc.c b/drivers/spi/spi-ingenic-sfc.c
 new file mode 100644
-index 0000000..d55360f
+index 000000000..82936c5df
 --- /dev/null
 +++ b/drivers/spi/spi-ingenic-sfc.c
-@@ -0,0 +1,1082 @@
+@@ -0,0 +1,1107 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Ingenic SoCs SPI Flash Controller Driver
@@ -766,6 +779,10 @@ index 0000000..d55360f
 +	const char *dir = "none";
 +	int ret;
 +
++	ret = clk_prepare_enable(sfc->clk);
++	if (ret)
++		return ret;
++
 +	/* TODO: CS1 is unsupported; it's not implemented by any of the reference drivers either */
 +	/* except for leaving a very small hint that CS0/CS1 can be controlled using SFC_GLB1 */
 +	sfc->cs = spi_get_chipselect(spi, 0);
@@ -786,10 +803,15 @@ index 0000000..d55360f
 +	if (ingenic_sfc_dma_eligible(sfc, op)) {
 +		ret = ingenic_sfc_exec_op_dma(mem, sfc, op);
 +		if (ret != -EAGAIN)
-+			return ret;
++			goto out_disable_clk;
 +	}
 +
-+	return ingenic_sfc_exec_op_pio(sfc, op);
++	ret = ingenic_sfc_exec_op_pio(sfc, op);
++
++out_disable_clk:
++	synchronize_irq(sfc->irq);
++	clk_disable_unprepare(sfc->clk);
++	return ret;
 +}
 +
 +static int ingenic_sfc_poll_status(struct spi_mem *mem, const struct spi_mem_op *op,
@@ -958,9 +980,15 @@ index 0000000..d55360f
 +	if (!spi->max_speed_hz)
 +		return -EINVAL;
 +
-+	ret = clk_set_rate(sfc->clk, requested_rate);
++	ret = clk_prepare_enable(sfc->clk);
 +	if (ret)
-+		return -EINVAL;
++		return ret;
++
++	ret = clk_set_rate(sfc->clk, requested_rate);
++	if (ret) {
++		ret = -EINVAL;
++		goto out_disable_clk;
++	}
 +
 +	ingenic_sfc_hw_init(sfc);
 +
@@ -992,7 +1020,12 @@ index 0000000..d55360f
 +	writel(val, sfc->base + SFC_REG_GLB);
 +
 +	ingenic_update_sample_delay(spi, rate);
-+	return 0;
++	ingenic_sfc_mask_and_clear(sfc);
++	ret = 0;
++
++out_disable_clk:
++	clk_disable_unprepare(sfc->clk);
++	return ret;
 +}
 +
 +static int ingenic_sfc_probe(struct platform_device *pdev)
@@ -1022,13 +1055,19 @@ index 0000000..d55360f
 +
 +	sfc->clk = devm_clk_get(&pdev->dev, "sfc");
 +	if (IS_ERR(sfc->clk)) {
-+		ret = IS_ERR(sfc->clk);
++		ret = PTR_ERR(sfc->clk);
 +		goto err_put_master;
 +	}
++
++	sfc->dev = &pdev->dev;
 +
 +	ret = clk_prepare_enable(sfc->clk);
 +	if (ret)
 +		goto err_put_master;
++	writel(TRIG_STOP, sfc->base + SFC_REG_TRIG);
++	readl(sfc->base + SFC_REG_TRIG);
++	ingenic_sfc_mask_and_clear(sfc);
++	clk_disable_unprepare(sfc->clk);
 +
 +	sfc->irq = platform_get_irq(pdev, 0);
 +	if (sfc->irq < 0) {
@@ -1036,7 +1075,6 @@ index 0000000..d55360f
 +		goto err_put_master;
 +	}
 +
-+	sfc->dev = &pdev->dev;
 +	sfc->cs = 0; 
 +
 +	platform_set_drvdata(pdev, sfc);
@@ -1120,3 +1158,6 @@ index 0000000..d55360f
 +MODULE_AUTHOR("周琰杰 (Zhou Yanjie) <zhouyanjie@wanyeetech.com>");
 +MODULE_AUTHOR("CatPlay");
 +MODULE_DESCRIPTION("Ingenic SoCs SPI Flash Controller Driver");
+-- 
+2.55.0
+
