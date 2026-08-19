@@ -90,6 +90,9 @@ impl BootRadio {
             Radio::RTL8822CS => {
                 ModprobeUtil::modprobe("88x2cs")?;
             }
+            Radio::RTL8733BS => {
+                ModprobeUtil::modprobe("8733bs")?;
+            }
             // Radio::BCM4335 => {}
             Radio::Offline | Radio::Unknown => unreachable!(),
             _ => return Err(RadioError::UnsupportedRadio),
