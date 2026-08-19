@@ -27,7 +27,7 @@ LICENSE ?= "GPL-2.0-only"
 LIC_FILES_CHKSUM ?= "file://${COMMON_LICENSE_DIR}/GPL-2.0-only;md5=801f80980d171dd6425610833a22dbe6"
 
 INHIBIT_DEFAULT_DEPS = "1"
-DEPENDS += "dtc-native"
+DEPENDS += "dtc-native gzip-native"
 
 inherit deploy kernel-arch
 
@@ -38,7 +38,7 @@ PROVIDES = "virtual/dtb"
 PACKAGE_ARCH = "${MACHINE_ARCH}"
 
 SYSROOT_DIRS += "/boot/devicetree"
-FILES:${PN} = "/boot/devicetree/*.dtb /boot/devicetree/*.dtbo"
+FILES:${PN} = "/boot/devicetree/*.dtb /boot/devicetree/*.dtbo /boot/devicetree/*.dtb.gz /boot/devicetree/*.dtbo.gz"
 
 S = "${WORKDIR}"
 B = "${WORKDIR}/build"
@@ -165,12 +165,14 @@ python devicetree_c2a_do_compile() {
 devicetree_c2a_do_install() {
     for DTB_FILE in `ls *.dtb *.dtbo`; do
         install -Dm 0644 ${B}/${DTB_FILE} ${D}/boot/devicetree/${DTB_FILE}
+        gzip -9 -c ${B}/${DTB_FILE} > ${D}/boot/devicetree/${DTB_FILE}.gz
     done
 }
 
 devicetree_c2a_do_deploy() {
     for DTB_FILE in `ls *.dtb *.dtbo`; do
         install -Dm 0644 ${B}/${DTB_FILE} ${DEPLOYDIR}/devicetree/${DTB_FILE}
+        gzip -9 -c ${B}/${DTB_FILE} > ${DEPLOYDIR}/devicetree/${DTB_FILE}.gz
     done
 }
 addtask deploy before do_build after do_install
