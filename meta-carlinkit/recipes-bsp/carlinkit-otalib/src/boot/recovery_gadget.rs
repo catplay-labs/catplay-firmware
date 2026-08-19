@@ -32,7 +32,7 @@ impl RecoveryGadget {
     }
 
     fn prepare_modules() -> Result<(), ModprobeError> {
-        SystemUtil::modprobe("libcomposite")?;
+        let _ = SystemUtil::modprobe("libcomposite");
         let _ = SystemUtil::modprobe("configfs");
 
         Ok(())
