@@ -59,8 +59,22 @@ pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     if SystemUtil::getpid() == 1 {
         dmesg!("[boot] Taking over PID1 role");
         BootUltra::boot_head();
-        BootUltra::boot_early();
-        BootUltra::boot_late();
+
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            dmesg!("[boot] Starting boot flow child");
+            BootUltra::boot_early();
+            BootUltra::boot_late();
+            dmesg!("[boot] Boot flow child finished");
+            unsafe { libc::_exit(0) };
+        } else if pid < 0 {
+            dmesg!("[boot] Failed to fork boot flow child, running inline");
+            BootUltra::boot_early();
+            BootUltra::boot_late();
+        } else {
+            dmesg!("[boot] Boot flow child pid={pid}");
+        }
+
         BootUltra::boot_tail();
 
         unreachable!();
