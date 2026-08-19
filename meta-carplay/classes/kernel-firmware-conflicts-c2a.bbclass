@@ -6,7 +6,11 @@ python fix_modules() {
     import re
 
     blacklist_patterns = d.getVar("C2A_FIRMWARE_CONFLICTS").split()
-    current = d.getVar("RDEPENDS:kernel-modules").split()
+    current = d.getVar("RDEPENDS:kernel-modules")
+    if current == None:
+        bb.warn("This kernel build has no kernel modules?")
+        return
+    current = current.split()
 
     bb.warn(f"kernel-modules RDEPENDS before filtering: {current}")
 
