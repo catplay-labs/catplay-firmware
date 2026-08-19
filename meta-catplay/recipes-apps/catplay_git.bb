@@ -29,6 +29,7 @@ RUSTFLAGS:append:armv7e = " -C link-arg=-no-pie"
 
 # Fix static openssl linking
 RUSTFLAGS:append:mipsel = " -C link-arg=-latomic"
+RUSTFLAGS:append:riscv32 = " -C link-arg=-latomic"
 
 INHIBIT_PACKAGE_STRIP = "${CATPLAY_DEBUG_SYMBOLS}"
 inherit c2a-rust-app
