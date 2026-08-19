@@ -6,6 +6,9 @@ C2A_SYSTEM_IMAGE ?= "c2a-system-image"
 C2A_WIC_KERNEL_NAME ?= "fitImage-${INITRAMFS_IMAGE_NAME}-${MACHINE}"
 C2A_WIC_KERNEL_PATH ?= "${DEPLOY_DIR_IMAGE}/${C2A_WIC_KERNEL_NAME}"
 
+C2A_WIC_KERNEL_IMAGE_NAME ?= "Image"
+C2A_WIC_KERNEL_IMAGE_PATH ?= "${DEPLOY_DIR_IMAGE}/${C2A_WIC_KERNEL_IMAGE_NAME}"
+
 C2A_WIC_KERNEL_UZIMAGE_NAME ?= "${KERNEL_IMAGETYPE}"
 C2A_WIC_KERNEL_UZIMAGE_PATH ?= "${DEPLOY_DIR_IMAGE}/${C2A_WIC_KERNEL_UZIMAGE_NAME}"
 
@@ -26,5 +29,7 @@ C2A_BUNDLE_ARTIFACTS ?= "\
     ${C2A_WIC_IMAGE_PATH},${MACHINE}.wic,${@'1' if d.getVar('C2A_SUPPORTS_WIC') == '1' else '0'} \
     ${C2A_WIC_KERNEL_PATH},${MACHINE}.fitImage,${@'1' if d.getVar('KERNEL_IMAGETYPE') == 'fitImage' else '0'} \
     ${C2A_WIC_KERNEL_UZIMAGE_PATH},${MACHINE}.${KERNEL_IMAGETYPE},${@'1' if d.getVar('KERNEL_IMAGETYPE') in ('uzImage', 'uzImage.bin') else '0'} \
+    ${C2A_WIC_KERNEL_UZIMAGE_PATH},${MACHINE}.${KERNEL_IMAGETYPE}.bin,${@'1' if d.getVar('KERNEL_IMAGETYPE') in ('Image', 'c2rvImage') else '0'} \
+    ${C2A_WIC_KERNEL_IMAGE_PATH},${MACHINE}.Image.bin,${@'1' if d.getVar('KERNEL_IMAGETYPE') in ('c2rvImage') else '0'} \
     ${C2A_WIC_INITRAMFS_PATH},${MACHINE}.initrd.bin,1 \
 "
