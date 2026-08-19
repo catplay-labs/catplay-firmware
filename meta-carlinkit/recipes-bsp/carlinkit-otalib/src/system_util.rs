@@ -254,23 +254,9 @@ impl SystemUtil {
 
     #[allow(clippy::field_reassign_with_default)]
     pub fn sleep(duration: Duration) {
-        let mut req = libc::timespec::default();
-        req.tv_sec = duration.as_secs() as libc::time_t;
-        req.tv_nsec = duration.subsec_nanos() as libc::c_long;
-
-        loop {
-            let mut rem = libc::timespec::default();
-            let ret = unsafe { libc::nanosleep(&req, &mut rem) };
-            if ret == 0 {
-                break;
-            }
-
-            let errno = unsafe { *libc::__errno_location() };
-            if errno != libc::EINTR {
-                break;
-            }
-
-            req = rem;
+        let ms = cmp::min(duration.as_millis(), libc::c_int::MAX as u128) as libc::c_int;
+        unsafe {
+            libc::poll(core::ptr::null_mut(), 0, ms);
         }
     }
 
