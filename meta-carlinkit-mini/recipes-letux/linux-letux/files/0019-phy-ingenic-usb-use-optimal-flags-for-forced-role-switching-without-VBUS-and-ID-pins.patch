@@ -1,17 +1,18 @@
-Subject: [PATCH] phy-ingenic-usb: use optimal flags for forced role switching without VBUS and ID pins
+Subject: [PATCH] phy-ingenic-usb: switch forced roles only with IDDIG override
 
-At least the PHY_MODE_USB_DEVICE case flags were incorrect and result in no BSESSVLD.
-Flags for PHY_MODE_USB_HOST were most likely enough, but the change guarantees a more reliable role switch without VBUS and ID pins.
+Vendor firmware keeps USBPCR stable while switching between device and host
+roles, and only changes USBRDT.IDDIG_REG with USBRDT.IDDIG_EN asserted. Mirror
+that behavior instead of also forcing VBUS/session/OTG-disable flags.
 
 ---
- drivers/phy/ingenic/phy-ingenic-usb.c | 54 +++++++++++++++++++-------
- 1 file changed, 31 insertions(+), 23 deletions(-)
+ drivers/phy/ingenic/phy-ingenic-usb.c | 37 ++++++++++----------------
+ 1 file changed, 14 insertions(+), 23 deletions(-)
 
 diff --git a/drivers/phy/ingenic/phy-ingenic-usb.c b/drivers/phy/ingenic/phy-ingenic-usb.c
-index 670c49fb32ad..e69570e1d3e9 100644
+index 670c49fb32ad..111111111111 100644
 --- a/drivers/phy/ingenic/phy-ingenic-usb.c
 +++ b/drivers/phy/ingenic/phy-ingenic-usb.c
-@@ -181,43 +181,51 @@ static int ingenic_usb_phy_power_off(struct phy *phy)
+@@ -181,43 +181,34 @@ static int ingenic_usb_phy_power_off(struct phy *phy)
  }
  
  static int ingenic_usb_phy_set_mode(struct phy *phy,
@@ -20,9 +21,8 @@ index 670c49fb32ad..e69570e1d3e9 100644
  {
  	struct ingenic_usb_phy *priv = phy_get_drvdata(phy);
 -	u32 reg;
-+	u32 pcr, rdt;
++	u32 rdt;
 +
-+	pcr = readl(priv->base + REG_USBPCR_OFFSET);
 +	rdt = readl(priv->base + REG_USBRDT_OFFSET);
  
  	switch (mode) {
@@ -34,13 +34,8 @@ index 670c49fb32ad..e69570e1d3e9 100644
 -		u32p_replace_bits(&reg, 0, USBPCR_OTG_DISABLE);
 -		writel(reg, priv->base + REG_USBPCR_OFFSET);
 -
-+		u32p_replace_bits(&pcr, 1, USBPCR_USB_MODE);
-+		u32p_replace_bits(&pcr, 1, USBPCR_AVLD_REG);
-+		u32p_replace_bits(&pcr, 1, USBPCR_VBUSVLDEXTSEL);
-+		u32p_replace_bits(&pcr, 0, USBPCR_VBUSVLDEXT);
 +		u32p_replace_bits(&rdt, 1, USBRDT_IDDIG_EN);
 +		u32p_replace_bits(&rdt, 0, USBRDT_IDDIG_REG);
-+		u32p_replace_bits(&pcr, 0, USBPCR_OTG_DISABLE);
  		break;
 -	case PHY_MODE_USB_DEVICE:
 -		reg = readl(priv->base + REG_USBPCR_OFFSET);
@@ -51,13 +46,8 @@ index 670c49fb32ad..e69570e1d3e9 100644
 -		writel(reg, priv->base + REG_USBPCR_OFFSET);
  
 +	case PHY_MODE_USB_DEVICE:
-+		u32p_replace_bits(&pcr, 0, USBPCR_USB_MODE);
-+		u32p_replace_bits(&pcr, 1, USBPCR_VBUSVLDEXTSEL);
-+		u32p_replace_bits(&pcr, 1, USBPCR_VBUSVLDEXT);
 +		u32p_replace_bits(&rdt, 1, USBRDT_IDDIG_EN);
 +		u32p_replace_bits(&rdt, 1, USBRDT_IDDIG_REG);
-+		u32p_replace_bits(&pcr, 0, USBPCR_AVLD_REG);
-+		u32p_replace_bits(&pcr, 1, USBPCR_OTG_DISABLE);
  		break;
 -	case PHY_MODE_USB_OTG:
 -		reg = readl(priv->base + REG_USBPCR_OFFSET);
@@ -68,12 +58,7 @@ index 670c49fb32ad..e69570e1d3e9 100644
 -		writel(reg, priv->base + REG_USBPCR_OFFSET);
  
 +	case PHY_MODE_USB_OTG:
-+		u32p_replace_bits(&pcr, 1, USBPCR_USB_MODE);
-+		u32p_replace_bits(&pcr, 1, USBPCR_VBUSVLDEXTSEL);
-+		u32p_replace_bits(&pcr, 0, USBPCR_VBUSVLDEXT);
 +		u32p_replace_bits(&rdt, 0, USBRDT_IDDIG_EN);
-+		u32p_replace_bits(&pcr, 0, USBPCR_AVLD_REG);
-+		u32p_replace_bits(&pcr, 0, USBPCR_OTG_DISABLE);
  		break;
 +
  	default:
@@ -81,10 +66,7 @@ index 670c49fb32ad..e69570e1d3e9 100644
  	}
  
 +	writel(rdt, priv->base + REG_USBRDT_OFFSET);
-+	writel(pcr, priv->base + REG_USBPCR_OFFSET);
 +
  	return 0;
  }
  
--- 
-2.53.0
