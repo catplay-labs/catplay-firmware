@@ -1,0 +1,331 @@
+Date: Wed, 19 Aug 2026 11:04:21 +0200
+Subject: [PATCH] dmaengine: jz4780: gate controller clock around transfers
+
+Keeping the PDMA provider clock enabled for the lifetime of the driver
+wastes power while no DMA transfer is active.
+
+Prepare the clock once at probe time so atomic submission and IRQ paths
+can use clk_enable() and clk_disable(). Hold one clock reference per active
+channel, keep it across chained and cyclic descriptors, and release it only
+after the final global interrupt acknowledgment has reached the controller.
+Defer termination-path clock release to a worker because terminate_all may
+run in atomic context.
+
+Regression testing included intensive AIC8800D80 and AES accelerator workloads,
+no hangs or other regressions were observed.
+
+The clock status properly flips between the expected N and Y states for short durations
+of the workload.
+---
+ drivers/dma/dma-jz4780.c | 145 ++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 129 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/dma/dma-jz4780.c b/drivers/dma/dma-jz4780.c
+index 707fa38b2..3c2c4269e 100644
+--- a/drivers/dma/dma-jz4780.c
++++ b/drivers/dma/dma-jz4780.c
+@@ -18,6 +18,7 @@
+ #include <linux/of_dma.h>
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
++#include <linux/workqueue.h>
+ 
+ #include "dmaengine.h"
+ #include "virt-dma.h"
+@@ -156,6 +157,8 @@ struct jz4780_dma_chan {
+ 
+ 	struct jz4780_dma_desc *desc;
+ 	unsigned int curr_hwdesc;
++	bool clk_enabled;
++	struct work_struct clk_disable_work;
+ };
+ 
+ struct jz4780_dma_soc_data {
+@@ -247,6 +250,49 @@ static inline void jz4780_dma_chan_disable(struct jz4780_dma_dev *jzdma,
+ 		jz4780_dma_ctrl_writel(jzdma, JZ_DMA_REG_DCKEC, BIT(chn));
+ }
+ 
++static int jz4780_dma_clk_enable(struct jz4780_dma_chan *jzchan)
++{
++	struct jz4780_dma_dev *jzdma = jz4780_dma_chan_parent(jzchan);
++	int ret;
++
++	if (jzchan->clk_enabled)
++		return 0;
++
++	ret = clk_enable(jzdma->clk);
++	if (!ret)
++		jzchan->clk_enabled = true;
++
++	return ret;
++}
++
++static void jz4780_dma_clk_disable(struct jz4780_dma_chan *jzchan)
++{
++	struct jz4780_dma_dev *jzdma = jz4780_dma_chan_parent(jzchan);
++
++	if (!jzchan->clk_enabled)
++		return;
++
++	/* Flush the final channel and interrupt writes before gating PDMA. */
++	jz4780_dma_ctrl_readl(jzdma, jzdma->soc_data->control);
++	jzchan->clk_enabled = false;
++	clk_disable(jzdma->clk);
++}
++
++static void jz4780_dma_clk_disable_work(struct work_struct *work)
++{
++	struct jz4780_dma_chan *jzchan =
++		container_of(work, struct jz4780_dma_chan, clk_disable_work);
++	struct jz4780_dma_dev *jzdma = jz4780_dma_chan_parent(jzchan);
++	unsigned long flags;
++
++	synchronize_irq(jzdma->irq);
++
++	spin_lock_irqsave(&jzchan->vchan.lock, flags);
++	if (!jzchan->desc)
++		jz4780_dma_clk_disable(jzchan);
++	spin_unlock_irqrestore(&jzchan->vchan.lock, flags);
++}
++
+ static struct jz4780_dma_desc *
+ jz4780_dma_desc_alloc(struct jz4780_dma_chan *jzchan, unsigned int count,
+ 		      enum dma_transaction_type type,
+@@ -605,11 +651,18 @@ static void jz4780_dma_issue_pending(struct dma_chan *chan)
+ {
+ 	struct jz4780_dma_chan *jzchan = to_jz4780_dma_chan(chan);
+ 	unsigned long flags;
++	int ret;
+ 
+ 	spin_lock_irqsave(&jzchan->vchan.lock, flags);
+ 
+-	if (vchan_issue_pending(&jzchan->vchan) && !jzchan->desc)
+-		jz4780_dma_begin(jzchan);
++	if (vchan_issue_pending(&jzchan->vchan) && !jzchan->desc) {
++		ret = jz4780_dma_clk_enable(jzchan);
++		if (ret)
++			dev_err_ratelimited(&chan->dev->device,
++					    "failed to enable clock: %d\n", ret);
++		else
++			jz4780_dma_begin(jzchan);
++	}
+ 
+ 	spin_unlock_irqrestore(&jzchan->vchan.lock, flags);
+ }
+@@ -619,23 +672,30 @@ static int jz4780_dma_terminate_all(struct dma_chan *chan)
+ 	struct jz4780_dma_chan *jzchan = to_jz4780_dma_chan(chan);
+ 	struct jz4780_dma_dev *jzdma = jz4780_dma_chan_parent(jzchan);
+ 	unsigned long flags;
++	bool clock_enabled;
+ 	LIST_HEAD(head);
+ 
+ 	spin_lock_irqsave(&jzchan->vchan.lock, flags);
+ 
+-	/* Clear the DMA status and stop the transfer. */
+-	jz4780_dma_chn_writel(jzdma, jzchan->id, JZ_DMA_REG_DCS, 0);
++	clock_enabled = jzchan->clk_enabled;
++	if (clock_enabled) {
++		/* Clear the DMA status and stop the transfer. */
++		jz4780_dma_chn_writel(jzdma, jzchan->id, JZ_DMA_REG_DCS, 0);
++		jz4780_dma_chan_disable(jzdma, jzchan->id);
++	}
++
+ 	if (jzchan->desc) {
+ 		vchan_terminate_vdesc(&jzchan->desc->vdesc);
+ 		jzchan->desc = NULL;
+ 	}
+ 
+-	jz4780_dma_chan_disable(jzdma, jzchan->id);
+-
+ 	vchan_get_all_descriptors(&jzchan->vchan, &head);
+ 
+ 	spin_unlock_irqrestore(&jzchan->vchan.lock, flags);
+ 
++	if (clock_enabled)
++		schedule_work(&jzchan->clk_disable_work);
++
+ 	vchan_dma_desc_free_list(&jzchan->vchan, &head);
+ 	return 0;
+ }
+@@ -643,10 +703,9 @@ static int jz4780_dma_terminate_all(struct dma_chan *chan)
+ static void jz4780_dma_synchronize(struct dma_chan *chan)
+ {
+ 	struct jz4780_dma_chan *jzchan = to_jz4780_dma_chan(chan);
+-	struct jz4780_dma_dev *jzdma = jz4780_dma_chan_parent(jzchan);
+ 
+ 	vchan_synchronize(&jzchan->vchan);
+-	jz4780_dma_chan_disable(jzdma, jzchan->id);
++	flush_work(&jzchan->clk_disable_work);
+ }
+ 
+ static int jz4780_dma_config(struct dma_chan *chan,
+@@ -701,7 +760,7 @@ static enum dma_status jz4780_dma_tx_status(struct dma_chan *chan,
+ 		/* On the issued list, so hasn't been processed yet */
+ 		residue = jz4780_dma_desc_residue(jzchan,
+ 					to_jz4780_dma_desc(vdesc), 0);
+-	} else if (cookie == jzchan->desc->vdesc.tx.cookie) {
++	} else if (jzchan->desc && cookie == jzchan->desc->vdesc.tx.cookie) {
+ 		residue = jz4780_dma_desc_residue(jzchan, jzchan->desc,
+ 					jzchan->curr_hwdesc + 1);
+ 	}
+@@ -717,7 +776,8 @@ static enum dma_status jz4780_dma_tx_status(struct dma_chan *chan,
+ }
+ 
+ static bool jz4780_dma_chan_irq(struct jz4780_dma_dev *jzdma,
+-				struct jz4780_dma_chan *jzchan)
++				struct jz4780_dma_chan *jzchan,
++				bool *idle)
+ {
+ 	const unsigned int soc_flags = jzdma->soc_data->flags;
+ 	struct jz4780_dma_desc *desc = jzchan->desc;
+@@ -768,6 +828,8 @@ static bool jz4780_dma_chan_irq(struct jz4780_dma_dev *jzdma,
+ 			"channel IRQ with no active transfer\n");
+ 	}
+ 
++	*idle = !jzchan->desc;
++
+ 	spin_unlock(&jzchan->vchan.lock);
+ 
+ 	return ack;
+@@ -778,14 +840,19 @@ static irqreturn_t jz4780_dma_irq_handler(int irq, void *data)
+ 	struct jz4780_dma_dev *jzdma = data;
+ 	unsigned int nb_channels = jzdma->soc_data->nb_channels;
+ 	unsigned long pending;
++	unsigned long idle = 0;
+ 	u32 dmac;
+ 	int i;
+ 
+ 	pending = jz4780_dma_ctrl_readl(jzdma, jzdma->soc_data->pending);
+ 
+ 	for_each_set_bit(i, &pending, nb_channels) {
+-		if (jz4780_dma_chan_irq(jzdma, &jzdma->chan[i]))
++		bool chan_idle;
++
++		if (jz4780_dma_chan_irq(jzdma, &jzdma->chan[i], &chan_idle))
+ 			pending &= ~BIT(i);
++		if (chan_idle)
++			idle |= BIT(i);
+ 	}
+ 
+ 	/* Clear halt and address error status of all channels. */
+@@ -796,6 +863,18 @@ static irqreturn_t jz4780_dma_irq_handler(int irq, void *data)
+ 	/* Clear interrupt pending status. */
+ 	jz4780_dma_ctrl_writel(jzdma, jzdma->soc_data->pending, pending);
+ 
++	/* Keep the clock on until all global interrupt handling is complete. */
++	for_each_set_bit(i, &idle, nb_channels) {
++		struct jz4780_dma_chan *jzchan = &jzdma->chan[i];
++
++		spin_lock(&jzchan->vchan.lock);
++		if (!jzchan->desc) {
++			jz4780_dma_chan_disable(jzdma, jzchan->id);
++			jz4780_dma_clk_disable(jzchan);
++		}
++		spin_unlock(&jzchan->vchan.lock);
++	}
++
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -939,13 +1018,23 @@ static int jz4780_dma_probe(struct platform_device *pdev)
+ 		return -EINVAL;
+ 	}
+ 
+-	jzdma->clk = devm_clk_get_enabled(dev, NULL);
++	/*
++	 * Transfer submission and completion can run in atomic context. Prepare
++	 * the clock once so those paths can use clk_enable()/clk_disable().
++	 */
++	jzdma->clk = devm_clk_get_prepared(dev, NULL);
+ 	if (IS_ERR(jzdma->clk)) {
+-		dev_err(dev, "failed to get and enable clock\n");
++		dev_err(dev, "failed to get and prepare clock\n");
+ 		ret = PTR_ERR(jzdma->clk);
+ 		return ret;
+ 	}
+ 
++	ret = clk_enable(jzdma->clk);
++	if (ret) {
++		dev_err(dev, "failed to enable clock: %d\n", ret);
++		return ret;
++	}
++
+ 	/* Property is optional, if it doesn't exist the value will remain 0. */
+ 	of_property_read_u32_index(dev->of_node, "ingenic,reserved-channels",
+ 				   0, &jzdma->chan_reserved);
+@@ -1001,6 +1090,8 @@ static int jz4780_dma_probe(struct platform_device *pdev)
+ 
+ 		vchan_init(&jzchan->vchan, dd);
+ 		jzchan->vchan.desc_free = jz4780_dma_desc_free;
++		INIT_WORK(&jzchan->clk_disable_work,
++			  jz4780_dma_clk_disable_work);
+ 	}
+ 
+ 	/*
+@@ -1013,7 +1104,7 @@ static int jz4780_dma_probe(struct platform_device *pdev)
+ 
+ 	ret = platform_get_irq(pdev, 0);
+ 	if (ret < 0)
+-		return ret;
++		goto err_disable_clock;
+ 
+ 	jzdma->irq = ret;
+ 
+@@ -1021,7 +1112,7 @@ static int jz4780_dma_probe(struct platform_device *pdev)
+ 			  jzdma);
+ 	if (ret) {
+ 		dev_err(dev, "failed to request IRQ %u!\n", jzdma->irq);
+-		return ret;
++		goto err_disable_clock;
+ 	}
+ 
+ 	ret = dmaenginem_async_device_register(dd);
+@@ -1038,11 +1129,17 @@ static int jz4780_dma_probe(struct platform_device *pdev)
+ 		goto err_free_irq;
+ 	}
+ 
++	synchronize_irq(jzdma->irq);
++	jz4780_dma_ctrl_readl(jzdma, soc_data->control);
++	clk_disable(jzdma->clk);
+ 	dev_info(dev, "JZ4780 DMA controller initialised\n");
+ 	return 0;
+ 
+ err_free_irq:
+ 	free_irq(jzdma->irq, jzdma);
++err_disable_clock:
++	jz4780_dma_ctrl_readl(jzdma, soc_data->control);
++	clk_disable(jzdma->clk);
+ 	return ret;
+ }
+ 
+@@ -1053,10 +1150,26 @@ static void jz4780_dma_remove(struct platform_device *pdev)
+ 
+ 	of_dma_controller_free(pdev->dev.of_node);
+ 
++	for (i = 0; i < jzdma->soc_data->nb_channels; i++)
++		cancel_work_sync(&jzdma->chan[i].clk_disable_work);
++
+ 	free_irq(jzdma->irq, jzdma);
+ 
+-	for (i = 0; i < jzdma->soc_data->nb_channels; i++)
++	for (i = 0; i < jzdma->soc_data->nb_channels; i++) {
++		struct jz4780_dma_chan *jzchan = &jzdma->chan[i];
++		unsigned long flags;
++
+ 		tasklet_kill(&jzdma->chan[i].vchan.task);
++
++		spin_lock_irqsave(&jzchan->vchan.lock, flags);
++		if (jzchan->clk_enabled) {
++			jz4780_dma_chn_writel(jzdma, jzchan->id,
++					      JZ_DMA_REG_DCS, 0);
++			jz4780_dma_chan_disable(jzdma, jzchan->id);
++			jz4780_dma_clk_disable(jzchan);
++		}
++		spin_unlock_irqrestore(&jzchan->vchan.lock, flags);
++	}
+ }
+ 
+ static const struct jz4780_dma_soc_data jz4740_dma_soc_data = {
+-- 
+2.55.0
+
