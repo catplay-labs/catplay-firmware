@@ -6,6 +6,7 @@ PACKAGES:remove = "${PN}-testtools ${PN}-obex"
 #SRC_URI:append = " file://0003-no-op-shared-log-macros.patch"
 #SRC_URI:append = " file://0004-no-op-shared-att-verbose.patch"
 SRC_URI:append = " file://0005-storage-use-atomic-no-op-writes.patch"
+SRC_URI:append = " file://0006-tools-hex2hcd-include-libgen-for-basename.patch"
 SRC_URI:append = " file://bluetoothd-logged"
 
 #DEPENDS:remove = "glib-2.0"
