@@ -14,6 +14,7 @@ use crate::{
     dmesg,
     imx::boot::ImxBootUtil,
     modprobe_util::ModprobeUtil,
+    nostd::SmallFd,
     telnet::TelnetServer,
 };
 use heapless::format;
@@ -63,6 +64,7 @@ impl BootUltra {
         let p2p0 = "p2p0";
         let hci0 = "hci0";
 
+        Self::log_release();
         dmesg!("[boot] Boot mode: {target:?}");
 
         // Boot flow
@@ -293,6 +295,21 @@ impl BootUltra {
             } else {
                 dmesg!("[boot] Hostapd seems stable, no need to start recovery")
             }
+        }
+    }
+
+    /// Print /etc/c2a-release (written into the rootfs at build time: firmware tree, kernel
+    /// subset and CatPlay commit) so every dmesg capture says what it was running.
+    fn log_release() {
+        let Ok(fd) = SmallFd::open_readonly("/etc/c2a-release") else {
+            dmesg!("[boot] Release: /etc/c2a-release missing");
+            return;
+        };
+        let mut buf = [0u8; 192];
+        let n = fd.read(&mut buf).unwrap_or(0);
+        match core::str::from_utf8(&buf[..n]) {
+            Ok(text) => dmesg!("[boot] Release: {}", text.trim_end()),
+            Err(_) => dmesg!("[boot] Release: /etc/c2a-release unreadable"),
         }
     }
 

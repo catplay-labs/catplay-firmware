@@ -1,0 +1,43 @@
+Subject: [PATCH] usb: hub: run the hub workqueue at high priority
+Upstream-Status: Pending
+
+With the two previous patches the hub thread is on the port 0.4ms
+after the connect, but under boot load it still took 113ms to assert
+the reset and 212ms from reset to the first descriptor where an idle
+system takes 73ms. The role switch on a NAC Wave 2 happens ~1s after
+boot, alongside the aic8800 firmware upload with its md5 pass, RF
+calibration and the readahead sweep, on one core. The head unit waits
+~200ms from its own pull-up; that attempt was at ~185ms and succeeded
+with the margin of a coin toss.
+
+Enumeration is latency-bound work of a few hundred microseconds per
+step, interleaved with waits. Run hub_wq as a WQ_HIGHPRI workqueue so
+its worker gets the CPU ahead of the bulk work whenever it is
+runnable. No behavioural change beyond scheduling priority.
+
+Optional: the handshake works without it on an idle system; this is
+margin for the loaded case.
+
+---
+ drivers/usb/core/hub.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -6109,7 +6109,15 @@
+ 	 * device was gone before the EHCI controller had handed its port
+ 	 * over to the companion full-speed controller.
+ 	 */
+-	hub_wq = alloc_workqueue("usb_hub_wq", WQ_FREEZABLE, 0);
++	/*
++	 * WQ_HIGHPRI: on a single-core SoC the hub thread competes with
++	 * WiFi firmware upload, RF calibration and readahead right when a
++	 * head unit swaps roles and waits ~200ms for its bus reset. Measured
++	 * on a NAC Wave 2: 113ms from port connect to the reset being
++	 * asserted under boot load, ~10ms when idle. Enumeration is
++	 * latency-bound, not throughput-bound; let it win the CPU.
++	 */
++	hub_wq = alloc_workqueue("usb_hub_wq", WQ_FREEZABLE | WQ_HIGHPRI, 0);
+ 	if (hub_wq)
+ 		return 0;
+ 

@@ -1,0 +1,70 @@
+Subject: [PATCH] dwc2: kick the root-hub status poll on port interrupts
+Upstream-Status: Pending
+
+dwc2 does not set uses_new_polling and never calls
+usb_hcd_poll_rh_status() from its port interrupt, so the root hub's
+status URB is only completed by usbcore's rh_timer, which fires every
+250ms aligned to jiffies/(HZ/4) ("The USB 2.0 spec says 256 ms. This is
+close enough", hcd.c). A port connect is therefore noticed by the hub
+thread with a uniformly random 0-250ms delay.
+
+For a normal plug-in that is fine. For a head unit that has just
+swapped roles into device mode and waits ~200ms for its bus reset it
+is a coin toss, and it shows in captures on a NAC Wave 2: same kernel,
+same head unit, the reset started 122ms after the connect in one boot
+(head unit enumerated) and had not started 250ms after the connect in
+the next (head unit gone).
+
+Do what ehci, ohci and musb do: call usb_hcd_poll_rh_status() when the
+port interrupt fired, after hsotg->lock is released. The root-hub URB
+completes immediately and hub_irq() kicks the hub workqueue.
+
+Car (NAC Wave 2): hub thread on the port 0.4ms after "Port Connect
+Detected".
+
+---
+ drivers/usb/dwc2/hcd_intr.c | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+--- a/drivers/usb/dwc2/hcd_intr.c
++++ b/drivers/usb/dwc2/hcd_intr.c
+@@ -2203,6 +2203,7 @@
+ {
+ 	u32 gintsts, dbg_gintsts;
+ 	irqreturn_t retval = IRQ_HANDLED;
++	bool port_change = false;
+ 
+ 	if (!dwc2_is_controller_alive(hsotg)) {
+ 		dev_warn(hsotg->dev, "Controller is dead\n");
+@@ -2243,8 +2244,10 @@
+ 			dwc2_rx_fifo_level_intr(hsotg);
+ 		if (gintsts & GINTSTS_NPTXFEMP)
+ 			dwc2_np_tx_fifo_empty_intr(hsotg);
+-		if (gintsts & GINTSTS_PRTINT)
++		if (gintsts & GINTSTS_PRTINT) {
+ 			dwc2_port_intr(hsotg);
++			port_change = true;
++		}
+ 		if (gintsts & GINTSTS_HCHINT)
+ 			dwc2_hc_intr(hsotg);
+ 		if (gintsts & GINTSTS_PTXFEMP)
+@@ -2262,5 +2265,19 @@
+ 
+ 	spin_unlock(&hsotg->lock);
+ 
++	/*
++	 * Hand root-hub port changes to usbcore now rather than leaving them
++	 * for its 250ms status poll. Without this, the time from a port
++	 * connect to the hub thread even looking at the port is uniformly
++	 * random between 0 and 250ms, since dwc2 does not use
++	 * usb_hcd_poll_rh_status() the way ehci/ohci/musb do on a port
++	 * change. Cheap at every other HCD, fatal here: a head unit that has
++	 * just swapped roles into device mode waits only ~200ms for the bus
++	 * reset before it gives up. Called outside hsotg->lock: the root-hub
++	 * URB completion runs hub_irq(), which does not re-enter the HCD.
++	 */
++	if (port_change)
++		usb_hcd_poll_rh_status(dwc2_hsotg_to_hcd(hsotg));
++
+ 	return retval;
+ }

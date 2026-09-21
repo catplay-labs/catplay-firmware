@@ -1,4 +1,4 @@
-use crate::{SystemUtil, dmesg};
+use crate::{SystemUtil, boot::udhcpd::UDHCPD_PERSIST_DIR, dmesg};
 use heapless::CString;
 
 pub fn mount_persist(mtdblock_dev: &str, fs_type: &str) -> Result<(), &'static str> {
@@ -28,6 +28,7 @@ pub fn mount_persist_overlays() {
     let _ = SystemUtil::mkdir_if_missing("/persist");
     let _ = SystemUtil::mkdir_if_missing("/persist/c2a_bluetooth");
     let _ = SystemUtil::mkdir_if_missing("/persist/c2a_config");
+    let _ = SystemUtil::mkdir_if_missing(UDHCPD_PERSIST_DIR);
     let _ = SystemUtil::mkdir_if_missing("/var/lib/bluetooth");
     let _ = SystemUtil::mount_bind("/persist/c2a_bluetooth", "/var/lib/bluetooth");
 }

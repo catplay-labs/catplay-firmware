@@ -1,0 +1,73 @@
+Subject: [PATCH] usb: hub: skip the connect debounce on the OTG root port
+Upstream-Status: Pending
+
+hub_port_connect() waits for 100ms of stable connection in 25ms steps
+(hub_port_debounce_be_stable()) before it lets enumeration begin. That
+exists for mechanical contacts. On the OTG root port of a role-switch
+platform the connection is protocol-controlled: the peer switched roles
+at our request and pulled up D+ on a cable that carried traffic a
+moment earlier. Meanwhile the peer is a device waiting for a bus reset
+with a short fuse (~200ms on a Continental NAC Wave 2), and the
+debounce alone eats half of it.
+
+0032 already skips the hub_activate() debounce on this port for the
+same reason; skip the per-connect one too, using the same
+hub_is_b_host_otg_port() test. The port status is re-read once so a
+device that vanished in the meantime is still seen, and
+hub_port_init() handles a disconnect during reset as before.
+
+Car (NAC Wave 2), together with the previous patch: the first role
+switch after boot succeeds, which it never did before.
+
+---
+ drivers/usb/core/hub.c | 33 ++++++++++++++++++++++++---------
+ 1 file changed, 24 insertions(+), 9 deletions(-)
+
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -5427,16 +5427,36 @@
+ 
+ 	if (portchange & (USB_PORT_STAT_C_CONNECTION |
+ 				USB_PORT_STAT_C_ENABLE)) {
+-		status = hub_port_debounce_be_stable(hub, port1);
+-		if (status < 0) {
+-			if (status != -ENODEV &&
+-				port1 != unreliable_port &&
+-				printk_ratelimit())
+-				dev_err(&port_dev->dev, "connect-debounce failed\n");
+-			portstatus &= ~USB_PORT_STAT_CONNECTION;
+-			unreliable_port = port1;
++		if (hub_is_b_host_otg_port(hdev, port1)) {
++			/*
++			 * Protocol-controlled connection on the OTG root port:
++			 * the peer switched roles on our request and pulled up
++			 * D+ on the same cable that was stable a moment ago.
++			 * There is no contact bounce to wait out, and the peer
++			 * is now a device waiting for a bus reset with a short
++			 * fuse. Take the current status and move on; a real
++			 * disconnect is caught by hub_port_init() anyway.
++			 */
++			u16 pc;
++
++			usb_clear_port_feature(hub->hdev, port1,
++					       USB_PORT_FEAT_C_CONNECTION);
++			status = usb_hub_port_status(hub, port1, &portstatus,
++						     &pc);
++			if (status < 0)
++				portstatus &= ~USB_PORT_STAT_CONNECTION;
+ 		} else {
+-			portstatus = status;
++			status = hub_port_debounce_be_stable(hub, port1);
++			if (status < 0) {
++				if (status != -ENODEV &&
++					port1 != unreliable_port &&
++					printk_ratelimit())
++					dev_err(&port_dev->dev, "connect-debounce failed\n");
++				portstatus &= ~USB_PORT_STAT_CONNECTION;
++				unreliable_port = port1;
++			} else {
++				portstatus = status;
++			}
+ 		}
+ 	}
+ 
