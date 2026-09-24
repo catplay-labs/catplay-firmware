@@ -1,1 +1,13 @@
+# Yocto-Build-Verzeichnis (tmp, sstate-cache, downloads, conf/*.conf ...)
 /build/
+
+# Lokaler CatPlay-Checkout (siehe CATPLAY_DIR in build.sh)
+/.sources/
+
+# Logs (bitbake, build.sh, nohup ...)
+*.log
+nohup.out
+
+# Python-Artefakte
+__pycache__/
+*.py[cod]

@@ -31,21 +31,20 @@ and there is a "lookalike" on the market which looks the same, but is not based 
 
 # Flashing CatPlay
 
-Requirements:
-- SSID starts with VehiConn_*
-- you have the newer revision so AX1800M
+## Requirements
+- you have the newer revision (AX1800M)
+- Python 3 is installed (the `python3` command works) - Python 3.14 on Windows works fine too
+- that's it - `exploit.py` checks for the `paramiko`/`pyusb` packages itself and offers to `pip install` them if missing
 
 Note: there are reports that Carlinkit changed their firmware vendor _again_ and newer devices may not use VehiConn firmware.  
 For now these devices are not rootable.  
 If that happens to you try to buy a device from an older batch.  
 
-1. Connect from Linux PC to the hotspot, password is 88888888 or 12345678
-2. Check device IP, usually it's visible as gateway/dns server
-2. Unpack `clk-mini-ultra-nor.zip` software bundle
-3. Run tools/exploit.sh <ip> and wait for the process to finish
+1. Unpack `clk-mini-ultra-nor.zip` software bundle
+2. Run `tools/exploit.py` and wait for the process to finish - it will look for the dongle's Wi-Fi network (usually starting with `VehiConn_` or `AIBox`), offer to connect to it, and figure out the dongle's IP address (default gateway) on its own. Password is 88888888 or 12345678. You can also skip all of that and pass `--ip <address>` directly if you already know it, or `--no-preflight` to disable the assistant entirely.
 
 ```sh
-➜  tools bash exploit.sh 192.168.1.101
+➜  tools python3 exploit.py
 [...]
 [+] USB recovery device detected: a108:eaef
 [+] Parsed uImage(name='Linux-6.12.85', size=3063744, load=0x82f00000, entry=0x82f00000, os=5, arch=5, type=2, comp=0)
@@ -104,11 +103,11 @@ Pass: lovec@ts
 
 Note: these are currently hardcoded, there is a work in progress on a configuration system.  
 Note: if device booted in recovery mode, it will be accessible over USB gadget at 192.168.51.2.  
-Note: to refresh CatPlay firmware swap "ultra_exploit" to "vendor_request" in exploit.sh.  
+Note: if the device already runs CatPlay firmware and you just want to update it, pass `--refresh` to `exploit.py` - this swaps the VehiConn RCE for the USB vendor-request reboot instead.  
 You will to pair your phone again after flashing.  
   
-Note: exploit.sh and Python scripts it calls don't depend on anything Linux-specific.  
-Feel free to test on Windows and OSX and send me feedback, I don't have either of them to test.
+Note: exploit.py and the Python scripts it calls don't depend on anything Linux-specific.  
+Feel free to test on Windows and OSX and send me feedback.
 
 # Capturing logs
 

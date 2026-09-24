@@ -46,9 +46,9 @@ do_compile() {
                 "${O}/${target}"
         done
 
-        bbwarn "Artifacts for ${board}:"
+        bbnote "Artifacts for ${board}:"
         find "${O}" -maxdepth 3 -type f | sort | while IFS= read -r f; do
-            bbwarn "  ${f}"
+            bbnote "  ${f}"
         done
     done
 }

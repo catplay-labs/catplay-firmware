@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-import time
+import datetime
 from pathlib import Path
 
 import uploader
@@ -15,7 +15,13 @@ def parse_args() -> argparse.Namespace:
         "--backup-dir",
         type=Path,
         default=Path("."),
-        help="Directory where backup_<timestamp>.bin will be saved",
+        help="Directory where backup_<label>_<yyyymmdd-hhmmss>.bin will be saved",
+    )
+    p.add_argument(
+        "--firmware-label",
+        default="oem",
+        help="Firmware family currently on the device, used in the pre-flash "
+             "backup's filename (e.g. 'oem' or 'catplay')",
     )
     return p.parse_args()
 
@@ -30,9 +36,9 @@ def run_step(argv: list[str]) -> int:
 
 def main() -> int:
     args = parse_args()
-    timestamp = int(time.time())
+    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     args.backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_path = args.backup_dir / f"backup_{timestamp}.bin"
+    backup_path = args.backup_dir / f"backup_{args.firmware_label}_{timestamp}.bin"
 
     pre_steps: list[list[str]] = [
         ["--host", args.host, "--exec-cmd", "rm -rf /tmp/backup.bin"],
@@ -50,9 +56,6 @@ def main() -> int:
         rc = run_step(step)
         if rc != 0:
             return rc
-
-    if rc != 0:
-        return rc
 
     for step in post_steps:
         rc = run_step(step)

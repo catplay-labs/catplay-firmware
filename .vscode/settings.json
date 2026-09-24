@@ -1,0 +1,90 @@
+{
+  // ---------------------------------------------------------------
+  // Exclude Yocto build artifacts from indexing / watching.
+  // Without this, Pylance and the file watcher hit their limits
+  // (build/tmp/work contains fully unpacked upstream sources).
+  // ---------------------------------------------------------------
+
+  // Pylance / Python analysis: don't index these paths at all
+  "python.analysis.exclude": [
+    "**/build/**",
+    "**/build-*/**",
+    "**/.sources/**",
+    "**/sstate-cache/**",
+    "**/downloads/**",
+    "**/tmp/**",
+    "**/node_modules/**",
+    "**/__pycache__/**",
+    "**/.git/**"
+  ],
+  // Diagnostics only for open files (no workspace-wide scan)
+  "python.analysis.diagnosticMode": "openFilesOnly",
+
+  // File watcher: avoids "Unable to watch for file changes
+  // in this large workspace folder"
+  "files.watcherExclude": {
+    "**/build/**": true,
+    "**/build-*/**": true,
+    "**/.sources/**": true,
+    "**/sstate-cache/**": true,
+    "**/downloads/**": true,
+    "**/tmp/**": true,
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/__pycache__/**": true
+  },
+
+  // Also lighten the load on search (Ctrl+Shift+F) and Quick-Open
+  "search.exclude": {
+    "**/build": true,
+    "**/build-*": true,
+    "**/.sources": true,
+    "**/sstate-cache": true,
+    "**/downloads": true,
+    "**/__pycache__": true
+  },
+  "search.followSymlinks": false,
+
+  // Hide in the Explorer (optional - comment out if you still want
+  // to see build/conf and the logs there)
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true
+  },
+
+  // ---------------------------------------------------------------
+  // C/C++ IntelliSense (Microsoft C++ Tools) - memory optimization
+  // cpptools crashes with SIGKILL (OOM killer) if it indexes
+  // openembedded-core, bitbake, build/. Set limits here.
+  // ---------------------------------------------------------------
+
+  // 1. Switch the IntelliSense engine to the lightweight tag parser
+  //    (instead of full Semantic IntelliSense)
+  "C_Cpp.intellisenseEngine": "tag",
+
+  // 2. Limit the IntelliSense cache (default is unbounded)
+  "C_Cpp.intellisenseEngineMaxCacheSize": 512,
+
+  // 3. Set exclude paths (like Python, but cpptools needs its own list)
+  "C_Cpp.excludedPaths": [
+    "${workspaceFolder}/build",
+    "${workspaceFolder}/build-*",
+    "${workspaceFolder}/.sources",
+    "${workspaceFolder}/bitbake",
+    "${workspaceFolder}/openembedded-core",
+    "${workspaceFolder}/meta-openembedded",
+    "${workspaceFolder}/meta-clang",
+    "${workspaceFolder}/meta-freescale",
+    "${workspaceFolder}/meta-rust",
+    "${workspaceFolder}/meta-lts-mixins-rust",
+    "${workspaceFolder}/.git"
+  ],
+
+  // 4. Project scope limited to catplay-relevant layers only (optional, strict mode)
+  // If you only want to work on meta-catplay + meta-carlinkit + meta-carlinkit-mini:
+  // "C_Cpp.default.browse.path": ["${workspaceFolder}/meta-catplay", ...]
+  // Disabled for now to stay flexible.
+
+  // 5. Reduce error squiggles (only show critical errors)
+  "C_Cpp.errorSquiggles": "enabled"
+}

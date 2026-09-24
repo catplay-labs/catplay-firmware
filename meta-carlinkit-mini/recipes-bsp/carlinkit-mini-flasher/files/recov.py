@@ -33,15 +33,14 @@ from __future__ import annotations
 
 import argparse
 import socket
-import struct
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import usb.core
-import usb.util
+import usb.core  # type: ignore[import-untyped]
+import usb.util  # type: ignore[import-untyped]
 from errors import X1600UsbBootError
 from trampoline import MipsFwArgsLayout, Trampoline
 from uimage import UImage
@@ -233,8 +232,8 @@ class X1600UsbBoot:
             if written <= 0:
                 raise X1600UsbBootError(f"Bulk write failed at offset 0x{sent_total:x}")
 
-            start = sent_total
             sent_total += written
+            # start = sent_total - written
             # print(
             #    f"[USB] ACK 0x{start:08x} -> 0x{sent_total:08x} "
             #    f"(total {sent_total}/{total})"
@@ -276,6 +275,33 @@ class X1600UsbBoot:
             "Device did not return to BootROM within expected time after SPL start"
         )
 
+    def wait_for_device(
+        self,
+        timeout_s: float = 10.0,
+        poll_interval_s: float = 0.2,
+    ) -> None:
+        """Like open(), but polls instead of checking exactly once. There is
+        no guarantee the device has already re-enumerated as the USB boot
+        device by the time a caller triggers a reboot (over the network via
+        the ultra_exploit RCE, or over USB via the vendor_request vendor
+        control transfer) and immediately calls this - a few hundred ms to a
+        few seconds of USB (re-)enumeration delay is normal and open()'s
+        single immediate check made that a real, reproducible failure mode."""
+        deadline = time.monotonic() + timeout_s
+        last_error: X1600UsbBootError | None = None
+        while time.monotonic() < deadline:
+            try:
+                self.open()
+                return
+            except X1600UsbBootError as e:
+                last_error = e
+                time.sleep(poll_interval_s)
+
+        raise X1600UsbBootError(
+            f"USB boot device {self.vid:04x}:{self.pid:04x} did not appear "
+            f"within {timeout_s:.1f}s (last error: {last_error})"
+        )
+
 
 def read_file(path: Path) -> bytes:
     try:
@@ -284,7 +310,7 @@ def read_file(path: Path) -> bytes:
         raise X1600UsbBootError(f"Failed to read {path}: {e}") from e
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="X1600 USB boot loader: SPL -> uImage kernel + initramfs -> jump to kernel"
     )
@@ -364,6 +390,13 @@ def parse_args() -> argparse.Namespace:
         help="How many seconds to wait for SPL to return to BootROM",
     )
     p.add_argument(
+        "--boot-wait-timeout",
+        type=float,
+        default=10.0,
+        help="How many seconds to wait for the USB boot device to appear "
+        "after a reboot-to-recovery trigger, before giving up",
+    )
+    p.add_argument(
         "--verify-gadget-ip",
         type=str,
         default="192.168.51.2",
@@ -375,7 +408,7 @@ def parse_args() -> argparse.Namespace:
         default=20.0,
         help="How many seconds to wait for SSH port on gadget IP",
     )
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def format_ascii(data: bytes) -> str:
@@ -387,7 +420,6 @@ def overlaps(a0: int, a1: int, b0: int, b1: int) -> bool:
 
 
 def initramfs_bootargs(args: str, initramfs_start: int, initramfs_size: int) -> str:
-    initramfs_end = initramfs_start + initramfs_size
     return (
         f"{args} "
         f"rd_start=0x{initramfs_start:08x} "
@@ -404,6 +436,35 @@ def wait_for_ssh_open(host: str, timeout_s: float, port: int = 22) -> bool:
         except OSError:
             time.sleep(0.2)
     return False
+
+
+# The recovery kernel exposes SSH on both its USB-Ethernet gadget interface
+# and its own Wi-Fi hotspot (C2A_AP), at the same fixed IP CatPlay itself
+# uses once fully installed. Live-confirmed this session: the Wi-Fi one can
+# come up and answer even when the USB one hasn't (or never does on this
+# particular machine's USB stack) - checking only the gadget IP made a
+# genuinely successful boot look like a hard failure.
+RECOVERY_WIFI_IP = "192.168.50.2"
+
+
+def wait_for_ssh_open_any(hosts: list[str], timeout_s: float, port: int = 22) -> str | None:
+    """Like wait_for_ssh_open(), but polls multiple candidate hosts within
+    the same time budget and returns whichever one answers first, or None
+    if none do within the deadline."""
+    deadline = time.monotonic() + max(timeout_s, 0.0)
+    seen = []
+    for host in hosts:
+        if host not in seen:
+            seen.append(host)
+    while time.monotonic() <= deadline:
+        for host in seen:
+            try:
+                with socket.create_connection((host, port), timeout=1.0):
+                    return host
+            except OSError:
+                continue
+        time.sleep(0.2)
+    return None
 
 
 def main() -> int:
@@ -498,8 +559,8 @@ def main() -> int:
     boot = X1600UsbBoot()
 
     try:
-        print("[*] Looking for X1600 USB boot device...")
-        boot.open()
+        print(f"[*] Looking for X1600 USB boot device (timeout {args.boot_wait_timeout:.1f}s)...")
+        boot.wait_for_device(timeout_s=args.boot_wait_timeout)
         print("[+] Device found")
 
         cpu_info = boot.get_cpu_info()
@@ -515,7 +576,7 @@ def main() -> int:
         print("[*] Start SPL (VR_PROGRAM_START1)")
         boot.program_start1(layout.spl_entry_addr)
 
-        print("[*] Waiting for SPL to return to BootROM...")
+        print(f"[*] Waiting for SPL to return to BootROM (timeout {args.spl_return_timeout:.1f}s)...")
         boot.wait_for_reenumeration(timeout_s=args.spl_return_timeout)
         print("[+] Device returned to BootROM")
 
@@ -557,28 +618,50 @@ def main() -> int:
         boot.program_start2(args.trampoline_addr)
 
         print("[+] Done, trampoline started and kernel launched")
+        verify_hosts = [args.verify_gadget_ip, RECOVERY_WIFI_IP]
         print(
-            f"[*] Verifying SSH on {args.verify_gadget_ip}:22 "
+            f"[*] Verifying SSH on {' or '.join(verify_hosts)}:22 "
             f"(timeout {args.verify_gadget_timeout:.1f}s)..."
         )
-        if not wait_for_ssh_open(
-            args.verify_gadget_ip,
-            args.verify_gadget_timeout,
-            port=22,
-        ):
+        found_host = wait_for_ssh_open_any(verify_hosts, args.verify_gadget_timeout, port=22)
+        if found_host is None:
             print(
-                f"[!] Timeout waiting for SSH on {args.verify_gadget_ip}:22",
+                f"[!] Timeout waiting for SSH on {' or '.join(verify_hosts)}:22",
                 file=sys.stderr,
             )
             return 3
-        print(f"[+] SSH is open on {args.verify_gadget_ip}:22")
+        print(f"[+] SSH is open on {found_host}:22")
         return 0
 
     except X1600UsbBootError as e:
         print(f"[!] Error: {e}", file=sys.stderr)
         return 1
     except usb.core.USBError as e:
-        print(f"[!] USB error: {e}", file=sys.stderr)
+        # Live-confirmed twice this session: this whole sequence involves
+        # the device re-enumerating multiple times on its own (SPL return
+        # to BootROM, then the kernel launch itself), and a transient I/O
+        # error/"no such device" from a stale device handle at some point
+        # in that process doesn't necessarily mean the boot actually
+        # failed - both times, the recovery kernel had in fact come up
+        # successfully by the time this was reported. Don't just trust the
+        # USB-level signal; check the actual, observable outcome instead.
+        print(f"[!] USB error during boot sequence: {e}", file=sys.stderr)
+        print(
+            "[*] This can happen even on a successful boot (the device "
+            "re-enumerates multiple times during this process) - checking "
+            f"whether the kernel actually came up anyway (timeout "
+            f"{args.verify_gadget_timeout:.1f}s)..."
+        )
+        found_host = wait_for_ssh_open_any(
+            [args.verify_gadget_ip, RECOVERY_WIFI_IP], args.verify_gadget_timeout, port=22
+        )
+        if found_host is not None:
+            print(
+                f"[+] SSH is open on {found_host}:22 - boot succeeded "
+                "despite the USB error above"
+            )
+            return 0
+        print("[!] SSH did not come up either; this looks like a real failure", file=sys.stderr)
         return 2
     finally:
         boot.close()

@@ -16,8 +16,9 @@ import select
 import socket
 import stat
 import sys
+import time
 from pathlib import Path
-from typing import Iterable
+from typing import IO, Iterable
 
 import paramiko
 from cryptography.exceptions import UnsupportedAlgorithm
@@ -100,6 +101,19 @@ def _host_key_sha256(key: paramiko.PKey) -> str:
     return f"SHA256:{digest.rstrip('=')}"
 
 
+def _progress_line(msg: str) -> None:
+    """\r overwrites cleanly in a real terminal, but anything that captures
+    output non-interactively (a pipe, a log file, a tool that isn't a tty)
+    doesn't process \\r as a line reset - each update ends up concatenated
+    onto one giant line instead of being readable at all. Use a plain
+    newline there instead; a real terminal still gets the familiar
+    single-line-updating progress display."""
+    if sys.stdout.isatty():
+        print(f"\r{msg}", end="", flush=True)
+    else:
+        print(msg, flush=True)
+
+
 def _mkdir_p(sftp: paramiko.SFTPClient, remote_dir: str) -> None:
     if not remote_dir or remote_dir == "/":
         return
@@ -109,14 +123,14 @@ def _mkdir_p(sftp: paramiko.SFTPClient, remote_dir: str) -> None:
         cur = f"{cur}/{part}" if cur else part
         try:
             st = sftp.stat(cur)
-            if not stat.S_ISDIR(st.st_mode):
+            if not stat.S_ISDIR(st.st_mode or 0):
                 raise UploadError(f"Remote path exists but is not a directory: {cur}")
         except FileNotFoundError:
             sftp.mkdir(cur)
         except OSError:
             try:
                 st = sftp.stat(cur)
-                if not stat.S_ISDIR(st.st_mode):
+                if not stat.S_ISDIR(st.st_mode or 0):
                     raise UploadError(f"Remote path exists but is not a directory: {cur}")
             except Exception as e:
                 raise UploadError(f"Failed to create remote directory {cur}: {e}") from e
@@ -129,14 +143,27 @@ def _is_remote_dir_hint(remote_path: str) -> bool:
 def _put_file(sftp: paramiko.SFTPClient, local: Path, remote: str) -> None:
     _mkdir_p(sftp, posixpath.dirname(remote))
     total = local.stat().st_size
+    last_print = 0.0
 
     def cb(sent: int, size: int) -> None:
+        nonlocal last_print
         denom = size if size > 0 else total
+        now = time.monotonic()
+        # paramiko calls this on every chunk (32KB by default - 500+ times
+        # for a 16MB firmware image). \r overwrites cleanly in a real
+        # terminal, but anything that captures/logs output non-interactively
+        # (a pipe, a log file, ...) turns every single call into its own
+        # line. Throttle to a few updates a second regardless of chunk
+        # count; always print the final one so completion is still visible.
+        if sent < denom and now - last_print < 0.5:
+            return
+        last_print = now
         pct = (sent / denom * 100.0) if denom else 100.0
-        print(f"\r[upload] {local} -> {remote}  {sent}/{denom} bytes ({pct:5.1f}%)", end="", flush=True)
+        _progress_line(f"[upload] {local} -> {remote}  {sent}/{denom} bytes ({pct:5.1f}%)")
 
     sftp.put(str(local), remote, callback=cb)
-    print()
+    if sys.stdout.isatty():
+        print()
 
 
 def _iter_local_files(source: Path, recursive: bool) -> list[tuple[Path, str]]:
@@ -155,14 +182,23 @@ def _iter_local_files(source: Path, recursive: bool) -> list[tuple[Path, str]]:
 
 def _get_file(sftp: paramiko.SFTPClient, remote: str, local: Path) -> None:
     local.parent.mkdir(parents=True, exist_ok=True)
+    last_print = 0.0
 
     def cb(done: int, total: int) -> None:
+        nonlocal last_print
         denom = total if total > 0 else 1
+        now = time.monotonic()
+        # See the matching comment in _put_file(): throttle regardless of
+        # chunk count, but always show the final (100%) update.
+        if done < denom and now - last_print < 0.5:
+            return
+        last_print = now
         pct = done / denom * 100.0
-        print(f"\r[download] {remote} -> {local}  {done}/{total} bytes ({pct:5.1f}%)", end="", flush=True)
+        _progress_line(f"[download] {remote} -> {local}  {done}/{total} bytes ({pct:5.1f}%)")
 
     sftp.get(remote, str(local), callback=cb)
-    print()
+    if sys.stdout.isatty():
+        print()
 
 
 def _is_remote_dir(sftp: paramiko.SFTPClient, remote_path: str) -> bool:
@@ -184,14 +220,14 @@ def _iter_remote_files(sftp: paramiko.SFTPClient, source: str, recursive: bool) 
         for entry in entries:
             child_remote = f"{cur_remote}/{entry.filename}"
             child_rel = f"{cur_rel}/{entry.filename}" if cur_rel else entry.filename
-            if stat.S_ISDIR(entry.st_mode):
+            if stat.S_ISDIR(entry.st_mode or 0):
                 stack.append((child_remote, child_rel))
-            elif stat.S_ISREG(entry.st_mode):
+            elif stat.S_ISREG(entry.st_mode or 0):
                 out.append((child_remote, child_rel))
     return out
 
 
-def _emit_complete_lines(buf: bytes, data: bytes, stream) -> bytes:
+def _emit_complete_lines(buf: bytes, data: bytes, stream: IO[str]) -> bytes:
     combined = buf + data
     parts = combined.split(b"\n")
     for line in parts[:-1]:
@@ -200,12 +236,14 @@ def _emit_complete_lines(buf: bytes, data: bytes, stream) -> bytes:
     return parts[-1]
 
 
-def _stream_exec(transport: paramiko.Transport, cmd: str) -> int:
+def _stream_exec(transport: paramiko.Transport, cmd: str, *, heartbeat_interval: float = 15.0) -> int:
     chan = transport.open_session()
     chan.exec_command(cmd)
 
     out_buf = b""
     err_buf = b""
+    start = time.monotonic()
+    last_heartbeat = start
     while True:
         select.select([chan], [], [], 0.2)
         if chan.recv_ready():
@@ -215,6 +253,17 @@ def _stream_exec(transport: paramiko.Transport, cmd: str) -> int:
 
         if chan.exit_status_ready() and not chan.recv_ready() and not chan.recv_stderr_ready():
             break
+
+        # This has no overall timeout at all - unbounded by design, since a
+        # real flash/command can legitimately take a long time - but with
+        # no other feedback, a long-but-normal run looks identical to a
+        # genuine hang. Print to stderr specifically so this never mixes
+        # into stdout output that callers may be parsing (e.g.
+        # exploit.py's is_recovery_stub() reading /proc/cmdline).
+        now = time.monotonic()
+        if now - last_heartbeat >= heartbeat_interval:
+            last_heartbeat = now
+            print(f"[*] still running ({now - start:.0f}s elapsed)...", file=sys.stderr, flush=True)
 
     if out_buf:
         sys.stdout.write(out_buf.decode("utf-8", errors="replace"))
@@ -270,6 +319,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if rc == 0 else rc
 
         sftp = paramiko.SFTPClient.from_transport(transport)
+        if sftp is None:
+            raise UploadError("Failed to open SFTP channel")
         try:
             if args.download:
                 local_base = Path(args.path)

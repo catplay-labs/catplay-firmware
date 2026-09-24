@@ -6,7 +6,7 @@ import socket
 import time
 
 import uploader
-import usb.core
+import usb.core  # type: ignore[import-untyped]
 
 USB_VID = 0xA108
 USB_PID = 0xEAEF
@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--verify-timeout",
         type=float,
-        default=5.0,
+        default=45.0,
         help="Timeout in seconds for USB verification",
     )
     p.add_argument(
@@ -134,6 +134,7 @@ def _run_ultra_exploit(early_host: str) -> int:
 
 
 def _verify_usb_device(timeout_s: float, vid: int, pid: int) -> int:
+    print(f"[*] Waiting up to {timeout_s:.1f}s for USB device {vid:04x}:{pid:04x} to appear...")
     deadline = time.monotonic() + max(timeout_s, 0.0)
     while time.monotonic() <= deadline:
         dev = usb.core.find(idVendor=vid, idProduct=pid)
@@ -152,39 +153,74 @@ def _run_vendor_request(
     vendor_vid: int,
     vendor_pid: int,
     timeout_ms: int = 1000,
+    *,
+    attempts: int = 5,
+    retry_delay: float = 2.0,
 ) -> int:
-    dev = usb.core.find(idVendor=vendor_vid, idProduct=vendor_pid)
-    if dev is None:
-        print(
-            f"[!] vendor_request failed: USB device {vendor_vid:04x}:{vendor_pid:04x} not found"
-        )
-        return 1
+    last_error: usb.core.USBError | None = None
+    for attempt in range(attempts):
+        dev = usb.core.find(idVendor=vendor_vid, idProduct=vendor_pid)
+        if dev is None:
+            print(
+                f"[!] vendor_request failed: USB device {vendor_vid:04x}:{vendor_pid:04x} not found"
+            )
+            return 1
 
-    try:
-        dev.ctrl_transfer(
-            USB_VENDOR_REQ_TYPE,
-            USB_VENDOR_REQ_CODE,
-            wValue=USB_VENDOR_REQ_WVALUE,
-            wIndex=USB_VENDOR_REQ_WINDEX,
-            data_or_wLength=None,
-            timeout=timeout_ms,
-        )
-        print(
-            f"[+] vendor_request sent: bmReq=0x{USB_VENDOR_REQ_TYPE:02x} "
-            f"bReq=0x{USB_VENDOR_REQ_CODE:02x} wValue=0x{USB_VENDOR_REQ_WVALUE:04x} "
-            f"wIndex=0x{USB_VENDOR_REQ_WINDEX:04x} to {vendor_vid:04x}:{vendor_pid:04x}"
-        )
-        return 0
-    except usb.core.USBError as e:
-        print(f"[!] vendor_request failed: {e}")
-        return 1
+        try:
+            dev.ctrl_transfer(
+                USB_VENDOR_REQ_TYPE,
+                USB_VENDOR_REQ_CODE,
+                wValue=USB_VENDOR_REQ_WVALUE,
+                wIndex=USB_VENDOR_REQ_WINDEX,
+                data_or_wLength=None,
+                timeout=timeout_ms,
+            )
+            print(
+                f"[+] vendor_request sent: bmReq=0x{USB_VENDOR_REQ_TYPE:02x} "
+                f"bReq=0x{USB_VENDOR_REQ_CODE:02x} wValue=0x{USB_VENDOR_REQ_WVALUE:04x} "
+                f"wIndex=0x{USB_VENDOR_REQ_WINDEX:04x} to {vendor_vid:04x}:{vendor_pid:04x}"
+            )
+            return 0
+        except usb.core.USBError as e:
+            if e.errno == 5:
+                # Live-confirmed multiple times this session: the device
+                # often drops off the bus mid-response because this vendor
+                # request itself triggers an immediate reboot - an I/O
+                # error here is the expected signature of success, not a
+                # real failure. Report it as such and let the caller's
+                # actual USB-device verification step (run unconditionally
+                # afterwards) be the real judge, rather than aborting the
+                # whole flow right here.
+                print(
+                    f"[+] vendor_request sent (device dropped off mid-response while "
+                    f"rebooting - expected): {e}"
+                )
+                return 0
+            if e.errno == 32 and attempt < attempts - 1:
+                # Live-confirmed: a STALL (pipe error) here doesn't always
+                # mean the device rejects this request outright - retrying
+                # a couple of seconds later succeeded with no other change,
+                # suggesting the gadget's handler for it just isn't
+                # registered/ready yet right after a fresh enumeration.
+                print(
+                    f"[!] vendor_request stalled (device may not be ready yet), "
+                    f"retrying in {retry_delay:.1f}s..."
+                )
+                last_error = e
+                time.sleep(retry_delay)
+                continue
+            print(f"[!] vendor_request failed: {e}")
+            return 1
+
+    print(f"[!] vendor_request failed after {attempts} attempts: {last_error}")
+    return 1
 
 
 def run_reboot_to_recovery(
     mode: str,
     early_host: str | None,
     verify: bool = True,
-    verify_timeout: float = 5.0,
+    verify_timeout: float = 45.0,
     vid: int = USB_VID,
     pid: int = USB_PID,
     vendor_vid: int = USB_VENDOR_REQ_VID,
@@ -200,8 +236,10 @@ def run_reboot_to_recovery(
         return 2
 
     if mode == "ultra_exploit":
+        assert early_host is not None
         rc = _run_ultra_exploit(early_host)
     elif mode == "modern":
+        assert early_host is not None
         rc = _run_step([
             "--host", early_host,
             "--exec-cmd",
