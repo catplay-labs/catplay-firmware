@@ -1,0 +1,340 @@
+Subject: [PATCH] crypto: ingenic: chain prepared CTR DMA from IRQ
+Upstream-Status: Pending
+
+diff --git a/crypto/ingenic-aes.c b/crypto/ingenic-aes.c
+--- a/crypto/ingenic-aes.c
++++ b/crypto/ingenic-aes.c
+@@ -26,6 +26,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/scatterlist.h>
+ #include <linux/slab.h>
++#include <linux/spinlock.h>
+ #include <linux/unaligned.h>
+ 
+ #define INGENIC_AES_BUF_SIZE		(16 * 1024)
+@@ -72,6 +73,12 @@
+ #define INGENIC_AES_ENCRYPT		0
+ #define INGENIC_AES_DECRYPT_HW		1
+ 
++struct ingenic_aes_dma_pending {
++	bool valid;
++	unsigned int slot;
++	unsigned int len;
++};
++
+ struct ingenic_aes_dev {
+ 	struct device *dev;
+ 	void __iomem *base;
+@@ -82,6 +89,11 @@
+ 	int irq;
+ 	struct mutex lock;
+ 	struct completion done;
++	spinlock_t dma_state_lock;
++	struct ingenic_aes_dma_pending dma_pending;
++	u64 ctr_dma_start_ns[INGENIC_AES_DMA_SLOTS];
++	u64 ctr_profile_fast_path;
++	u64 ctr_profile_slow_path;
+ 	u32 irq_status;
+ 	u8 *buf_in[INGENIC_AES_DMA_SLOTS];
+ 	u8 *buf_out[INGENIC_AES_DMA_SLOTS];
+@@ -400,6 +412,160 @@
+ 					  aes->dma_out[slot], len);
+ }
+ 
++static int ingenic_aes_dma_prepare_pending(struct ingenic_aes_dev *aes,
++					   unsigned int slot,
++					   unsigned int len)
++{
++	unsigned long flags;
++	int err = 0;
++
++	if (WARN_ON_ONCE(slot >= INGENIC_AES_DMA_SLOTS))
++		return -EINVAL;
++	if (WARN_ON_ONCE(!len || (len & (AES_BLOCK_SIZE - 1)) ||
++			 len > INGENIC_AES_BUF_SIZE))
++		return -EINVAL;
++
++	/*
++	 * Do all cache ownership transitions before publishing the slot to IRQ.
++	 */
++	dma_wmb();
++	ingenic_aes_sync_input_for_device(aes, slot, len);
++	ingenic_aes_sync_output_for_device(aes, slot, len);
++
++	spin_lock_irqsave(&aes->dma_state_lock, flags);
++	if (WARN_ON_ONCE(aes->dma_pending.valid)) {
++		err = -EBUSY;
++	} else {
++		aes->dma_pending.slot = slot;
++		aes->dma_pending.len = len;
++		aes->dma_pending.valid = true;
++	}
++	spin_unlock_irqrestore(&aes->dma_state_lock, flags);
++
++	return err;
++}
++
++/*
++ * Start a pending CTR DMA using the same hardware programming sequence as
++ * ingenic_aes_dma_start_addr(), except that the buffer has already been
++ * DMA-synchronised and the previous completion must not be reinitialised.
++ *
++ * dma_state_lock must be held.
++ */
++static int ingenic_aes_dma_start_pending_locked(struct ingenic_aes_dev *aes,
++						unsigned int slot,
++						unsigned int len)
++{
++	u32 ctrl, status;
++	unsigned int blocks = len / AES_BLOCK_SIZE;
++
++	/* 1. Mask AES interrupts first. */
++	ingenic_aes_write(aes, AES_ASINTM, 0);
++	ingenic_aes_read(aes, AES_ASINTM);
++
++	/* 2. Disarm DMA before touching address/count registers. */
++	ctrl = ingenic_aes_read(aes, AES_ASCR);
++	ctrl &= ~(ASCR_DMAS | ASCR_DMAE);
++	ingenic_aes_write(aes, AES_ASCR, ctrl);
++	ingenic_aes_read(aes, AES_ASCR);
++
++	/* 3. Clear sticky completion state from the previous DMA. */
++	ingenic_aes_write(aes, AES_ASSR,
++			  AES_STATUS_DMA_DONE | AES_STATUS_KEY_DONE);
++	ingenic_aes_read(aes, AES_ASSR);
++
++	status = ingenic_aes_read(aes, AES_ASSR);
++	(void)status;
++
++	/* 4. Program the already prepared slot. */
++	ingenic_aes_write(aes, AES_ASSA, aes->dma_in[slot]);
++	ingenic_aes_write(aes, AES_ASDA, aes->dma_out[slot]);
++	ingenic_aes_write(aes, AES_ASTC, blocks);
++
++	dma_wmb();
++
++	/*
++	 * 5. Do NOT reinit completion or clear irq_status here: the completion
++	 * which the IRQ is about to signal belongs to the DMA that just ended.
++	 */
++
++	/* 6. Repeat the defensive status clear from the normal start path. */
++	ingenic_aes_write(aes, AES_ASSR,
++			  AES_STATUS_DMA_DONE | AES_STATUS_KEY_DONE);
++	ingenic_aes_read(aes, AES_ASSR);
++
++	/* 7. Unmask DMA_DONE. */
++	ingenic_aes_write(aes, AES_ASINTM, AES_STATUS_DMA_DONE);
++	ingenic_aes_read(aes, AES_ASINTM);
++
++	/* 8. Start DMA. */
++	ctrl = ingenic_aes_read(aes, AES_ASCR);
++	ctrl |= ASCR_EN | ASCR_DMAE | ASCR_DMAS;
++	ingenic_aes_write(aes, AES_ASCR, ctrl);
++	ingenic_aes_read(aes, AES_ASCR);
++
++	aes->ctr_dma_start_ns[slot] = ktime_get_ns();
++
++	return 0;
++}
++
++static bool ingenic_aes_dma_start_pending(struct ingenic_aes_dev *aes,
++					  bool fast_path)
++{
++	unsigned long flags;
++	unsigned int slot;
++	unsigned int len;
++	bool started = false;
++
++	spin_lock_irqsave(&aes->dma_state_lock, flags);
++	if (aes->dma_pending.valid) {
++		slot = aes->dma_pending.slot;
++		len = aes->dma_pending.len;
++		aes->dma_pending.valid = false;
++		ingenic_aes_dma_start_pending_locked(aes, slot, len);
++		started = true;
++	}
++	spin_unlock_irqrestore(&aes->dma_state_lock, flags);
++
++	if (started) {
++		if (fast_path)
++			aes->ctr_profile_fast_path++;
++		else
++			aes->ctr_profile_slow_path++;
++	}
++
++	return started;
++}
++
++static void ingenic_aes_dma_cancel_pending(struct ingenic_aes_dev *aes)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&aes->dma_state_lock, flags);
++	aes->dma_pending.valid = false;
++	spin_unlock_irqrestore(&aes->dma_state_lock, flags);
++}
++
++/*
++ * CTR chaining wait: unlike the normal wait helper, do not mask DMA_DONE
++ * after wakeup because IRQ may already have started the next transfer.
++ */
++static int ingenic_aes_ctr_dma_wait(struct ingenic_aes_dev *aes)
++{
++	unsigned long timeout;
++
++	timeout = wait_for_completion_timeout(&aes->done,
++			msecs_to_jiffies(INGENIC_AES_TIMEOUT_MS));
++	if (!timeout) {
++		ingenic_aes_write(aes, AES_ASINTM, 0);
++		ingenic_aes_dump_regs(aes, "CTR DMA timeout");
++		return -ETIMEDOUT;
++	}
++
++	dma_rmb();
++	return 0;
++}
++
+ static int ingenic_aes_dma_wait(struct ingenic_aes_dev *aes)
+ {
+ 	unsigned long timeout;
+@@ -854,18 +1020,22 @@
+ 	if (++aes->ctr_profile_chunks >= INGENIC_AES_CTR_PROFILE_CHUNKS) {
+ 		if (profile) {
+ 			dev_info(aes->dev,
+-				 "CTR profile chunks=%u bytes=%llu fill=%lluns dma=%lluns xor=%lluns\n",
++				 "CTR profile chunks=%u bytes=%llu fill=%lluns dma=%lluns xor=%lluns fast=%llu slow=%llu\n",
+ 				 aes->ctr_profile_chunks,
+ 				 (unsigned long long)aes->ctr_profile_bytes,
+ 				 (unsigned long long)aes->ctr_profile_fill_ns,
+ 				 (unsigned long long)aes->ctr_profile_dma_ns,
+-				 (unsigned long long)aes->ctr_profile_xor_ns);
++				 (unsigned long long)aes->ctr_profile_xor_ns,
++				 (unsigned long long)aes->ctr_profile_fast_path,
++				 (unsigned long long)aes->ctr_profile_slow_path);
+ 		}
+ 
+ 		aes->ctr_profile_fill_ns = 0;
+ 		aes->ctr_profile_dma_ns = 0;
+ 		aes->ctr_profile_xor_ns = 0;
+ 		aes->ctr_profile_bytes = 0;
++		aes->ctr_profile_fast_path = 0;
++		aes->ctr_profile_slow_path = 0;
+ 		aes->ctr_profile_chunks = 0;
+ 	}
+ }
+@@ -880,7 +1050,6 @@
+ 		unsigned int chunk;
+ 		unsigned int keystream_len;
+ 		u64 fill_ns;
+-		u64 dma_start_ns;
+ 	} slot[INGENIC_AES_DMA_SLOTS];
+ 	unsigned int next_offset = 0;
+ 	unsigned int cur = 0;
+@@ -924,6 +1093,8 @@
+ 		goto out_stop;
+ 	}
+ 
++	ingenic_aes_dma_cancel_pending(aes);
++
+ 	slot[cur].offset = next_offset;
+ 	slot[cur].chunk = min_t(unsigned int, req->cryptlen - next_offset,
+ 				INGENIC_AES_BUF_SIZE);
+@@ -942,7 +1113,7 @@
+ 	if (err)
+ 		goto out_stop;
+ 
+-	slot[cur].dma_start_ns = ktime_get_ns();
++	aes->ctr_dma_start_ns[cur] = ktime_get_ns();
+ 	next_offset += slot[cur].chunk;
+ 
+ 	for (;;) {
+@@ -951,7 +1122,6 @@
+ 		u64 dma_done_ns;
+ 		u64 xor_start_ns;
+ 		u64 xor_ns;
+-		int start_err = 0;
+ 
+ 		if (next_offset < req->cryptlen) {
+ 			u64 t0;
+@@ -970,12 +1140,22 @@
+ 							    req->iv,
+ 							    slot[next].keystream_len);
+ 			slot[next].fill_ns = ktime_get_ns() - t0;
+-			dma_wmb();
++			err = ingenic_aes_dma_prepare_pending(
++				aes, next, slot[next].keystream_len);
++			if (err) {
++				dev_err(aes->dev,
++					"failed to arm CTR DMA slot=%u len=%u: %d\n",
++					next, slot[next].keystream_len, err);
++				break;
++			}
+ 			next_offset += slot[next].chunk;
+ 			next_ready = true;
+ 		}
+ 
+-		err = ingenic_aes_dma_wait(aes);
++		if (next_ready)
++			err = ingenic_aes_ctr_dma_wait(aes);
++		else
++			err = ingenic_aes_dma_wait(aes);
+ 		dma_done_ns = ktime_get_ns();
+ 		if (err) {
+ 			dev_err(aes->dev,
+@@ -985,14 +1165,8 @@
+ 			break;
+ 		}
+ 
+-		if (next_ready) {
+-			start_err = ingenic_aes_dma_start(aes, next,
+-							 slot[next].keystream_len);
+-			if (start_err)
+-				next_ready = false;
+-			else
+-				slot[next].dma_start_ns = ktime_get_ns();
+-		}
++		if (next_ready)
++			ingenic_aes_dma_start_pending(aes, false);
+ 
+ 		ingenic_aes_sync_output_for_cpu(aes, cur,
+ 						slot[cur].keystream_len);
+@@ -1009,12 +1183,10 @@
+ 		}
+ 
+ 		ingenic_aes_ctr_profile_add(aes, slot[cur].fill_ns,
+-					    dma_done_ns - slot[cur].dma_start_ns,
++					    dma_done_ns -
++					    aes->ctr_dma_start_ns[cur],
+ 					    xor_ns, slot[cur].chunk);
+ 
+-		if (start_err)
+-			err = start_err;
+-
+ 		if (err || !next_ready)
+ 			break;
+ 
+@@ -1022,6 +1194,7 @@
+ 	}
+ 
+ out_stop:
++	ingenic_aes_dma_cancel_pending(aes);
+ 	ingenic_aes_stop(aes);
+ #if 1
+ 	clk_disable_unprepare(aes->clk_pdma);
+@@ -1149,6 +1322,8 @@
+ 			  AES_STATUS_DMA_DONE | AES_STATUS_KEY_DONE);
+ 	ingenic_aes_read(aes, AES_ASSR);
+ 
++	ingenic_aes_dma_start_pending(aes, true);
++
+ 	aes->irq_status |= AES_STATUS_DMA_DONE;
+ 	dev_dbg(aes->dev,
+ 		"IRQ %d handled: raw_status=%08x mask=%08x handled=%08x\n",
+@@ -1231,5 +1406,6 @@
+ 	}
+ 
+ 	mutex_init(&aes->lock);
++	spin_lock_init(&aes->dma_state_lock);
+ 	init_completion(&aes->done);
+ 	platform_set_drvdata(pdev, aes);

@@ -1,0 +1,449 @@
+Subject: [PATCH] crypto: af_alg: add skcipher keystream-only operation
+Upstream-Status: Pending
+
+Add an explicit keystream-only operation for skcipher algorithms.
+
+Userspace selects ALG_OP_KEYSTREAM_ONLY and supplies only an IV. recv()
+then uses the size of the destination buffer as the requested keystream
+length, without requiring a TX buffer filled with zeroes.
+
+The kernel skcipher API exposes an optional generate_keystream callback.
+Algorithms which do not implement it return -EOPNOTSUPP.
+
+Implement the callback for ctr-aes-ingenic. The implementation reuses the
+existing counter generation, DMA ping-pong, and IRQ chaining added by the
+CTR fast-path patch, but copies raw AES-ECB(counter) output directly to the
+destination instead of XORing it with source data.
+
+Keystream-only requests must be a multiple of the algorithm chunksize.
+For CTR-AES this is 16 bytes, avoiding implicit loss of a partial counter
+block between requests.
+
+diff --git a/include/uapi/linux/if_alg.h b/include/uapi/linux/if_alg.h
+--- a/include/uapi/linux/if_alg.h
++++ b/include/uapi/linux/if_alg.h
+@@ -57,6 +57,7 @@
+ /* Operations */
+ #define ALG_OP_DECRYPT			0
+ #define ALG_OP_ENCRYPT			1
++#define ALG_OP_KEYSTREAM_ONLY		2
+
+ #endif	/* _LINUX_IF_ALG_H */
+
+diff --git a/include/crypto/if_alg.h b/include/crypto/if_alg.h
+--- a/include/crypto/if_alg.h
++++ b/include/crypto/if_alg.h
+@@ -154,7 +154,8 @@
+ 	bool		more:1,
+ 			merge:1,
+ 			enc:1,
+ 			write:1,
++			keystream:1,
+ 			init:1;
+ 
+ 	unsigned int len;
+@@ -234,7 +235,7 @@
+ void af_alg_wmem_wakeup(struct sock *sk);
+ int af_alg_wait_for_data(struct sock *sk, unsigned flags, unsigned min);
+ int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
+-		   unsigned int ivsize);
++		   unsigned int ivsize, bool allow_keystream);
+ void af_alg_free_resources(struct af_alg_async_req *areq);
+ void af_alg_async_cb(void *data, int err);
+ __poll_t af_alg_poll(struct file *file, struct socket *sock,
+diff --git a/crypto/af_alg.c b/crypto/af_alg.c
+--- a/crypto/af_alg.c
++++ b/crypto/af_alg.c
+@@ -936,7 +936,7 @@
+  * Return: the number of copied data upon success, < 0 upon error
+  */
+ int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
+-		   unsigned int ivsize)
++		   unsigned int ivsize, bool allow_keystream)
+ {
+ 	struct sock *sk = sock->sk;
+ 	struct alg_sock *ask = alg_sk(sk);
+@@ -945,6 +945,7 @@
+ 	struct af_alg_control con = {};
+ 	long copied = 0;
+ 	bool enc = false;
++	bool keystream = false;
+ 	bool init = false;
+ 	int err = 0;
+
+@@ -961,6 +962,11 @@
+ 		case ALG_OP_DECRYPT:
+ 			enc = false;
+ 			break;
++		case ALG_OP_KEYSTREAM_ONLY:
++			if (!allow_keystream)
++				return -EINVAL;
++			keystream = true;
++			break;
+ 		default:
+ 			return -EINVAL;
+ 		}
+@@ -976,14 +982,16 @@
+ 			goto unlock;
+ 		}
+
+-		pr_info_once(
+-			"%s sent an empty control message without MSG_MORE.\n",
+-			current->comm);
++		if (!keystream)
++			pr_info_once(
++				"%s sent an empty control message without MSG_MORE.\n",
++				current->comm);
+ 	}
+ 	ctx->init = true;
+
+ 	if (init) {
+ 		ctx->enc = enc;
++		ctx->keystream = keystream;
+ 		if (con.iv)
+ 			memcpy(ctx->iv, con.iv->iv, ivsize);
+
+diff --git a/crypto/algif_aead.c b/crypto/algif_aead.c
+--- a/crypto/algif_aead.c
++++ b/crypto/algif_aead.c
+@@ -68,7 +68,7 @@
+ 	struct crypto_aead *tfm = aeadc->aead;
+ 	unsigned int ivsize = crypto_aead_ivsize(tfm);
+
+-	return af_alg_sendmsg(sock, msg, size, ivsize);
++	return af_alg_sendmsg(sock, msg, size, ivsize, false);
+ }
+
+ static int crypto_aead_copy_sgl(struct crypto_sync_skcipher *null_tfm,
+diff --git a/include/crypto/skcipher.h b/include/crypto/skcipher.h
+--- a/include/crypto/skcipher.h
++++ b/include/crypto/skcipher.h
+@@ -118,5 +118,10 @@
+  * @decrypt: Decrypt a single block. This is a reverse counterpart to @encrypt
+  *	     and the conditions are exactly the same.
++ * @generate_keystream: Generate raw cipher keystream into @req->dst without
++ *	     consuming @req->src. This operation is optional. Algorithms which
++ *	     do not implement it return -EOPNOTSUPP through
++ *	     crypto_skcipher_generate_keystream().
++ *
+  * @export: Export partial state of the transformation. This function dumps the
+  *	    entire state of the ongoing transformation into a provided block of
+  *	    data so it can be @import 'ed back later on. This is useful in case
+@@ -153,6 +158,7 @@
+ 	              unsigned int keylen);
+ 	int (*encrypt)(struct skcipher_request *req);
+ 	int (*decrypt)(struct skcipher_request *req);
++	int (*generate_keystream)(struct skcipher_request *req);
+ 	int (*export)(struct skcipher_request *req, void *out);
+ 	int (*import)(struct skcipher_request *req, const void *in);
+ 	int (*init)(struct crypto_skcipher *tfm);
+@@ -176,6 +182,7 @@
+  * @co: see struct skcipher_alg_common
+  *
+- * All fields except @ivsize are mandatory and must be filled.
++ * All fields except @ivsize and @generate_keystream are mandatory and must
++ * be filled.
+  */
+ struct skcipher_alg {
+ 	int (*setkey)(struct crypto_skcipher *tfm, const u8 *key,
+@@ -706,6 +713,18 @@
+ int crypto_skcipher_decrypt(struct skcipher_request *req);
+
+ /**
++ * crypto_skcipher_generate_keystream() - generate cipher keystream
++ * @req: skcipher request describing destination, length, and IV
++ *
++ * Generate raw keystream into @req->dst without consuming source data.
++ * Only algorithms which explicitly implement this operation support it.
++ *
++ * Return: 0 on success; -EOPNOTSUPP when unsupported; another < 0 error
++ * otherwise.
++ */
++int crypto_skcipher_generate_keystream(struct skcipher_request *req);
++
++/**
+  * crypto_skcipher_export() - export partial state
+  * @req: reference to the skcipher_request handle that holds all information
+  *	 needed to perform the operation
+diff --git a/crypto/skcipher.c b/crypto/skcipher.c
+--- a/crypto/skcipher.c
++++ b/crypto/skcipher.c
+@@ -657,6 +657,20 @@
+ }
+ EXPORT_SYMBOL_GPL(crypto_skcipher_decrypt);
+
++int crypto_skcipher_generate_keystream(struct skcipher_request *req)
++{
++	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
++	struct skcipher_alg *alg = crypto_skcipher_alg(tfm);
++
++	if (crypto_skcipher_get_flags(tfm) & CRYPTO_TFM_NEED_KEY)
++		return -ENOKEY;
++	if (alg->co.base.cra_type != &crypto_skcipher_type ||
++	    !alg->generate_keystream)
++		return -EOPNOTSUPP;
++	return alg->generate_keystream(req);
++}
++EXPORT_SYMBOL_GPL(crypto_skcipher_generate_keystream);
++
+ static int crypto_lskcipher_export(struct skcipher_request *req, void *out)
+ {
+ 	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
+diff --git a/crypto/algif_skcipher.c b/crypto/algif_skcipher.c
+--- a/crypto/algif_skcipher.c
++++ b/crypto/algif_skcipher.c
+@@ -44,7 +44,7 @@
+ 	struct crypto_skcipher *tfm = pask->private;
+ 	unsigned ivsize = crypto_skcipher_ivsize(tfm);
+
+-	return af_alg_sendmsg(sock, msg, size, ivsize);
++	return af_alg_sendmsg(sock, msg, size, ivsize, true);
+ }
+
+ static int algif_skcipher_export(struct sock *sk, struct skcipher_request *req)
+@@ -93,6 +93,72 @@
+ 	af_alg_async_cb(data, err);
+ }
+
++static int _skcipher_recvmsg_keystream(struct socket *sock,
++					struct msghdr *msg, int flags)
++{
++	struct sock *sk = sock->sk;
++	struct alg_sock *ask = alg_sk(sk);
++	struct sock *psk = ask->parent;
++	struct alg_sock *pask = alg_sk(psk);
++	struct af_alg_ctx *ctx = ask->private;
++	struct crypto_skcipher *tfm = pask->private;
++	unsigned int bs = crypto_skcipher_chunksize(tfm);
++	struct af_alg_async_req *areq;
++	size_t maxsize = msg_data_left(msg);
++	size_t len = 0;
++	int err;
++
++	if (!ctx->init || ctx->more || ctx->used || ctx->state)
++		return -EINVAL;
++	if (!maxsize)
++		return 0;
++
++	areq = af_alg_alloc_areq(sk, sizeof(struct af_alg_async_req) +
++				     crypto_skcipher_reqsize(tfm));
++	if (IS_ERR(areq))
++		return PTR_ERR(areq);
++
++	err = af_alg_get_rsgl(sk, msg, flags, areq, maxsize, &len);
++	if (err)
++		goto free;
++	if (!len || len % bs) {
++		err = -EINVAL;
++		goto free;
++	}
++
++	skcipher_request_set_tfm(&areq->cra_u.skcipher_req, tfm);
++	skcipher_request_set_crypt(&areq->cra_u.skcipher_req, NULL,
++				   areq->first_rsgl.sgl.sgt.sgl, len, ctx->iv);
++
++	if (msg->msg_iocb && !is_sync_kiocb(msg->msg_iocb)) {
++		sock_hold(sk);
++		areq->iocb = msg->msg_iocb;
++		areq->outlen = len;
++
++		skcipher_request_set_callback(&areq->cra_u.skcipher_req,
++					      CRYPTO_TFM_REQ_MAY_SLEEP,
++					      algif_skcipher_done, areq);
++		err = crypto_skcipher_generate_keystream(
++			&areq->cra_u.skcipher_req);
++		if (err == -EINPROGRESS)
++			return -EIOCBQUEUED;
++
++		sock_put(sk);
++	} else {
++		skcipher_request_set_callback(&areq->cra_u.skcipher_req,
++					      CRYPTO_TFM_REQ_MAY_SLEEP |
++					      CRYPTO_TFM_REQ_MAY_BACKLOG,
++					      crypto_req_done, &ctx->wait);
++		err = crypto_wait_req(crypto_skcipher_generate_keystream(
++					&areq->cra_u.skcipher_req),
++				      &ctx->wait);
++	}
++
++free:
++	af_alg_free_resources(areq);
++	return err ? err : len;
++}
++
+ static int _skcipher_recvmsg(struct socket *sock, struct msghdr *msg,
+ 			     size_t ignored, int flags)
+ {
+@@ -108,6 +174,9 @@
+ 	int err = 0;
+ 	size_t len = 0;
+
++	if (ctx->keystream)
++		return _skcipher_recvmsg_keystream(sock, msg, flags);
++
+ 	if (!ctx->init || (ctx->more && ctx->used < bs)) {
+ 		err = af_alg_wait_for_data(sk, flags, bs);
+ 		if (err)
+diff --git a/crypto/ingenic-aes.c b/crypto/ingenic-aes.c
+--- a/crypto/ingenic-aes.c
++++ b/crypto/ingenic-aes.c
+@@ -1207,6 +1207,151 @@
+ 	return err;
+ }
+
++static int ingenic_aes_ctr_generate_keystream(struct skcipher_request *req)
++{
++	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
++	struct ingenic_aes_ctx *ctx = crypto_skcipher_ctx(tfm);
++	struct ingenic_aes_dev *aes = ctx->aes;
++	struct {
++		unsigned int offset;
++		unsigned int chunk;
++		unsigned int keystream_len;
++		u64 fill_ns;
++	} slot[INGENIC_AES_DMA_SLOTS];
++	unsigned int next_offset = 0;
++	unsigned int cur = 0;
++	int dst_nents;
++	int err = 0;
++
++	if (!aes)
++		return -ENODEV;
++	if (!req->cryptlen)
++		return 0;
++	if (!IS_ALIGNED(req->cryptlen, AES_BLOCK_SIZE))
++		return -EINVAL;
++
++	dst_nents = sg_nents_for_len(req->dst, req->cryptlen);
++	if (dst_nents < 0)
++		return dst_nents;
++
++	mutex_lock(&aes->lock);
++
++#if 1
++	err = clk_prepare_enable(aes->clk_aes);
++	if (err)
++		goto out_unlock;
++
++	err = clk_prepare_enable(aes->clk_pdma);
++	if (err)
++		goto out_disable_aes;
++#endif
++
++	err = ingenic_aes_prepare(aes, ctx, NULL, INGENIC_AES_MODE_ECB);
++	if (err)
++		goto out_stop;
++
++	ingenic_aes_dma_cancel_pending(aes);
++
++	slot[cur].offset = 0;
++	slot[cur].chunk = min_t(unsigned int, req->cryptlen,
++				INGENIC_AES_BUF_SIZE);
++	slot[cur].keystream_len = slot[cur].chunk;
++	{
++		u64 t0 = ktime_get_ns();
++
++		ingenic_aes_sync_input_for_cpu(aes, cur,
++					       slot[cur].keystream_len);
++		ingenic_aes_ctr_fill_counter_blocks(aes->buf_in[cur], req->iv,
++						    slot[cur].keystream_len);
++		slot[cur].fill_ns = ktime_get_ns() - t0;
++	}
++
++	dma_wmb();
++	err = ingenic_aes_dma_start(aes, cur, slot[cur].keystream_len);
++	if (err)
++		goto out_stop;
++
++	aes->ctr_dma_start_ns[cur] = ktime_get_ns();
++	next_offset = slot[cur].chunk;
++
++	for (;;) {
++		unsigned int next = cur ^ 1;
++		bool next_ready = false;
++		u64 dma_done_ns;
++
++		if (next_offset < req->cryptlen) {
++			u64 t0;
++
++			slot[next].offset = next_offset;
++			slot[next].chunk = min_t(unsigned int,
++						 req->cryptlen - next_offset,
++						 INGENIC_AES_BUF_SIZE);
++			slot[next].keystream_len = slot[next].chunk;
++
++			t0 = ktime_get_ns();
++			ingenic_aes_sync_input_for_cpu(aes, next,
++						       slot[next].keystream_len);
++			ingenic_aes_ctr_fill_counter_blocks(aes->buf_in[next],
++							    req->iv,
++							    slot[next].keystream_len);
++			slot[next].fill_ns = ktime_get_ns() - t0;
++
++			err = ingenic_aes_dma_prepare_pending(
++				aes, next, slot[next].keystream_len);
++			if (err)
++				break;
++
++			next_offset += slot[next].chunk;
++			next_ready = true;
++		}
++
++		if (next_ready)
++			err = ingenic_aes_ctr_dma_wait(aes);
++		else
++			err = ingenic_aes_dma_wait(aes);
++		dma_done_ns = ktime_get_ns();
++		if (err)
++			break;
++
++		if (next_ready)
++			ingenic_aes_dma_start_pending(aes, false);
++
++		ingenic_aes_sync_output_for_cpu(aes, cur,
++						slot[cur].keystream_len);
++		if (sg_pcopy_from_buffer(req->dst, dst_nents,
++					 aes->buf_out[cur], slot[cur].chunk,
++					 slot[cur].offset) != slot[cur].chunk) {
++			err = -EINVAL;
++			if (next_ready)
++				ingenic_aes_ctr_dma_wait(aes);
++			break;
++		}
++
++		ingenic_aes_ctr_profile_add(aes, slot[cur].fill_ns,
++					    dma_done_ns -
++					    aes->ctr_dma_start_ns[cur],
++					    0, slot[cur].chunk);
++
++		if (!next_ready)
++			break;
++
++		cur = next;
++	}
++
++out_stop:
++	ingenic_aes_dma_cancel_pending(aes);
++	ingenic_aes_stop(aes);
++#if 1
++	clk_disable_unprepare(aes->clk_pdma);
++out_disable_aes:
++	clk_disable_unprepare(aes->clk_aes);
++#endif
++out_unlock:
++	mutex_unlock(&aes->lock);
++
++	return err;
++}
++
+ static int ingenic_aes_setkey_common(struct ingenic_aes_ctx *ctx,
+ 				     const u8 *key, unsigned int keylen)
+ {
+@@ -1299,6 +1444,7 @@
+ 		.setkey			= ingenic_aes_setkey,
+ 		.encrypt		= ingenic_aes_ctr_crypt,
+ 		.decrypt		= ingenic_aes_ctr_crypt,
++		.generate_keystream	= ingenic_aes_ctr_generate_keystream,
+ 		.init			= ingenic_aes_init_tfm,
+ 	},
+ };

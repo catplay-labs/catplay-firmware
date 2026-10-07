@@ -54,6 +54,8 @@ SRC_URI:append = " \
     file://0040-dwc2-kick-the-root-hub-status-poll-on-port-interrupts.patch \
     file://0041-usb-core-use-1ms-reset-waits-for-fast-enum-ports.patch \
     file://0042-usb-hub-run-the-hub-workqueue-at-high-priority.patch \
+    file://0043-crypto-ingenic-chain-prepared-CTR-DMA-from-IRQ.patch \
+    file://0044-crypto-af_alg-add-skcipher-keystream-only-operation.patch \
 "
 
 # PV is defined in the base in linux-imx.inc file and uses the LINUX_VERSION definition
