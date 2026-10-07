@@ -371,12 +371,12 @@
 
 			kernel@20000 {
 				label = "kernel";
-				reg = <0x00020000 0x00400000>; /* 4MB */
+				reg = <0x00020000 0x00380000>; /* 3.5MB */
 			};
 
-			rootfs@420000 {
+			rootfs@3a0000 {
 				label = "rootfs";
-				reg = <0x00420000 0x00b00000>; /* 11MB */
+				reg = <0x003a0000 0x00b80000>; /* 11.5MB */
 			};
 
 			userdata@f20000 {

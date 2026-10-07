@@ -1912,7 +1912,7 @@ index ce843152224..2e552bb74ef 100644
 -		[1].offset = 0x40000,
 -		[1].size =   0x300000,
 +		[1].offset = 0x20000,
-+		[1].size =   0x400000, /* C2A: 4MB kernel limit */
++		[1].size =   0x380000, /* C2A: 3.5MB kernel limit */
  		[1].mask_flags = NORFLASH_PART_RW,
  
  		[2].name = "rootfs",
