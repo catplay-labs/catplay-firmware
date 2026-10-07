@@ -5,6 +5,10 @@
 ## disable the inapplicable intrinsics path for ARMv5.
 EXTRA_OECONF:append:armv5 = " --disable-intrinsics"
 
+# Keep Opus at -O3 even when the distro selects -Oz.
+BUILD_OPTIMIZATION:forcevariable = "-O3"
+SELECTED_OPTIMIZATION:forcevariable = "-O3"
+
 EXTRA_OECONF:append:armv7a = " --disable-shared --enable-static --disable-examples"
 EXTRA_OECONF:remove:armv7a = "--enable-shared"
 DEPENDS:armv7a += " ne10"
