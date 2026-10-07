@@ -14,6 +14,10 @@ PR = "r3"
 
 inherit autotools pkgconfig
 
+# Keep FDK AAC at -O3 even when the distro selects -Oz.
+BUILD_OPTIMIZATION:forcevariable = "-O3"
+SELECTED_OPTIMIZATION:forcevariable = "-O3"
+
 EXTRA_OECONF = "--enable-static --disable-shared"
 
 TARGET_CC_ARCH:toolchain-clang += "-flto -fno-fat-lto-objects -fvisibility=hidden -ffunction-sections -fdata-sections"
