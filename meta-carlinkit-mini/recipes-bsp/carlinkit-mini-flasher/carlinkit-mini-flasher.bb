@@ -13,6 +13,7 @@ SRC_URI += " \
     file://trampoline.py \
     file://uimage.py \
     file://uploader.py \
+    file://wizard.py \
 "
 
 S = "${UNPACKDIR}"
@@ -26,6 +27,7 @@ C2A_FLASHER_FILES = " \
     trampoline.py \
     uimage.py \
     uploader.py \
+    wizard.py \
 "
 
 do_install() {

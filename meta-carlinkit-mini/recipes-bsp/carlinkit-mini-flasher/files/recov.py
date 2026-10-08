@@ -24,7 +24,8 @@ Notes:
 - SPL must be first-stage and must return to BootROM after RAM init.
 - kernel.bin must be a legacy uImage, not FIT and not multi-uImage.
 - initramfs.bin is loaded to a manually selected address.
-- The initramfs address is an example; adjust it as needed.
+- The default initramfs address leaves room for the current recovery image
+  below the kernel payload; override it if the images grow or move.
 - The script does not set DTB or ATAGs; it passes MIPS firmware args (a0-a3),
   where a0/a1/a2/a3 default to argc/argv/envp/promvec.
 """
@@ -62,7 +63,7 @@ BM_REQTYPE_OUT = 0x40
 
 DEFAULT_SPL_LOAD_ADDR = 0x80001800
 DEFAULT_SPL_ENTRY_ADDR = 0x80001800
-DEFAULT_INITRAMFS_LOAD_ADDR = 0x82100000
+DEFAULT_INITRAMFS_LOAD_ADDR = 0x80E00000
 DEFAULT_BOOTARGS_ADDR = 0x83FF0000
 DEFAULT_TRAMPOLINE_ADDR = 0x83FF1000
 # Where kernel self-decompresess itself (for reference only)
@@ -239,10 +240,23 @@ class X1600UsbBoot:
             #    f"[USB] ACK 0x{start:08x} -> 0x{sent_total:08x} "
             #    f"(total {sent_total}/{total})"
             #)
-    def bulk_read(self, length: int) -> bytes:
-            assert self.ep_in is not None
-            data = self.ep_in.read(length, timeout=USB_TIMEOUT_MS)
-            return bytes(data)
+    def bulk_read(self, length: int, timeout_ms: Optional[int] = None) -> bytes:
+        assert self.ep_in is not None
+        if timeout_ms is None:
+            timeout_ms = USB_TIMEOUT_MS
+
+        packet_size = self.ep_in.wMaxPacketSize or 512
+        received = bytearray()
+        while len(received) < length:
+            chunk = self.ep_in.read(
+                min(packet_size, length - len(received)), timeout=timeout_ms
+            )
+            if len(chunk) <= 0:
+                raise X1600UsbBootError(
+                    f"Bulk read failed at offset 0x{len(received):x}"
+                )
+            received.extend(chunk)
+        return bytes(received)
 
     def download_blob(self, addr: int, blob: bytes, verify: bool = False, timeout_ms: Optional[int] = None) -> None:
             self.set_data_address(addr)
@@ -252,7 +266,7 @@ class X1600UsbBoot:
             if verify:
                 self.set_data_address(addr)
                 self.set_data_length(len(blob))
-                back = self.bulk_read(len(blob))
+                back = self.bulk_read(len(blob), timeout_ms=timeout_ms)
                 if back != blob:
                     raise X1600UsbBootError(
                         f"Verification failed for 0x{addr:08x}: readback differs from written data"
@@ -533,7 +547,12 @@ def main() -> int:
             f"[*] Upload initramfs -> 0x{layout.initramfs_load_addr:08x} "
             f"({len(initramfs)} B)"
         )
-        boot.download_blob(layout.initramfs_load_addr, initramfs, verify=args.verify)
+        boot.download_blob(
+            layout.initramfs_load_addr,
+            initramfs,
+            verify=args.verify,
+            timeout_ms=args.bulk_timeout,
+        )
 
         print(
             f"[*] Upload bootargs -> 0x{args.bootargs_addr:08x} "
