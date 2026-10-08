@@ -1,5 +1,5 @@
 FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
-PACKAGECONFIG = "tools readline"
+PACKAGECONFIG = ""
 PACKAGES:remove = "${PN}-testtools ${PN}-obex"
 #SRC_URI:append = " file://0001-src-log-h-disable-logging-macros.patch"
 #SRC_URI:append = " file://0002-bluez5-stop-using-debug-section-in-bluetoothd.patch"
