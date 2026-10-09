@@ -9,7 +9,8 @@ Flow:
   2) optionally patch the DTB in memory with bootargs and linux,initrd-start/end
   3) upload OpenSBI, Linux Image, optional EROFS initrd, DTB and simpleboot
   4) start simpleboot through FEL
-  5) monitor USB for gadget, Apple reset, or FEL return
+  5) monitor USB for gadget, Apple reset, or FEL return, and verify the host
+     actually created a network interface for the NCM gadget
 """
 
 # TODO: this is V821 only; ARM variants will need a specific cache flush procedure
@@ -383,6 +384,26 @@ def first_matching_pid(ids: list[str], prefix: str) -> Optional[str]:
     return None
 
 
+def host_netif_names() -> set:
+    try:
+        return set(os.listdir("/sys/class/net"))
+    except OSError:
+        return set()
+
+
+def wait_for_new_netif(before: set, timeout_s: float = 10.0) -> Optional[str]:
+    """Name of a host netif that appeared after `before`, within timeout_s."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        new = host_netif_names() - before
+        if new:
+            return sorted(new)[0]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(0.2, remaining))
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Boot V821 through Allwinner FEL: FES DRAM init -> simpleboot -> OpenSBI -> Linux"
@@ -555,7 +576,7 @@ def load_fes(args: argparse.Namespace) -> SunxiFel:
     return fel
 
 
-def monitor_usb(args: argparse.Namespace, started: float) -> int:
+def monitor_usb(args: argparse.Namespace, started: float, netif_before: set) -> int:
     monitor_seconds = args.monitor_seconds or 90
 
     last = "initial"
@@ -573,7 +594,26 @@ def monitor_usb(args: argparse.Namespace, started: float) -> int:
 
         gadget_pid = first_matching_pid(ids, "0525:")
         if gadget_pid:
-            print("[+] USB gadget is working.")
+            iface = wait_for_new_netif(netif_before)
+            if iface is None:
+                print(
+                    f"[!] Gadget {gadget_pid} enumerated, but no new host network "
+                    f"interface appeared within 10 s. This is a host-side driver "
+                    "gap, not a device fault: the host kernel needs the NCM stack "
+                    "(usbnet, cdc_ether, cdc_ncm).",
+                    file=sys.stderr,
+                )
+                print(
+                    "    Check:  lsmod | grep -Ei 'usbnet|cdc_ncm'",
+                    file=sys.stderr,
+                )
+                print(
+                    "    Fix:    modprobe usbnet cdc_ether cdc_ncm, then re-run: "
+                    "python wizard.py --already-recov",
+                    file=sys.stderr,
+                )
+                return 5
+            print(f"[+] USB gadget is working (host interface {iface}).")
             return 0
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -623,10 +663,11 @@ def main() -> int:
             f"[*] Starting simpleboot -> Nboot Falcon -> OpenSBI -> "
             f"{args.kernel.name} @ 0x{layout.kernel_addr:08x} -> Linux."
         )
+        netif_before = host_netif_names()
         fel.execute(layout.simpleboot_entry)
         fel.close()
         started = time.monotonic()
-        return monitor_usb(args, started)
+        return monitor_usb(args, started, netif_before)
 
     except FelBootError as e:
         print(f"[!] Error: {e}", file=sys.stderr)
