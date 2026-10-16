@@ -24,12 +24,14 @@ CATPLAY_DEBUG_SYMBOLS ?= "0"
 DEBUG_BUILD = "${CATPLAY_DEBUG_BUILD}"
 
 RUSTFLAGS = " -C link-arg=-Wl,--gc-sections "
-RUSTFLAGS:append:armv7e = " -C link-arg=-no-pie"
+RUSTFLAGS:append:armv7e = " -C relocation-model=static -C link-arg=-no-pie"
+RUSTFLAGS:append:mipsel = " -C relocation-model=static -C link-arg=-no-pie"
+RUSTFLAGS:append:riscv32 = " -C relocation-model=static -C link-arg=-no-pie"
 #RUSTFLAGS:append:mipsarch = " -C target-feature=+strict-align"
 
-# Fix static openssl linking
-RUSTFLAGS:append:mipsel = " -C link-arg=-latomic"
-RUSTFLAGS:append:riscv32 = " -C link-arg=-latomic"
+# Link atomic helpers statically without making the whole binary static.
+RUSTFLAGS:append:mipsel = " -C link-arg=-Wl,-Bstatic,-latomic,-Bdynamic"
+RUSTFLAGS:append:riscv32 = " -C link-arg=-Wl,-Bstatic,-latomic,-Bdynamic"
 
 INHIBIT_PACKAGE_STRIP = "${CATPLAY_DEBUG_SYMBOLS}"
 inherit c2a-rust-app
