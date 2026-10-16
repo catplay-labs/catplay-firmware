@@ -13,7 +13,7 @@ DEPENDS += "openssl-slim"
 
 PACKAGE_ARCH:ingenic-x1600 = "ingenic-x1600"
 
-CATPLAY_DEBUG_BUILD = "1"
+CATPLAY_DEBUG_BUILD = "0"
 CATPLAY_DEBUG_SYMBOLS = "0"
 
 DEBUG_BUILD = "${CATPLAY_DEBUG_BUILD}"
@@ -22,6 +22,7 @@ RUSTFLAGS = " -C link-arg=-Wl,--gc-sections "
 
 # Fix static openssl linking
 RUSTFLAGS:append:mipsel = " -C link-arg=-latomic"
+RUSTFLAGS:append:riscv32 = " -C link-arg=-latomic"
 
 INHIBIT_PACKAGE_STRIP = "${CATPLAY_DEBUG_SYMBOLS}"
 CARGO_INSTALL_BENCHES = "1"
