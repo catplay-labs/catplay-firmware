@@ -1,0 +1,30 @@
+Subject: [PATCH 5/5] crypto: sun4i-ss: register the Allwinner V821 variant
+
+Describe the V821 SHA byte order and bind its crypto-engine device-tree
+compatible to the sun4i-ss driver after the generic engine and DMA support
+have been applied.
+
+Upstream-Status: Inappropriate [V821 variant registration]
+
+---
+--- a/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-core.c
++++ b/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-core.c
+@@ -29,6 +30,10 @@
+ 
+ static const struct ss_variant ss_a33_variant = {
+ 	.sha1_in_be = true,
+ };
+ 
++static const struct ss_variant ss_v821_variant = {
++	.sha1_in_be = false,
++};
++
+ static struct sun4i_ss_alg_template ss_algs[] = {
+@@ -512,4 +593,7 @@
+ static const struct of_device_id a20ss_crypto_of_match_table[] = {
++	{ .compatible = "allwinner,sun300i-v821-crypto",
++	  .data = &ss_v821_variant
++	},
+ 	{ .compatible = "allwinner,sun4i-a10-crypto",
+ 	  .data = &ss_a10_variant
+ 	},

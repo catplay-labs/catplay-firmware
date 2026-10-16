@@ -1,0 +1,534 @@
+Subject: [PATCH 4/5] crypto: sun4i-ss: add reusable DMAengine path for AES ECB and CTR
+
+Add reusable V821 SS FIFO DMA transport for AES ECB and CTR. Share SG mapping,
+channel configuration, burst selection, submission, completion, and cleanup;
+select only the mode-specific register setup and CTR counter update from the
+skcipher template. Qualify block-aligned requests, use burst 4 by default and
+burst 16 for 64-byte-aligned requests. Other skcipher algorithms continue through their saved PIO callbacks.
+
+Upstream-Status: Inappropriate [V821-specific DMA integration]
+
+---
+--- a/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-cipher.c
++++ b/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-cipher.c
+@@ -11,6 +11,9 @@
+  * You could find the datasheet in Documentation/arch/arm/sunxi.rst
+  */
+ #include "sun4i-ss.h"
++#include <linux/completion.h>
++#include <linux/dma-mapping.h>
++#include <linux/module.h>
+ 
+ static int noinline_for_stack sun4i_ss_opti_poll(struct skcipher_request *areq)
+ {
+@@ -489,6 +492,347 @@
+ 	return 0;
+ }
+ 
++static void sun4i_ss_dma_complete(void *data)
++{
++	complete(data);
++}
++
++#define SS_DMA_BURST_DEFAULT 4
++#define SS_DMA_BURST_LARGE 16
++#define SS_FCSR_RXFIFO_TRIG_LEVEL_MASK (0x1f << 8)
++#define SS_FCSR_TXFIFO_TRIG_LEVEL_MASK 0x1f
++#define SS_FCSR_RXFIFO_TRIG_LEVEL_SHIFT 8
++#define SS_FCSR_TXFIFO_TRIG_LEVEL_SHIFT 0
++
++static void sun4i_ss_dma_cleanup(struct sun4i_ss_ctx *ss,
++				struct dma_chan *rx, struct dma_chan *tx)
++{
++	unsigned long flags;
++
++	dmaengine_terminate_sync(rx);
++	dmaengine_terminate_sync(tx);
++	spin_lock_irqsave(&ss->slock, flags);
++	writel(0, ss->base + SS_CTL);
++	writel(0, ss->base + SS_ICSR);
++	ss->dma_active = false;
++	spin_unlock_irqrestore(&ss->slock, flags);
++}
++
++static int sun4i_ss_dma_prepare_sg(struct scatterlist *src, unsigned int len,
++				  struct scatterlist *dst, unsigned int *bad_len)
++{
++	struct scatterlist *sg;
++	unsigned int remaining = len;
++	int count, i;
++
++	*bad_len = 0;
++	count = sg_nents_for_len(src, len);
++	if (count <= 0)
++		return count ?: -EINVAL;
++	if (count > SS_DMA_MAX_SG)
++		return -E2BIG;
++
++	sg_init_table(dst, count);
++	for_each_sg(src, sg, count, i) {
++		unsigned int n = min(sg->length, remaining);
++
++		/* The SS FIFO and SGDMA channel transfer 32-bit words. */
++		if (!IS_ALIGNED(n, sizeof(u32))) {
++			*bad_len = n;
++			return -EINVAL;
++		}
++
++		sg_set_page(&dst[i], sg_page(sg), n, sg->offset);
++		remaining -= n;
++	}
++
++	return remaining ? -EINVAL : count;
++}
++
++static bool sun4i_ss_dma_sg_len_aligned(struct scatterlist *sg,
++					unsigned int nents, unsigned int align)
++{
++	struct scatterlist *s;
++	unsigned int i;
++
++	for_each_sg(sg, s, nents, i) {
++		if (!IS_ALIGNED(sg_dma_len(s), align))
++			return false;
++	}
++
++	return true;
++}
++
++static int sun4i_ss_dma_submit_sg(struct dma_chan *rx, struct dma_chan *tx,
++				 struct scatterlist *src, unsigned int src_nents,
++				 struct scatterlist *dst, unsigned int dst_nents,
++				 struct completion *done,
++				 dma_cookie_t *rx_cookie, dma_cookie_t *tx_cookie)
++{
++	struct dma_async_tx_descriptor *rx_desc, *tx_desc;
++	dma_cookie_t cookie;
++
++	rx_desc = dmaengine_prep_slave_sg(rx, src, src_nents, DMA_MEM_TO_DEV,
++					 DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
++	if (!rx_desc)
++		return -ENOMEM;
++	cookie = dmaengine_submit(rx_desc);
++	if (dma_submit_error(cookie))
++		return cookie;
++	*rx_cookie = cookie;
++
++	tx_desc = dmaengine_prep_slave_sg(tx, dst, dst_nents, DMA_DEV_TO_MEM,
++					 DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
++	if (!tx_desc)
++		return -ENOMEM;
++	tx_desc->callback = sun4i_ss_dma_complete;
++	tx_desc->callback_param = done;
++	cookie = dmaengine_submit(tx_desc);
++	if (dma_submit_error(cookie))
++		return cookie;
++	*tx_cookie = cookie;
++
++	return 0;
++}
++
++static bool sun4i_ss_dma_eligible(struct skcipher_request *areq,
++				  struct sun4i_ss_alg_template *algt)
++{
++	const char *name = algt->alg.engine_crypto.base.base.cra_name;
++
++	if (strcmp(name, "ecb(aes)") && strcmp(name, "ctr(aes)"))
++		return false;
++
++	return areq->cryptlen && !(areq->cryptlen % AES_BLOCK_SIZE);
++}
++
++static int sun4i_ss_dma_crypt(struct skcipher_request *areq,
++			       struct sun4i_ss_alg_template *algt,
++			       bool encrypt)
++{
++	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(areq);
++	struct sun4i_tfm_ctx *op = crypto_skcipher_ctx(tfm);
++	struct sun4i_ss_ctx *ss = op->ss;
++	struct dma_slave_config rx_cfg = {}, tx_cfg = {};
++	struct dma_chan *rx = ss->rx_chan, *tx = ss->tx_chan;
++	struct device *rx_dev = dmaengine_get_dma_device(rx);
++	struct device *tx_dev = dmaengine_get_dma_device(tx);
++	bool ctr = algt->mode == SS_CTR;
++	struct completion done;
++	dma_cookie_t rx_cookie, tx_cookie;
++	struct scatterlist *src_sg = ss->dma_src_sg;
++	struct scatterlist *dst_sg = ss->dma_dst_sg;
++	unsigned int src_nents = 0, dst_nents = 0;
++	int src_mapped = 0, dst_mapped = 0;
++	bool in_place = areq->src == areq->dst;
++	unsigned long flags;
++	u32 ctl, fcsr;
++	unsigned int dma_burst, dma_trigger, i;
++	unsigned int bad_len;
++	int err = 0;
++
++	if (!sun4i_ss_dma_eligible(areq, algt))
++		return -EAGAIN;
++	if ((ctr && !areq->iv) || !areq->src || !areq->dst)
++		return -EINVAL;
++
++	if (in_place && rx_dev != tx_dev) {
++		algt->stat_dma_skip_inplace++;
++		return -EAGAIN;
++	}
++
++	/* Start with single-word bursts; mapped SG boundaries decide upgrades. */
++	dma_burst = 1;
++	err = sun4i_ss_dma_prepare_sg(areq->src, areq->cryptlen,
++					 src_sg, &bad_len);
++	if (err == -EINVAL || err == -E2BIG) {
++		if (err == -E2BIG)
++			algt->stat_dma_skip_src_many++;
++		else if (bad_len)
++			algt->stat_dma_skip_src_word++;
++		else
++			algt->stat_dma_skip_src_invalid++;
++		return -EAGAIN;
++	}
++	if (err < 0)
++		return err;
++	src_nents = err;
++	if (in_place) {
++		dst_sg = src_sg;
++		dst_nents = src_nents;
++	} else {
++		err = sun4i_ss_dma_prepare_sg(areq->dst, areq->cryptlen,
++						 dst_sg, &bad_len);
++		if (err == -EINVAL || err == -E2BIG) {
++			if (err == -E2BIG)
++				algt->stat_dma_skip_dst_many++;
++			else if (bad_len)
++				algt->stat_dma_skip_dst_word++;
++			else
++				algt->stat_dma_skip_dst_invalid++;
++			return -EAGAIN;
++		}
++		if (err < 0)
++			return err;
++		dst_nents = err;
++	}
++
++	src_mapped = dma_map_sg(rx_dev, src_sg, src_nents,
++				in_place ? DMA_BIDIRECTIONAL : DMA_TO_DEVICE);
++	if (!src_mapped)
++		return -EIO;
++	if (!in_place) {
++		dst_mapped = dma_map_sg(tx_dev, dst_sg, dst_nents,
++					DMA_FROM_DEVICE);
++		if (!dst_mapped) {
++			err = -EIO;
++			goto unmap_src;
++		}
++	} else {
++		dst_mapped = src_mapped;
++	}
++
++	/*
++	 * Burst counts are 32-bit words. Check every mapped segment length in
++	 * both directions: request length alone says nothing about SG boundaries.
++	 * V821 accepts these bursts with byte-unaligned source and destination
++	 * addresses; only each mapped segment length constrains burst selection.
++	 */
++	if (sun4i_ss_dma_sg_len_aligned(src_sg, src_mapped,
++				   SS_DMA_BURST_DEFAULT * sizeof(u32)) &&
++	    sun4i_ss_dma_sg_len_aligned(dst_sg, dst_mapped,
++				   SS_DMA_BURST_DEFAULT * sizeof(u32)))
++		dma_burst = SS_DMA_BURST_DEFAULT;
++	if (sun4i_ss_dma_sg_len_aligned(src_sg, src_mapped,
++				   SS_DMA_BURST_LARGE * sizeof(u32)) &&
++	    sun4i_ss_dma_sg_len_aligned(dst_sg, dst_mapped,
++				   SS_DMA_BURST_LARGE * sizeof(u32)))
++		dma_burst = SS_DMA_BURST_LARGE;
++
++	dma_trigger = dma_burst;
++	if (dma_trigger != 1 && dma_trigger != 4 && dma_trigger != 16) {
++		err = -EINVAL;
++		goto unmap;
++	}
++	rx_cfg.direction = DMA_MEM_TO_DEV;
++	rx_cfg.dst_addr = ss->res->start + SS_RXFIFO;
++	rx_cfg.src_addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
++	rx_cfg.dst_addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
++	rx_cfg.src_maxburst = dma_burst;
++	rx_cfg.dst_maxburst = dma_burst;
++	tx_cfg.direction = DMA_DEV_TO_MEM;
++	tx_cfg.src_addr = ss->res->start + SS_TXFIFO;
++	tx_cfg.src_addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
++	tx_cfg.dst_addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
++	tx_cfg.src_maxburst = dma_burst;
++	tx_cfg.dst_maxburst = dma_burst;
++	err = dmaengine_slave_config(rx, &rx_cfg);
++	if (err)
++		goto unmap;
++	err = dmaengine_slave_config(tx, &tx_cfg);
++	if (err)
++		goto unmap;
++
++	init_completion(&done);
++	spin_lock_irqsave(&ss->slock, flags);
++	if (ss->dma_active) {
++		spin_unlock_irqrestore(&ss->slock, flags);
++		err = -EBUSY;
++		goto unmap;
++	}
++	ss->dma_active = true;
++	for (i = 0; i < op->keylen / 4; i++)
++		writel(op->key[i], ss->base + SS_KEY0 + i * 4);
++	if (ctr) {
++		for (i = 0; i < AES_BLOCK_SIZE / 4; i++)
++			writel(get_unaligned_le32(areq->iv + i * 4),
++			       ss->base + SS_CNT0 + i * 4);
++	}
++	ctl = SS_OP_AES | (ctr ? SS_CTR | SS_CNT_128BITS : SS_ECB) |
++	      (ctr || encrypt ? SS_ENCRYPTION : SS_DECRYPTION) |
++	      SS_ENABLED | op->keymode;
++	fcsr = readl(ss->base + SS_FCSR);
++	fcsr &= ~(SS_FCSR_RXFIFO_TRIG_LEVEL_MASK |
++		  SS_FCSR_TXFIFO_TRIG_LEVEL_MASK);
++	fcsr |= (dma_trigger - 1) << SS_FCSR_RXFIFO_TRIG_LEVEL_SHIFT;
++	fcsr |= (dma_trigger - 1) << SS_FCSR_TXFIFO_TRIG_LEVEL_SHIFT;
++	writel(fcsr, ss->base + SS_FCSR);
++	writel(readl(ss->base + SS_ICSR) | (1 << 10) | (1 << 8) |
++	       SS_DRA_ENABLE, ss->base + SS_ICSR);
++	writel(ctl & ~SS_ENABLED, ss->base + SS_CTL);
++	spin_unlock_irqrestore(&ss->slock, flags);
++
++	err = sun4i_ss_dma_submit_sg(rx, tx, src_sg, src_mapped,
++				    dst_sg, dst_mapped, &done,
++				    &rx_cookie, &tx_cookie);
++	if (err)
++		goto terminate;
++	writel(areq->cryptlen, ss->base + SS_CTS_LEN);
++	dma_async_issue_pending(rx);
++	writel(ctl | SS_ENABLED, ss->base + SS_CTL);
++	dma_async_issue_pending(tx);
++	if (!wait_for_completion_timeout(&done, msecs_to_jiffies(1000)))
++		err = -ETIMEDOUT;
++	if (err == -ETIMEDOUT) {
++		struct scatterlist *sg;
++		struct dma_tx_state rx_state = {}, tx_state = {};
++		enum dma_status rx_status, tx_status;
++
++		rx_status = dmaengine_tx_status(rx, rx_cookie, &rx_state);
++		tx_status = dmaengine_tx_status(tx, tx_cookie, &tx_state);
++		dev_err(ss->dev,
++			"V821 DMA status: rx_cookie=%d status=%d residue=%u tx_cookie=%d status=%d residue=%u\n",
++			rx_cookie, rx_status, rx_state.residue,
++			tx_cookie, tx_status, tx_state.residue);
++
++		dev_err(ss->dev,
++			"V821 DMA timeout: ctl=%08x fcsr=%08x icsr=%08x len=%u burst=%u in_place=%u src_nents=%u/%d dst_nents=%u/%d\n",
++			readl(ss->base + SS_CTL), readl(ss->base + SS_FCSR),
++			readl(ss->base + SS_ICSR), areq->cryptlen, dma_burst,
++			in_place, src_nents, src_mapped, dst_nents, dst_mapped);
++		for_each_sg(src_sg, sg, src_mapped, i)
++			dev_err(ss->dev,
++				"V821 DMA src[%u] addr=%pad len=%u offset=%u\n",
++				i, &sg_dma_address(sg), sg_dma_len(sg), sg->offset);
++		for_each_sg(dst_sg, sg, dst_mapped, i)
++			dev_err(ss->dev,
++				"V821 DMA dst[%u] addr=%pad len=%u offset=%u\n",
++				i, &sg_dma_address(sg), sg_dma_len(sg), sg->offset);
++	}
++
++terminate:
++	sun4i_ss_dma_cleanup(ss, rx, tx);
++	if (err)
++		goto unmap;
++
++	if (IS_ENABLED(CONFIG_CRYPTO_DEV_SUN4I_SS_DEBUG)) {
++		struct skcipher_alg *alg = crypto_skcipher_alg(tfm);
++		struct sun4i_ss_alg_template *algt;
++
++		algt = container_of(alg, struct sun4i_ss_alg_template,
++				   alg.engine_crypto.base);
++		algt->stat_opti++;
++		algt->stat_bytes += areq->cryptlen;
++		algt->stat_dma++;
++		algt->stat_dma_bytes += areq->cryptlen;
++		if (dma_burst == SS_DMA_BURST_LARGE)
++			algt->stat_dma_burst16++;
++	}
++	if (ctr)
++		sun4i_ss_ctr_advance(areq->iv,
++				     areq->cryptlen / AES_BLOCK_SIZE);
++	goto unmap;
++
++unmap:
++	if (!in_place && dst_mapped)
++		dma_unmap_sg(tx_dev, dst_sg, dst_nents, DMA_FROM_DEVICE);
++unmap_src:
++	if (src_mapped)
++		dma_unmap_sg(rx_dev, src_sg, src_nents,
++			     in_place ? DMA_BIDIRECTIONAL : DMA_TO_DEVICE);
++	return err;
++}
++
+ int sun4i_ss_engine_do_one_request(struct crypto_engine *engine, void *areq)
+ {
+ 	struct skcipher_request *req = container_of(areq,
+@@ -500,7 +844,23 @@
+ 
+ 	algt = container_of(crypto_skcipher_alg(tfm),
+ 			   struct sun4i_ss_alg_template, alg.engine_crypto.base);
+-	err = rctx->encrypt ? algt->encrypt(req) : algt->decrypt(req);
++	if (sun4i_ss_has_dma(algt->ss) &&
++	    sun4i_ss_dma_eligible(req, algt)) {
++		err = sun4i_ss_dma_crypt(req, algt, rctx->encrypt);
++		if (err == -EAGAIN)
++			err = rctx->encrypt ? algt->encrypt(req) :
++					algt->decrypt(req);
++	} else {
++		if (sun4i_ss_has_dma(algt->ss) &&
++		    algt->mode == SS_CTR && req->cryptlen &&
++		    !IS_ALIGNED(req->cryptlen, AES_BLOCK_SIZE)) {
++			algt->stat_dma_skip_block++;
++			if (req->cryptlen >= 61440 && req->cryptlen < 65536)
++				algt->stat_dma_skip_block_near64k++;
++			algt->stat_dma_last_unaligned_len = req->cryptlen;
++		}
++		err = rctx->encrypt ? algt->encrypt(req) : algt->decrypt(req);
++	}
+ 	local_bh_disable();
+ 	crypto_finalize_skcipher_request(engine, req, err);
+ 	local_bh_enable();
+--- a/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-core.c
++++ b/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-core.c
+@@ -10,6 +10,7 @@
+  */
+ #include <linux/clk.h>
+ #include <linux/crypto.h>
++#include <linux/slab.h>
+ #include <linux/debugfs.h>
+ #include <linux/io.h>
+ #include <linux/module.h>
+@@ -251,11 +252,22 @@
+ 			continue;
+ 		switch (ss_algs[i].type) {
+ 		case CRYPTO_ALG_TYPE_SKCIPHER:
+-			seq_printf(seq, "%s %s reqs=%lu opti=%lu fallback=%lu tsize=%lu\n",
++			seq_printf(seq, "%s %s reqs=%lu opti=%lu fallback=%lu tsize=%lu dma_reqs=%lu dma_bytes=%lu burst16=%lu skip_block=%lu skip_block_near64k=%lu last_unaligned_len=%lu skip_src_word=%lu skip_dst_word=%lu skip_src_many=%lu skip_dst_many=%lu skip_src_invalid=%lu skip_dst_invalid=%lu skip_inplace=%lu\n",
+ 				   ss_algs[i].alg.crypto.base.cra_driver_name,
+ 				   ss_algs[i].alg.crypto.base.cra_name,
+ 				   ss_algs[i].stat_req, ss_algs[i].stat_opti, ss_algs[i].stat_fb,
+-				   ss_algs[i].stat_bytes);
++				   ss_algs[i].stat_bytes, ss_algs[i].stat_dma,
++				   ss_algs[i].stat_dma_bytes, ss_algs[i].stat_dma_burst16,
++				   ss_algs[i].stat_dma_skip_block,
++				   ss_algs[i].stat_dma_skip_block_near64k,
++				   ss_algs[i].stat_dma_last_unaligned_len,
++				   ss_algs[i].stat_dma_skip_src_word,
++				   ss_algs[i].stat_dma_skip_dst_word,
++				   ss_algs[i].stat_dma_skip_src_many,
++				   ss_algs[i].stat_dma_skip_dst_many,
++				   ss_algs[i].stat_dma_skip_src_invalid,
++				   ss_algs[i].stat_dma_skip_dst_invalid,
++				   ss_algs[i].stat_dma_skip_inplace);
+ 			break;
+ 		case CRYPTO_ALG_TYPE_AHASH:
+ 			seq_printf(seq, "%s %s reqs=%lu\n",
+@@ -412,6 +424,38 @@
+ 	if (!ss->variant) {
+ 		dev_err(&pdev->dev, "Missing Security System variant\n");
+ 		return -EINVAL;
++	}
++	ss->res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!ss->res)
++		return -ENODEV;
++
++	ss->dma_src_sg = devm_kcalloc(&pdev->dev, SS_DMA_MAX_SG,
++				      sizeof(*ss->dma_src_sg), GFP_KERNEL);
++	ss->dma_dst_sg = devm_kcalloc(&pdev->dev, SS_DMA_MAX_SG,
++				      sizeof(*ss->dma_dst_sg), GFP_KERNEL);
++	if (!ss->dma_src_sg || !ss->dma_dst_sg)
++		return -ENOMEM;
++
++	ss->rx_chan = devm_dma_request_chan(&pdev->dev, "rx");
++	if (IS_ERR(ss->rx_chan)) {
++		err = PTR_ERR(ss->rx_chan);
++		ss->rx_chan = NULL;
++		if (err == -EPROBE_DEFER)
++			return err;
++		if (err != -ENODEV && err != -ENOENT)
++			return dev_err_probe(&pdev->dev, err,
++					     "cannot get RX DMA channel\n");
++	}
++
++	ss->tx_chan = devm_dma_request_chan(&pdev->dev, "tx");
++	if (IS_ERR(ss->tx_chan)) {
++		err = PTR_ERR(ss->tx_chan);
++		ss->tx_chan = NULL;
++		if (err == -EPROBE_DEFER)
++			return err;
++		if (err != -ENODEV && err != -ENOENT)
++			return dev_err_probe(&pdev->dev, err,
++					     "cannot get TX DMA channel\n");
+ 	}
+ 
+ 	ss->ssclk = devm_clk_get(&pdev->dev, "mod");
+--- a/drivers/crypto/allwinner/sun4i-ss/sun4i-ss.h
++++ b/drivers/crypto/allwinner/sun4i-ss/sun4i-ss.h
+@@ -27,6 +27,7 @@
+ #include <crypto/engine.h>
+ #include <crypto/md5.h>
+ #include <crypto/skcipher.h>
++#include <linux/dmaengine.h>
+ #include <crypto/sha1.h>
+ #include <crypto/hash.h>
+ #include <crypto/internal/hash.h>
+@@ -76,6 +77,10 @@
+ #define SS_CNT_16BITS		(0 << 10)
+ #define SS_CNT_32BITS		(1 << 10)
+ #define SS_CNT_64BITS		(2 << 10)
++#define SS_DRA_ENABLE		(1 << 4)
++#define SS_ICSR			0x48
++#define SS_CTS_LEN		0x60
++#define SS_DMA_MAX_SG		128
+ #define SS_CNT_128BITS		(3 << 10)
+ 
+ /* Key size for AES - bits 8-9 */
+@@ -141,6 +146,10 @@
+ 	struct device *dev;
+ 	struct resource *res;
+ 	struct crypto_engine *engine;
++	struct dma_chan *rx_chan;
++	struct dma_chan *tx_chan;
++	struct scatterlist *dma_src_sg;
++	struct scatterlist *dma_dst_sg;
+ 	char buf[4 * SS_RX_MAX];/* buffer for linearize SG src */
+ 	char bufo[4 * SS_TX_MAX]; /* buffer for linearize SG dst */
+ 	spinlock_t slock; /* control the use of the device */
+@@ -148,6 +157,11 @@
+ 	struct dentry *dbgfs_dir;
+ 	struct dentry *dbgfs_stats;
+ };
++
++static inline bool sun4i_ss_has_dma(const struct sun4i_ss_ctx *ss)
++{
++	return ss->rx_chan && ss->tx_chan;
++}
+ 
+ struct sun4i_ss_alg_template {
+ 	u32 type;
+@@ -164,6 +178,19 @@
+ 	unsigned long stat_fb;
+ 	unsigned long stat_bytes;
+ 	unsigned long stat_opti;
++	unsigned long stat_dma;
++	unsigned long stat_dma_bytes;
++	unsigned long stat_dma_burst16;
++	unsigned long stat_dma_skip_block;
++	unsigned long stat_dma_skip_block_near64k;
++	unsigned long stat_dma_last_unaligned_len;
++	unsigned long stat_dma_skip_src_word;
++	unsigned long stat_dma_skip_dst_word;
++	unsigned long stat_dma_skip_src_many;
++	unsigned long stat_dma_skip_dst_many;
++	unsigned long stat_dma_skip_src_invalid;
++	unsigned long stat_dma_skip_dst_invalid;
++	unsigned long stat_dma_skip_inplace;
+ };
+ 
+ struct sun4i_tfm_ctx {

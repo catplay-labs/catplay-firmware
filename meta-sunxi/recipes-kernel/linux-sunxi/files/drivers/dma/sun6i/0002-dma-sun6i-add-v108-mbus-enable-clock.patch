@@ -1,0 +1,69 @@
+Subject: [PATCH] dmaengine: sun6i: add the V821 v108 mbus-enable clock
+
+Upstream-Status: Inappropriate [V821 vendor-specific integration]
+
+The V821 system DMA has a separate MBUS enable clock which must be
+enabled before the DMA provider is registered.
+
+diff --git a/drivers/dma/sun6i-dma.c b/drivers/dma/sun6i-dma.c
+--- a/drivers/dma/sun6i-dma.c
++++ b/drivers/dma/sun6i-dma.c
+@@ -121,3 +121,4 @@ struct sun6i_dma_config {
+ 	bool has_high_addr;
+ 	bool has_mbus_clk;
++	bool has_mbus_en_clk;
+ };
+@@ -181,3 +181,4 @@ struct sun6i_dma_dev {
+ 	struct clk		*clk;
+ 	struct clk		*clk_mbus;
++	struct clk		*clk_mbus_en;
+ 	int			irq;
+@@ -1318,6 +1318,7 @@ static struct sun6i_dma_config sun300i_v821_dma_cfg = {
+ 	.dst_addr_widths   = BIT(DMA_SLAVE_BUSWIDTH_1_BYTE) |
+ 				     BIT(DMA_SLAVE_BUSWIDTH_2_BYTES) |
+ 				     BIT(DMA_SLAVE_BUSWIDTH_4_BYTES) |
+ 				     BIT(DMA_SLAVE_BUSWIDTH_8_BYTES),
+ 	.has_mbus_clk = true,
++	.has_mbus_en_clk = true,
+ };
+@@ -1357,4 +1357,12 @@ static int sun6i_dma_probe(struct platform_device *pdev)
+ 		}
+ 	}
+ 
++	if (sdc->cfg->has_mbus_en_clk) {
++		sdc->clk_mbus_en = devm_clk_get(&pdev->dev, "mbus-en");
++		if (IS_ERR(sdc->clk_mbus_en)) {
++			dev_err(&pdev->dev, "No mbus-en clock specified\n");
++			return PTR_ERR(sdc->clk_mbus_en);
++		}
++	}
++
+ 	sdc->rstc = devm_reset_control_get(&pdev->dev, NULL);
+@@ -1434,10 +1434,18 @@ static int sun6i_dma_probe(struct platform_device *pdev)
+ 		goto err_reset_assert;
+ 	}
+ 
++	if (sdc->cfg->has_mbus_en_clk) {
++		ret = clk_prepare_enable(sdc->clk_mbus_en);
++		if (ret) {
++			dev_err(&pdev->dev, "Couldn't enable mbus-en clock\n");
++			goto err_clk_disable;
++		}
++	}
++
+ 	if (sdc->cfg->has_mbus_clk) {
+ 		ret = clk_prepare_enable(sdc->clk_mbus);
+ 		if (ret) {
+ 			dev_err(&pdev->dev, "Couldn't enable mbus clock\n");
+-			goto err_clk_disable;
++			goto err_mbus_en_clk_disable;
+ 		}
+ 	}
+@@ -1455,4 +1478,7 @@ static int sun6i_dma_probe(struct platform_device *pdev)
+ 	err_mbus_clk_disable:
+ 	clk_disable_unprepare(sdc->clk_mbus);
++err_mbus_en_clk_disable:
++	if (sdc->cfg->has_mbus_en_clk)
++		clk_disable_unprepare(sdc->clk_mbus_en);
+ err_clk_disable:
+ 	clk_disable_unprepare(sdc->clk);

@@ -1,0 +1,79 @@
+Subject: [PATCH] dmaengine: sun6i: add per-device V821 SDRAM DRQ quirk
+
+Upstream-Status: Inappropriate [V821 vendor-specific integration]
+
+The v108 DMA IP used by V821 encodes system memory as DRQ 0. Keep the
+mainline DRQ_SDRAM value for other compatibles and select zero through a
+per-device configuration quirk for V821.
+---
+--- a/drivers/dma/sun6i-dma.c
++++ b/drivers/dma/sun6i-dma.c
+@@ -150,6 +150,7 @@
+ 	bool has_high_addr;
+ 	bool has_mbus_clk;
+ 	bool has_mbus_en_clk;
++	bool drq_sdram_is_zero;
+ 	bool has_io_speedup;
+ 	bool has_multicore_shared;
+ };
+@@ -707,7 +708,9 @@
+ 		DMA_CHAN_CFG_DST_WIDTH(width);
+ 
+ 	sdev->cfg->set_burst_length(&v_lli->cfg, burst, burst);
+-	sdev->cfg->set_drq(&v_lli->cfg, DRQ_SDRAM, DRQ_SDRAM);
++	sdev->cfg->set_drq(&v_lli->cfg,
++			   sdev->cfg->drq_sdram_is_zero ? 0 : DRQ_SDRAM,
++			   sdev->cfg->drq_sdram_is_zero ? 0 : DRQ_SDRAM);
+ 	sdev->cfg->set_mode(&v_lli->cfg, LINEAR_MODE, LINEAR_MODE);
+ 
+ 	sun6i_dma_lli_add(NULL, v_lli, p_lli, txd);
+@@ -764,7 +767,9 @@
+ 					   sg_dma_address(sg),
+ 					   sconfig->dst_addr);
+ 			v_lli->cfg = lli_cfg;
+-			sdev->cfg->set_drq(&v_lli->cfg, DRQ_SDRAM, vchan->port);
++			sdev->cfg->set_drq(&v_lli->cfg,
++				   sdev->cfg->drq_sdram_is_zero ? 0 : DRQ_SDRAM,
++				   vchan->port);
+ 			sdev->cfg->set_mode(&v_lli->cfg, LINEAR_MODE, IO_MODE);
+ 
+ 			dev_dbg(chan2dev(chan),
+@@ -778,7 +783,8 @@
+ 					   sconfig->src_addr,
+ 					   sg_dma_address(sg));
+ 			v_lli->cfg = lli_cfg;
+-			sdev->cfg->set_drq(&v_lli->cfg, vchan->port, DRQ_SDRAM);
++			sdev->cfg->set_drq(&v_lli->cfg, vchan->port,
++				   sdev->cfg->drq_sdram_is_zero ? 0 : DRQ_SDRAM);
+ 			sdev->cfg->set_mode(&v_lli->cfg, IO_MODE, LINEAR_MODE);
+ 
+ 			dev_dbg(chan2dev(chan),
+@@ -849,7 +855,9 @@
+ 					   buf_addr + period_len * i,
+ 					   sconfig->dst_addr);
+ 			v_lli->cfg = lli_cfg;
+-			sdev->cfg->set_drq(&v_lli->cfg, DRQ_SDRAM, vchan->port);
++			sdev->cfg->set_drq(&v_lli->cfg,
++				   sdev->cfg->drq_sdram_is_zero ? 0 : DRQ_SDRAM,
++				   vchan->port);
+ 			sdev->cfg->set_mode(&v_lli->cfg, LINEAR_MODE, IO_MODE);
+ 			dev_dbg(chan2dev(chan),
+ 				"%s; chan: %d, dest: %pad, src: %pad, len: %zu. flags: 0x%08lx\n",
+@@ -861,7 +869,8 @@
+ 					   sconfig->src_addr,
+ 					   buf_addr + period_len * i);
+ 			v_lli->cfg = lli_cfg;
+-			sdev->cfg->set_drq(&v_lli->cfg, vchan->port, DRQ_SDRAM);
++			sdev->cfg->set_drq(&v_lli->cfg, vchan->port,
++				   sdev->cfg->drq_sdram_is_zero ? 0 : DRQ_SDRAM);
+ 			sdev->cfg->set_mode(&v_lli->cfg, IO_MODE, LINEAR_MODE);
+ 			dev_dbg(chan2dev(chan),
+ 				"%s; chan: %d, dest: %pad, src: %pad, len: %zu. flags: 0x%08lx\n",
+@@ -1320,6 +1329,7 @@
+ 				     BIT(DMA_SLAVE_BUSWIDTH_8_BYTES),
+ 	.has_mbus_clk = true,
+ 	.has_mbus_en_clk = true,
++	.drq_sdram_is_zero = true,
+ 	.has_io_speedup = true,
+ 	.has_multicore_shared = true,
+ };

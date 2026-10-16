@@ -1,0 +1,294 @@
+Subject: [PATCH 3/5] crypto: sun4i-ss: queue skcipher requests through crypto_engine
+
+Register every sun4i-ss skcipher as asynchronous and route its encrypt/decrypt
+callbacks through crypto_engine. The worker invokes the algorithm's original
+synchronous callback. Keep PIO and hash paths from touching the controller
+while a DMA request owns it; the following patch activates that guard.
+
+Upstream-Status: Inappropriate [V821 crypto_engine integration]
+
+---
+--- a/drivers/crypto/allwinner/Kconfig
++++ b/drivers/crypto/allwinner/Kconfig
+@@ -14,6 +14,7 @@ config CRYPTO_DEV_SUN4I_SS
+ 	select CRYPTO_SHA1
+ 	select CRYPTO_AES
+ 	select CRYPTO_LIB_DES
+ 	select CRYPTO_SKCIPHER
++	select CRYPTO_ENGINE
+ 	help
+ 	  Some Allwinner SoC have a crypto accelerator named
+--- a/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-cipher.c
++++ b/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-cipher.c
+@@ -58,6 +58,10 @@
+ 	}
+ 
+ 	spin_lock_irqsave(&ss->slock, flags);
++	if (ss->dma_active) {
++		spin_unlock_irqrestore(&ss->slock, flags);
++		return -EBUSY;
++	}
+ 
+ 	for (i = 0; i < op->keylen / 4; i++)
+ 		writesl(ss->base + SS_KEY0 + i * 4, &op->key[i], 1);
+@@ -253,6 +257,10 @@
+ 	}
+ 
+ 	spin_lock_irqsave(&ss->slock, flags);
++	if (ss->dma_active) {
++		spin_unlock_irqrestore(&ss->slock, flags);
++		return -EBUSY;
++	}
+ 
+ 	for (i = 0; i < op->keylen / 4; i++)
+ 		writesl(ss->base + SS_KEY0 + i * 4, &op->key[i], 1);
+@@ -481,6 +489,23 @@
+ 	return 0;
+ }
+ 
++int sun4i_ss_engine_do_one_request(struct crypto_engine *engine, void *areq)
++{
++	struct skcipher_request *req = container_of(areq,
++						    struct skcipher_request, base);
++	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
++	struct sun4i_ss_alg_template *algt;
++	struct sun4i_cipher_req_ctx *rctx = skcipher_request_ctx(req);
++	int err;
++
++	algt = container_of(crypto_skcipher_alg(tfm),
++			   struct sun4i_ss_alg_template, alg.engine_crypto.base);
++	err = rctx->encrypt ? algt->encrypt(req) : algt->decrypt(req);
++	local_bh_disable();
++	crypto_finalize_skcipher_request(engine, req, err);
++	local_bh_enable();
++	return 0;
++}
+ /* CBC DES */
+ int sun4i_ss_cbc_des_encrypt(struct skcipher_request *areq)
+ {
+--- a/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-core.c
++++ b/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-core.c
+@@ -85,6 +85,7 @@
+ 	}
+ },
+ {       .type = CRYPTO_ALG_TYPE_SKCIPHER,
++	.mode = SS_CTR,
+ 	.alg.crypto = {
+ 		.setkey         = sun4i_ss_aes_setkey,
+ 		.encrypt        = sun4i_ss_ctr_aes_crypt,
+@@ -337,6 +338,50 @@
+ 	pm_runtime_disable(ss->dev);
+ }
+ 
++static int sun4i_ss_engine_queue(struct skcipher_request *areq, bool encrypt)
++{
++	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(areq);
++	struct sun4i_tfm_ctx *op = crypto_skcipher_ctx(tfm);
++	struct sun4i_cipher_req_ctx *rctx = skcipher_request_ctx(areq);
++
++	rctx->encrypt = encrypt;
++	return crypto_transfer_skcipher_request_to_engine(op->ss->engine, areq);
++}
++
++static int sun4i_ss_engine_encrypt(struct skcipher_request *areq)
++{
++	return sun4i_ss_engine_queue(areq, true);
++}
++
++static int sun4i_ss_engine_decrypt(struct skcipher_request *areq)
++{
++	return sun4i_ss_engine_queue(areq, false);
++}
++
++static int sun4i_ss_register_alg(struct sun4i_ss_alg_template *algt)
++{
++	if (algt->type == CRYPTO_ALG_TYPE_SKCIPHER) {
++		algt->encrypt = algt->alg.crypto.encrypt;
++		algt->decrypt = algt->alg.crypto.decrypt;
++		algt->alg.engine_crypto.base.encrypt = sun4i_ss_engine_encrypt;
++		algt->alg.engine_crypto.base.decrypt = sun4i_ss_engine_decrypt;
++		algt->alg.engine_crypto.base.base.cra_flags |= CRYPTO_ALG_ASYNC;
++		algt->alg.engine_crypto.op.do_one_request =
++			sun4i_ss_engine_do_one_request;
++		return crypto_engine_register_skcipher(&algt->alg.engine_crypto);
++	}
++
++	return crypto_register_ahash(&algt->alg.hash);
++}
++
++static void sun4i_ss_unregister_alg(struct sun4i_ss_alg_template *algt)
++{
++	if (algt->type == CRYPTO_ALG_TYPE_SKCIPHER)
++		crypto_engine_unregister_skcipher(&algt->alg.engine_crypto);
++	else
++		crypto_unregister_ahash(&algt->alg.hash);
++}
++
+ static int sun4i_ss_probe(struct platform_device *pdev)
+ {
+ 	u32 v;
+@@ -431,6 +476,17 @@
+ 	if (err)
+ 		return err;
+ 
++	ss->engine = crypto_engine_alloc_init(ss->dev, true);
++	if (!ss->engine) {
++		err = -ENOMEM;
++		goto error_pm;
++	}
++	err = crypto_engine_start(ss->engine);
++	if (err) {
++		crypto_engine_exit(ss->engine);
++		goto error_pm;
++	}
++
+ 	/*
+ 	 * Datasheet named it "Die Bonding ID"
+ 	 * I expect to be a sort of Security System Revision number.
+@@ -440,7 +496,7 @@
+ 
+ 	err = pm_runtime_resume_and_get(ss->dev);
+ 	if (err < 0)
+-		goto error_pm;
++		goto error_engine;
+ 
+ 	writel(SS_ENABLED, ss->base + SS_CTL);
+ 	v = readl(ss->base + SS_CTL);
+@@ -463,24 +519,9 @@
+ 				~CRYPTO_ALG_KERN_DRIVER_ONLY;
+ 			break;
+ 		}
+-		switch (ss_algs[i].type) {
+-		case CRYPTO_ALG_TYPE_SKCIPHER:
+-			err = crypto_register_skcipher(&ss_algs[i].alg.crypto);
+-			if (err) {
+-				dev_err(ss->dev, "Fail to register %s\n",
+-					ss_algs[i].alg.crypto.base.cra_name);
+-				goto error_alg;
+-			}
+-			break;
+-		case CRYPTO_ALG_TYPE_AHASH:
+-			err = crypto_register_ahash(&ss_algs[i].alg.hash);
+-			if (err) {
+-				dev_err(ss->dev, "Fail to register %s\n",
+-					ss_algs[i].alg.hash.halg.base.cra_name);
+-				goto error_alg;
+-			}
+-			break;
+-		}
++		err = sun4i_ss_register_alg(&ss_algs[i]);
++		if (err)
++			goto error_alg;
+ 	}
+ 
+ 	/* Ignore error of debugfs */
+@@ -492,15 +533,11 @@
+ error_alg:
+ 	i--;
+ 	for (; i >= 0; i--) {
+-		switch (ss_algs[i].type) {
+-		case CRYPTO_ALG_TYPE_SKCIPHER:
+-			crypto_unregister_skcipher(&ss_algs[i].alg.crypto);
+-			break;
+-		case CRYPTO_ALG_TYPE_AHASH:
+-			crypto_unregister_ahash(&ss_algs[i].alg.hash);
+-			break;
+-		}
+-	}
++		sun4i_ss_unregister_alg(&ss_algs[i]);
++	}
++error_engine:
++	crypto_engine_stop(ss->engine);
++	crypto_engine_exit(ss->engine);
+ error_pm:
+ 	sun4i_ss_pm_exit(ss);
+ 	return err;
+@@ -512,20 +549,15 @@
+ 	struct sun4i_ss_ctx *ss = platform_get_drvdata(pdev);
+ 
+ 	for (i = 0; i < ARRAY_SIZE(ss_algs); i++) {
+-		switch (ss_algs[i].type) {
+-		case CRYPTO_ALG_TYPE_SKCIPHER:
+-			crypto_unregister_skcipher(&ss_algs[i].alg.crypto);
+-			break;
+-		case CRYPTO_ALG_TYPE_AHASH:
+-			crypto_unregister_ahash(&ss_algs[i].alg.hash);
+-			break;
+-		}
+-	}
++		sun4i_ss_unregister_alg(&ss_algs[i]);
++	}
++	crypto_engine_stop(ss->engine);
++	crypto_engine_exit(ss->engine);
+ 
+ 	sun4i_ss_pm_exit(ss);
+ }
+ 
+ static const struct of_device_id a20ss_crypto_of_match_table[] = {
+ 	{ .compatible = "allwinner,sun4i-a10-crypto",
+ 	  .data = &ss_a10_variant
+ 	},
+--- a/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-hash.c
++++ b/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-hash.c
+@@ -224,6 +224,10 @@
+ 	}
+ 
+ 	spin_lock_bh(&ss->slock);
++	if (ss->dma_active) {
++		spin_unlock_bh(&ss->slock);
++		return -EBUSY;
++	}
+ 
+ 	/*
+ 	 * if some data have been processed before,
+--- a/drivers/crypto/allwinner/sun4i-ss/sun4i-ss.h
++++ b/drivers/crypto/allwinner/sun4i-ss/sun4i-ss.h
+@@ -24,6 +24,7 @@
+ #include <linux/delay.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/unaligned.h>
++#include <crypto/engine.h>
+ #include <crypto/md5.h>
+ #include <crypto/skcipher.h>
+ #include <crypto/sha1.h>
+@@ -139,9 +140,11 @@
+ 	struct reset_control *reset;
+ 	struct device *dev;
+ 	struct resource *res;
++	struct crypto_engine *engine;
+ 	char buf[4 * SS_RX_MAX];/* buffer for linearize SG src */
+ 	char bufo[4 * SS_TX_MAX]; /* buffer for linearize SG dst */
+ 	spinlock_t slock; /* control the use of the device */
++	bool dma_active; /* protected by slock; excludes PIO/hash during DMA */
+ 	struct dentry *dbgfs_dir;
+ 	struct dentry *dbgfs_stats;
+ };
+@@ -151,9 +154,12 @@
+ 	u32 mode;
+ 	union {
+ 		struct skcipher_alg crypto;
++		struct skcipher_engine_alg engine_crypto;
+ 		struct ahash_alg hash;
+ 	} alg;
+ 	struct sun4i_ss_ctx *ss;
++	int (*encrypt)(struct skcipher_request *areq);
++	int (*decrypt)(struct skcipher_request *areq);
+ 	unsigned long stat_req;
+ 	unsigned long stat_fb;
+ 	unsigned long stat_bytes;
+@@ -170,6 +176,7 @@
+ 
+ struct sun4i_cipher_req_ctx {
+ 	u32 mode;
++	bool encrypt;
+ 	u8 backup_iv[AES_BLOCK_SIZE];
+ 	struct skcipher_request fallback_req;   // keep at the end
+ };
+@@ -200,6 +207,7 @@
+ int sun4i_ss_ecb_aes_encrypt(struct skcipher_request *areq);
+ int sun4i_ss_ecb_aes_decrypt(struct skcipher_request *areq);
+ int sun4i_ss_ctr_aes_crypt(struct skcipher_request *areq);
++int sun4i_ss_engine_do_one_request(struct crypto_engine *engine, void *areq);
+ 
+ int sun4i_ss_cbc_des_encrypt(struct skcipher_request *areq);
+ int sun4i_ss_cbc_des_decrypt(struct skcipher_request *areq);

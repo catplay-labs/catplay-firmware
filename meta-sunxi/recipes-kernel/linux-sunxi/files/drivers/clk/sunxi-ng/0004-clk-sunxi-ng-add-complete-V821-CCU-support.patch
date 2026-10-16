@@ -7,13 +7,13 @@ Upstream-Status: Pending
  drivers/clk/sunxi-ng/Makefile                 |   4 +
  drivers/clk/sunxi-ng/ccu-sun300i-v821-r.c     | 330 ++++++++++++++++
  drivers/clk/sunxi-ng/ccu-sun300i-v821-r.h     |  10 +
- drivers/clk/sunxi-ng/ccu-sun300i-v821.c       | 210 ++++++++++
+ drivers/clk/sunxi-ng/ccu-sun300i-v821.c       | 243 ++++++++++
  drivers/clk/sunxi-ng/ccu-sun300i-v821.h       |  11 +
  include/dt-bindings/clock/sun300i-v821-ccu.h  | 113 ++++++
  .../dt-bindings/clock/sun300i-v821-r-ccu.h    |  42 ++
  include/dt-bindings/reset/sun300i-v821-ccu.h  |  64 +++
  .../dt-bindings/reset/sun300i-v821-r-ccu.h    |   7 +
- 10 files changed, 801 insertions(+)
+ 10 files changed, 834 insertions(+)
  create mode 100644 drivers/clk/sunxi-ng/ccu-sun300i-v821-r.c
  create mode 100644 drivers/clk/sunxi-ng/ccu-sun300i-v821-r.h
  create mode 100644 drivers/clk/sunxi-ng/ccu-sun300i-v821.c
@@ -423,14 +423,14 @@ new file mode 100644
 index 000000000000..5e8e36337698
 --- /dev/null
 +++ b/drivers/clk/sunxi-ng/ccu-sun300i-v821.c
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,243 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * Minimal CCU support for Allwinner sun300i-v821.
++ * CCU support for Allwinner sun300i-v821.
 + *
-+ * This intentionally models only the USB-, UART- and HSTIMER-related
-+ * gates/resets needed for early V821 mainline bring-up. Offsets and IDs match
-+ * the vendor sun300i-v821 CCU driver and dt-bindings.
++ * Clock gates and resets consumed by the V821 platform, including CE,
++ * SGDMA and standalone TRNG. Offsets and IDs match the vendor
++ * sun300i-v821 CCU driver and dt-bindings.
 + */
 +
 +#include <linux/clk-provider.h>
@@ -472,6 +472,19 @@ index 000000000000..5e8e36337698
 +		      0x0080, BIT(15), CLK_IGNORE_UNUSED);
 +static SUNXI_CCU_GATE(twi0_clk, "twi0", "apb-spc",
 +		      0x0080, BIT(14), 0);
++
++static SUNXI_CCU_GATE(trng_clk, "trng", "dcxo",
++		      0x0080, BIT(11), 0);
++static SUNXI_CCU_GATE(sg_dma_clk, "sgdma", "dcxo",
++		      0x0080, BIT(9), 0);
++static SUNXI_CCU_GATE(ce_clk, "ce", "dcxo",
++		      0x0080, BIT(6), CLK_IGNORE_UNUSED);
++
++static const char * const ss_parents[] = {
++	"dcxo", "pll-peri-cko-118m"
++};
++static SUNXI_CCU_M_WITH_MUX_GATE(ss_clk, "ss", ss_parents, 0x0018,
++				 0, 5, 24, 1, BIT(31), 0);
 +
 +static SUNXI_CCU_GATE(hstimer_clk, "hstimer", "ahb",
 +		      0x0080, BIT(5), 0);
@@ -524,6 +537,11 @@ index 000000000000..5e8e36337698
 +static SUNXI_CCU_GATE(usb_mbus_ahb_clk, "usb-mbus", "dcxo",
 +		      0x0084, BIT(14), 0);
 +
++static SUNXI_CCU_GATE(dma_mbus_clk, "dma-mbus", "dcxo",
++		      0x0084, BIT(13), 0);
++static SUNXI_CCU_GATE(sgdma_clk, "sgdma-mbus", "dcxo",
++		      0x0088, BIT(2), 0);
++
 +static struct ccu_common *sun300i_v821_ccu_clks[] = {
 +	&usb_24m_clk.common,
 +	&usb_12m_clk.common,
@@ -537,6 +555,10 @@ index 000000000000..5e8e36337698
 +	&uart1_clk.common,
 +	&uart0_clk.common,
 +	&twi0_clk.common,
++	&trng_clk.common,
++	&sg_dma_clk.common,
++	&ce_clk.common,
++	&ss_clk.common,
 +	&hstimer_clk.common,
 +	&spi_clk.common,
 +	&spif_clk.common,
@@ -551,6 +573,8 @@ index 000000000000..5e8e36337698
 +	&smhc1_mbus_ahb_clk.common,
 +	&smhc0_mbus_ahb_clk.common,
 +	&usb_mbus_ahb_clk.common,
++	&dma_mbus_clk.common,
++	&sgdma_clk.common,
 +};
 +
 +static struct clk_hw_onecell_data sun300i_v821_hw_clks = {
@@ -568,6 +592,10 @@ index 000000000000..5e8e36337698
 +		[CLK_UART1]	= &uart1_clk.common.hw,
 +		[CLK_UART0]	= &uart0_clk.common.hw,
 +		[CLK_TWI0]	= &twi0_clk.common.hw,
++		[CLK_TRNG]	= &trng_clk.common.hw,
++		[CLK_SG_DMA]	= &sg_dma_clk.common.hw,
++		[CLK_CE]	= &ce_clk.common.hw,
++		[CLK_SS]	= &ss_clk.common.hw,
 +		[CLK_HSTIMER]	= &hstimer_clk.common.hw,
 +		[CLK_SPI]	= &spi_clk.common.hw,
 +		[CLK_SPIF]	= &spif_clk.common.hw,
@@ -582,6 +610,8 @@ index 000000000000..5e8e36337698
 +		[CLK_MBUS_SMHC1]	= &smhc1_mbus_ahb_clk.common.hw,
 +		[CLK_MBUS_SMHC0]	= &smhc0_mbus_ahb_clk.common.hw,
 +		[CLK_MBUS_USB]	= &usb_mbus_ahb_clk.common.hw,
++		[CLK_MBUS_DMA]	= &dma_mbus_clk.common.hw,
++		[CLK_SGDMA]	= &sgdma_clk.common.hw,
 +		[CLK_DE_HB]	= NULL,
 +	},
 +};
@@ -597,6 +627,9 @@ index 000000000000..5e8e36337698
 +	[RST_BUS_UART1]		= { 0x0090, BIT(16) },
 +	[RST_BUS_UART0]		= { 0x0090, BIT(15) },
 +	[RST_BUS_TWI0]		= { 0x0090, BIT(14) },
++	[RST_BUS_TRNG]		= { 0x0090, BIT(11) },
++	[RST_BUS_SGDMA]	= { 0x0090, BIT(9) },
++	[RST_BUS_CE]		= { 0x0090, BIT(6) },
 +	[RST_BUS_HSTIMER]	= { 0x0090, BIT(5) },
 +	[RST_BUS_SPI]		= { 0x0094, BIT(4) },
 +	[RST_BUS_SPIF]		= { 0x0094, BIT(5) },

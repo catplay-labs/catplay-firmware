@@ -1,0 +1,115 @@
+Subject: [PATCH] crypto: af_alg: restore skcipher splice zero-copy input
+
+Restore AF_ALG's splice-page import for skcipher requests, removed by upstream
+commit ffdd2bc37895. Keep the change scoped to the shared input path used by
+skcipher; do not revert the separate AEAD changes from that commit. This lets
+the existing vmsplice/splice consumer pass its source pages into the skcipher
+scatterlist instead of copying them into newly allocated kernel pages.
+
+This deliberately restores the upstream zero-copy security tradeoff for this
+trusted V851 workload. The userspace producer caps each splice at ALG_MAX_PAGES
+(16 pages).
+
+Upstream-Status: Inappropriate [local V851 performance experiment]
+
+--- a/crypto/af_alg.c
++++ b/crypto/af_alg.c
+@@ -975,7 +975,7 @@ int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
+ 		ssize_t plen;
+ 
+ 		/* use the existing memory in an allocated page */
+-		if (ctx->merge) {
++		if (ctx->merge && !(msg->msg_flags & MSG_SPLICE_PAGES)) {
+ 			sgl = list_entry(ctx->tsgl_list.prev,
+ 					 struct af_alg_tsgl, list);
+ 			sg = sgl->sg + sgl->cur - 1;
+@@ -1019,35 +1019,57 @@ int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
+ 		if (sgl->cur)
+ 			sg_unmark_end(sg + sgl->cur - 1);
+ 
+-		do {
+-			struct page *pg;
+-			unsigned int i = sgl->cur;
+-
+-			plen = min_t(size_t, len, PAGE_SIZE);
+-
+-			pg = alloc_page(GFP_KERNEL);
+-			if (!pg) {
+-				err = -ENOMEM;
+-				goto unlock;
+-			}
+-
+-			sg_assign_page(sg + i, pg);
+-
+-			err = memcpy_from_msg(page_address(sg_page(sg + i)),
+-					      msg, plen);
+-			if (err) {
+-				__free_page(sg_page(sg + i));
+-				sg_assign_page(sg + i, NULL);
+-				goto unlock;
+-			}
+-
+-			sg[i].length = plen;
+-			len -= plen;
+-			ctx->used += plen;
+-			copied += plen;
+-			size -= plen;
+-			sgl->cur++;
+-		} while (len && sgl->cur < MAX_SGL_ENTS);
++		if (msg->msg_flags & MSG_SPLICE_PAGES) {
++			struct sg_table sgtable = {
++				.sgl		= sg,
++				.nents		= sgl->cur,
++				.orig_nents	= sgl->cur,
++			};
++
++			plen = extract_iter_to_sg(&msg->msg_iter, len, &sgtable,
++						  MAX_SGL_ENTS - sgl->cur, 0);
++			if (plen < 0) {
++				err = plen;
++				goto unlock;
++			}
++			for (; sgl->cur < sgtable.nents; sgl->cur++)
++				get_page(sg_page(&sg[sgl->cur]));
++			len -= plen;
++			ctx->used += plen;
++			copied += plen;
++			size -= plen;
++			ctx->merge = 0;
++		} else {
++			do {
++				struct page *pg;
++				unsigned int i = sgl->cur;
++
++				plen = min_t(size_t, len, PAGE_SIZE);
++
++				pg = alloc_page(GFP_KERNEL);
++				if (!pg) {
++					err = -ENOMEM;
++					goto unlock;
++				}
++
++				sg_assign_page(sg + i, pg);
++
++				err = memcpy_from_msg(page_address(sg_page(sg + i)),
++						      msg, plen);
++				if (err) {
++					__free_page(sg_page(sg + i));
++					sg_assign_page(sg + i, NULL);
++					goto unlock;
++				}
++
++				sg[i].length = plen;
++				len -= plen;
++				ctx->used += plen;
++				copied += plen;
++				size -= plen;
++				sgl->cur++;
++			} while (len && sgl->cur < MAX_SGL_ENTS);
++			ctx->merge = plen & (PAGE_SIZE - 1);
++		}
+ 
+-		ctx->merge = plen & (PAGE_SIZE - 1);
+ 
+-- 
+2.45.2

@@ -1,0 +1,29 @@
+Subject: [PATCH 2/4] crypto: sun4i-ss: expose algorithms to userspace
+
+Clear CRYPTO_ALG_KERN_DRIVER_ONLY from each algorithm immediately before
+registration. This makes the driver's algorithms available through AF_ALG for
+hardware validation while keeping the change independent of the V821 DMA path.
+
+Upstream-Status: Inappropriate [local hardware validation support]
+
+---
+--- a/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-core.c
++++ b/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-core.c
+@@ -435,5 +435,15 @@
+ 	for (i = 0; i < ARRAY_SIZE(ss_algs); i++) {
+ 		ss_algs[i].ss = ss;
++		switch (ss_algs[i].type) {
++		case CRYPTO_ALG_TYPE_SKCIPHER:
++			ss_algs[i].alg.crypto.base.cra_flags &=
++				~CRYPTO_ALG_KERN_DRIVER_ONLY;
++			break;
++		case CRYPTO_ALG_TYPE_AHASH:
++			ss_algs[i].alg.hash.halg.base.cra_flags &=
++				~CRYPTO_ALG_KERN_DRIVER_ONLY;
++			break;
++		}
+ 		switch (ss_algs[i].type) {
+ 		case CRYPTO_ALG_TYPE_SKCIPHER:
+ 			err = crypto_register_skcipher(&ss_algs[i].alg.crypto);
+-- 
+2.45.2

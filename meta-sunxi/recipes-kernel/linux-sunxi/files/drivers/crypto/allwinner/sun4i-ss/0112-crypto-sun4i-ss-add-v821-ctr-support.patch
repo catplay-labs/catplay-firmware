@@ -1,0 +1,157 @@
+Subject: [PATCH 1/4] crypto: sun4i-ss: add V821 CTR mode support
+
+V821 SDK SS uses CTR mode 2, a 128-bit counter at 0x34..0x40, and the same AES key/FIFO datapath as ECB. Add a provider-specific CTR algorithm and route its counter through those registers. Advance the full-width CTR counter directly, including carry into the upper
+96 bits, without calling crypto_inc() once per block. Keep partial AES blocks
+on the existing software fallback.
+
+Upstream-Status: Inappropriate [V821-specific hardware extension; submit after hardware validation]
+
+---
+--- a/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-core.c
++++ b/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-core.c
+@@ -87,6 +87,28 @@
+ {       .type = CRYPTO_ALG_TYPE_SKCIPHER,
+ 	.alg.crypto = {
+ 		.setkey         = sun4i_ss_aes_setkey,
++		.encrypt        = sun4i_ss_ctr_aes_crypt,
++		.decrypt        = sun4i_ss_ctr_aes_crypt,
++		.min_keysize	= AES_MIN_KEY_SIZE,
++		.max_keysize	= AES_MAX_KEY_SIZE,
++		.ivsize		= AES_BLOCK_SIZE,
++		.base = {
++			.cra_name = "ctr(aes)",
++			.cra_driver_name = "ctr-aes-sun4i-ss",
++			.cra_priority = 300,
++			.cra_blocksize = 1,
++			.cra_flags = CRYPTO_ALG_KERN_DRIVER_ONLY | CRYPTO_ALG_NEED_FALLBACK,
++			.cra_ctxsize = sizeof(struct sun4i_tfm_ctx),
++			.cra_module = THIS_MODULE,
++			.cra_alignmask = 3,
++			.cra_init = sun4i_ss_cipher_init,
++			.cra_exit = sun4i_ss_cipher_exit,
++		}
++	}
++},
++{       .type = CRYPTO_ALG_TYPE_SKCIPHER,
++	.alg.crypto = {
++		.setkey         = sun4i_ss_aes_setkey,
+ 		.encrypt        = sun4i_ss_cbc_aes_encrypt,
+ 		.decrypt        = sun4i_ss_cbc_aes_decrypt,
+ 		.min_keysize	= AES_MIN_KEY_SIZE,
+--- a/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-cipher.c
++++ b/drivers/crypto/allwinner/sun4i-ss/sun4i-ss-cipher.c
+@@ -65,7 +65,7 @@
+ 	if (areq->iv) {
+ 		for (i = 0; i < 4 && i < ivsize / 4; i++) {
+ 			v = *(u32 *)(areq->iv + i * 4);
+-			writesl(ss->base + SS_IV0 + i * 4, &v, 1);
++			writel(v, ss->base + ((mode & SS_CTR) ? SS_CNT0 : SS_IV0) + i * 4);
+ 		}
+ 	}
+ 	writel(mode, ss->base + SS_CTL);
+@@ -217,6 +217,9 @@
+ 	algt = container_of(alg, struct sun4i_ss_alg_template, alg.crypto);
+ 	if (areq->cryptlen % algt->alg.crypto.base.cra_blocksize)
+ 		need_fallback = true;
++	/* V821 SS CTR accepts complete AES counter blocks on the PIO path. */
++	if ((mode & SS_CTR) && (areq->cryptlen % AES_BLOCK_SIZE))
++		need_fallback = true;
+ 
+ 	/*
+ 	 * if we have only SGs with size multiple of 4,
+@@ -257,7 +260,7 @@
+ 	if (areq->iv) {
+ 		for (i = 0; i < 4 && i < ivsize / 4; i++) {
+ 			v = *(u32 *)(areq->iv + i * 4);
+-			writesl(ss->base + SS_IV0 + i * 4, &v, 1);
++			writel(v, ss->base + ((mode & SS_CTR) ? SS_CNT0 : SS_IV0) + i * 4);
+ 		}
+ 	}
+ 	writel(mode, ss->base + SS_CTL);
+@@ -439,6 +442,45 @@
+ 	return sun4i_ss_cipher_poll(areq);
+ }
+ 
++/* CTR uses a big-endian 128-bit counter; update low 32 bits in one step. */
++static void sun4i_ss_ctr_advance(u8 *iv, u32 blocks)
++{
++	u32 low = get_unaligned_be32(iv + 12);
++	u32 next = low + blocks;
++	int i;
++
++	put_unaligned_be32(next, iv + 12);
++	if (likely(next >= low))
++		return;
++
++	for (i = 11; i >= 0; i--) {
++		if (++iv[i])
++			break;
++	}
++}
++
++/* CTR is symmetric; V821 stores its 128-bit counter at 0x34..0x40. */
++int sun4i_ss_ctr_aes_crypt(struct skcipher_request *areq)
++{
++	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(areq);
++	struct sun4i_tfm_ctx *op = crypto_skcipher_ctx(tfm);
++	struct sun4i_cipher_req_ctx *rctx = skcipher_request_ctx(areq);
++	int err;
++
++	if (!areq->iv)
++		return -EINVAL;
++
++	rctx->mode = SS_OP_AES | SS_CTR | SS_CNT_128BITS | SS_ENABLED |
++		SS_ENCRYPTION | op->keymode;
++	err = sun4i_ss_cipher_poll(areq);
++	if (err || !areq->cryptlen || areq->cryptlen % AES_BLOCK_SIZE)
++		return err;
++
++	sun4i_ss_ctr_advance(areq->iv, areq->cryptlen / AES_BLOCK_SIZE);
++
++	return 0;
++}
++
+ /* CBC DES */
+ int sun4i_ss_cbc_des_encrypt(struct skcipher_request *areq)
+ {
+--- a/drivers/crypto/allwinner/sun4i-ss/sun4i-ss.h
++++ b/drivers/crypto/allwinner/sun4i-ss/sun4i-ss.h
+@@ -23,6 +23,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/delay.h>
+ #include <linux/pm_runtime.h>
++#include <linux/unaligned.h>
+ #include <crypto/md5.h>
+ #include <crypto/skcipher.h>
+ #include <crypto/sha1.h>
+@@ -46,6 +47,7 @@
+ #define SS_IV1            0x28
+ #define SS_IV2            0x2C
+ #define SS_IV3            0x30
++#define SS_CNT0           0x34
+ 
+ #define SS_FCSR           0x44
+ 
+@@ -66,12 +68,14 @@
+ /* SS operation mode - bits 12-13 */
+ #define SS_ECB			(0 << 12)
+ #define SS_CBC			(1 << 12)
++#define SS_CTR			(2 << 12)
+ #define SS_CTS			(3 << 12)
+ 
+ /* Counter width for CNT mode - bits 10-11 */
+ #define SS_CNT_16BITS		(0 << 10)
+ #define SS_CNT_32BITS		(1 << 10)
+ #define SS_CNT_64BITS		(2 << 10)
++#define SS_CNT_128BITS		(3 << 10)
+ 
+ /* Key size for AES - bits 8-9 */
+ #define SS_AES_128BITS		(0 << 8)
+@@ -195,6 +199,7 @@
+ int sun4i_ss_cbc_aes_decrypt(struct skcipher_request *areq);
+ int sun4i_ss_ecb_aes_encrypt(struct skcipher_request *areq);
+ int sun4i_ss_ecb_aes_decrypt(struct skcipher_request *areq);
++int sun4i_ss_ctr_aes_crypt(struct skcipher_request *areq);
+ 
+ int sun4i_ss_cbc_des_encrypt(struct skcipher_request *areq);
+ int sun4i_ss_cbc_des_decrypt(struct skcipher_request *areq);

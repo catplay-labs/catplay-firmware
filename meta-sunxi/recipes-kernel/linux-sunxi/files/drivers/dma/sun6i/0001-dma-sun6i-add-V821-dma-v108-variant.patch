@@ -1,0 +1,48 @@
+Subject: [PATCH] dmaengine: sun6i: add Allwinner V821 dma-v108 variant
+
+Upstream-Status: Inappropriate [V821 vendor-specific integration]
+
+Add the V821 system DMA configuration described by the vendor BSP. The
+controller has four physical channels, 54 request lines, H6-style DRQ and
+mode fields, and H3-style burst fields.
+---
+ drivers/dma/sun6i-dma.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/drivers/dma/sun6i-dma.c b/drivers/dma/sun6i-dma.c
+--- a/drivers/dma/sun6i-dma.c
++++ b/drivers/dma/sun6i-dma.c
+@@ -1289,3 +1289,25 @@
+ };
++
++/* Allwinner sun300i/V821 system DMA (IP v108). */
++static struct sun6i_dma_config sun300i_v821_dma_cfg = {
++	.nr_max_channels = 4,
++	.nr_max_requests = 53,
++	.nr_max_vchans   = 108,
++	.clock_autogate_enable = sun6i_enable_clock_autogate_h3,
++	.set_burst_length = sun6i_set_burst_length_h3,
++	.set_drq          = sun6i_set_drq_h6,
++	.set_mode         = sun6i_set_mode_h6,
++	.src_burst_lengths = BIT(1) | BIT(4) | BIT(8) | BIT(16),
++	.dst_burst_lengths = BIT(1) | BIT(4) | BIT(8) | BIT(16),
++	.src_addr_widths   = BIT(DMA_SLAVE_BUSWIDTH_1_BYTE) |
++				     BIT(DMA_SLAVE_BUSWIDTH_2_BYTES) |
++				     BIT(DMA_SLAVE_BUSWIDTH_4_BYTES) |
++				     BIT(DMA_SLAVE_BUSWIDTH_8_BYTES),
++	.dst_addr_widths   = BIT(DMA_SLAVE_BUSWIDTH_1_BYTE) |
++				     BIT(DMA_SLAVE_BUSWIDTH_2_BYTES) |
++				     BIT(DMA_SLAVE_BUSWIDTH_4_BYTES) |
++				     BIT(DMA_SLAVE_BUSWIDTH_8_BYTES),
++	.has_mbus_clk = true,
++};
+ 
+ static const struct of_device_id sun6i_dma_match[] = {
+@@ -1300,4 +1322,5 @@
+ 	{ .compatible = "allwinner,sun50i-h6-dma", .data = &sun50i_h6_dma_cfg },
++	{ .compatible = "allwinner,sun300i-v821-dma", .data = &sun300i_v821_dma_cfg },
+ 	{ /* sentinel */ }
+ };
+ MODULE_DEVICE_TABLE(of, sun6i_dma_match);
+-- 
+2.45.2

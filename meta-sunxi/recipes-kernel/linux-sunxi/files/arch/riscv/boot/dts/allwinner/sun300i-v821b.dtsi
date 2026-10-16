@@ -162,6 +162,43 @@
 			#reset-cells = <1>;
 		};
 
+		dma: dma-controller@43002000 {
+			compatible = "allwinner,sun300i-v821-dma";
+			reg = <0x0 0x43002000 0x0 0x1000>;
+			interrupts-extended = <&plic0 51 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&ccu CLK_SG_DMA>, <&ccu CLK_SGDMA>,
+				 <&ccu CLK_MBUS_DMA>;
+			clock-names = "bus", "mbus-en", "mbus";
+			dma-channels = <4>;
+			dma-requests = <54>;
+			resets = <&ccu RST_BUS_SGDMA>;
+			#dma-cells = <1>;
+			status = "okay";
+		};
+
+		cryptoengine: ce@43044000 {
+			compatible = "allwinner,sun300i-v821-crypto",
+				     "allwinner,sun4i-a10-crypto";
+			reg = <0x0 0x43044000 0x0 0x1000>;
+			interrupts-extended = <&plic0 39 IRQ_TYPE_EDGE_RISING>;
+			clocks = <&ccu CLK_CE>, <&ccu CLK_SS>;
+			clock-names = "ahb", "mod";
+			resets = <&ccu RST_BUS_CE>;
+			reset-names = "ahb";
+			dmas = <&dma 53>, <&dma 53>;
+			dma-names = "rx", "tx";
+			status = "okay";
+		};
+
+		trng: trng@42059000 {
+			compatible = "allwinner,sunxi-trng";
+			reg = <0x0 0x42059000 0x0 0x50>;
+			clocks = <&ccu CLK_TRNG>;
+			clock-names = "trng_clk";
+			resets = <&ccu RST_BUS_TRNG>;
+			status = "okay";
+		};
+
 		l2_cache: cache-controller@49000000 {
 			compatible = "andestech,llcache", "cache";
 			reg = <0x0 0x49000000 0x0 0x300>;

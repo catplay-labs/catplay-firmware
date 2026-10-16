@@ -1,0 +1,188 @@
+Subject: [PATCH] hwrng: add V821 standalone sunxi TRNG
+
+Upstream-Status: Inappropriate [V821 vendor-specific integration]
+
+The V821 BSP exposes a standalone TRNG at 0x42059000.  It is not the CE
+TRNG used by the V851 CE2.3 patchset, so register it as a separate hwrng
+provider using the vendor DT clock and reset names.
+---
+ drivers/char/hw_random/Kconfig       |  9 ++++++++
+ drivers/char/hw_random/Makefile      |  1 +
+ drivers/char/hw_random/sunxi-v821.c  | 141 ++++++++++++++++++++++++++++
+ 3 files changed, 151 insertions(+)
+
+diff --git a/drivers/char/hw_random/Kconfig b/drivers/char/hw_random/Kconfig
+index 0000000..0000001 100644
+--- a/drivers/char/hw_random/Kconfig
++++ b/drivers/char/hw_random/Kconfig
+@@ -654,0 +655,9 @@
++config HW_RANDOM_SUNXI_V821
++	tristate "Allwinner V821 standalone TRNG"
++	depends on HW_RANDOM && ARCH_SUNXI
++	depends on HAS_IOMEM
++	default HW_RANDOM
++	help
++	  Enable the standalone True Random Number Generator found on the
++	  Allwinner V821.  The driver is bound to allwinner,sunxi-trng.
++
+diff --git a/drivers/char/hw_random/Makefile b/drivers/char/hw_random/Makefile
+index 0000000..0000001 100644
+--- a/drivers/char/hw_random/Makefile
++++ b/drivers/char/hw_random/Makefile
+@@ -56,0 +57,1 @@
++obj-$(CONFIG_HW_RANDOM_SUNXI_V821) += sunxi-v821.o
+diff --git a/drivers/char/hw_random/sunxi-v821.c b/drivers/char/hw_random/sunxi-v821.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/char/hw_random/sunxi-v821.c
+@@ -0,0 +1,141 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/* Standalone Allwinner V821 TRNG. */
++
++#include <linux/bitfield.h>
++#include <linux/clk.h>
++#include <linux/iopoll.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/reset.h>
++#include <linux/hw_random.h>
++#include <linux/unaligned.h>
++
++#define TRNG_CTRL_CFG		0x00
++#define TRNG_MONITOR_RCT	0x0c
++#define TRNG_MONITOR_APT	0x10
++#define TRNG_EXTRACT_CFG	0x14
++#define TRNG_RAND0		0x18
++#define TRNG_RAND1		0x1c
++#define TRNG_RAND2		0x20
++#define TRNG_RAND3		0x24
++
++#define TRNG_EN			BIT(0)
++#define TRNG_RO_CTRL		GENMASK(11, 4)
++#define TRNG_READY		GENMASK(14, 12)
++#define TRNG_MONITOR_EN		BIT(11)
++#define TRNG_RCT_C		0x408
++#define TRNG_APT_C		0x3f1
++#define TRNG_APT_W		(0x400 << 12)
++#define TRNG_EXTRACT_START	BIT(9)
++#define TRNG_RESILIENT_TYPE	BIT(8)
++#define TRNG_RESILIENT_RATIO	(0xfff << 12)
++
++struct sunxi_v821_rng {
++	void __iomem *base;
++	struct clk *clk;
++	struct reset_control *reset;
++	struct hwrng rng;
++};
++
++static int sunxi_v821_rng_word(struct sunxi_v821_rng *trng, u8 *out)
++{
++	u32 val;
++	int ret;
++
++	val = readl(trng->base + TRNG_EXTRACT_CFG);
++	writel(val | TRNG_EXTRACT_START, trng->base + TRNG_EXTRACT_CFG);
++	ret = readl_poll_timeout(trng->base + TRNG_CTRL_CFG, val,
++				(val & TRNG_READY) == 0, 1, 1000);
++	if (ret)
++		return ret;
++
++	put_unaligned_le32(readl(trng->base + TRNG_RAND0), out + 0);
++	put_unaligned_le32(readl(trng->base + TRNG_RAND1), out + 4);
++	put_unaligned_le32(readl(trng->base + TRNG_RAND2), out + 8);
++	put_unaligned_le32(readl(trng->base + TRNG_RAND3), out + 12);
++	return 0;
++}
++
++static int sunxi_v821_rng_read(struct hwrng *rng, void *buf, size_t max,
++				bool wait)
++{
++	struct sunxi_v821_rng *trng = container_of(rng,
++							struct sunxi_v821_rng, rng);
++	u8 *dst = buf;
++	size_t done = 0;
++	int ret;
++
++	while (done < max) {
++		u8 word[16];
++		size_t copy = min_t(size_t, sizeof(word), max - done);
++
++		ret = sunxi_v821_rng_word(trng, word);
++		if (ret)
++			return ret;
++		memcpy(dst + done, word, copy);
++		done += copy;
++	}
++	return done;
++}
++
++static void sunxi_v821_rng_disable_clk(void *data)
++{
++	clk_disable_unprepare(data);
++}
++
++static int sunxi_v821_rng_probe(struct platform_device *pdev)
++{
++	struct sunxi_v821_rng *trng;
++	u32 val;
++	int ret;
++
++	trng = devm_kzalloc(&pdev->dev, sizeof(*trng), GFP_KERNEL);
++	if (!trng)
++		return -ENOMEM;
++	trng->base = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(trng->base))
++		return PTR_ERR(trng->base);
++	trng->clk = devm_clk_get(&pdev->dev, "trng_clk");
++	if (IS_ERR(trng->clk))
++		return dev_err_probe(&pdev->dev, PTR_ERR(trng->clk),
++					"failed to get clock\n");
++	trng->reset = devm_reset_control_get_exclusive(&pdev->dev, NULL);
++	if (IS_ERR(trng->reset))
++		return dev_err_probe(&pdev->dev, PTR_ERR(trng->reset),
++					"failed to get reset\n");
++	ret = reset_control_deassert(trng->reset);
++	if (ret)
++		return ret;
++	ret = clk_prepare_enable(trng->clk);
++	if (ret)
++		return ret;
++	ret = devm_add_action_or_reset(&pdev->dev, sunxi_v821_rng_disable_clk,
++				       trng->clk);
++	if (ret)
++		return ret;
++
++	val = readl(trng->base + TRNG_CTRL_CFG);
++	writel(val | TRNG_EN | TRNG_RO_CTRL, trng->base + TRNG_CTRL_CFG);
++	val = readl(trng->base + TRNG_MONITOR_RCT);
++	writel(val | TRNG_MONITOR_EN | TRNG_RCT_C,
++		trng->base + TRNG_MONITOR_RCT);
++	writel(TRNG_APT_C | TRNG_APT_W,
++		trng->base + TRNG_MONITOR_APT);
++	writel(TRNG_RESILIENT_RATIO | TRNG_RESILIENT_TYPE,
++		trng->base + TRNG_EXTRACT_CFG);
++
++	trng->rng.name = "sunxi-v821-trng";
++	trng->rng.read = sunxi_v821_rng_read;
++	trng->rng.quality = 512;
++	platform_set_drvdata(pdev, trng);
++	return devm_hwrng_register(&pdev->dev, &trng->rng);
++}
++
++static const struct of_device_id sunxi_v821_rng_of_match[] = {
++	{ .compatible = "allwinner,sunxi-trng" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sunxi_v821_rng_of_match);
++
++static struct platform_driver sunxi_v821_rng_driver = {
++	.probe = sunxi_v821_rng_probe,
++	.driver = {
++		.name = "sunxi-v821-trng",
++		.of_match_table = sunxi_v821_rng_of_match,
++	},
++};
++module_platform_driver(sunxi_v821_rng_driver);
++MODULE_LICENSE("GPL");

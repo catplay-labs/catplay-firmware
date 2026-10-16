@@ -1,0 +1,48 @@
+Subject: [PATCH] dmaengine: sun6i: route v108 shared IRQs to CPU
+
+Upstream-Status: Inappropriate [vendor-specific hardware enablement]
+
+V821 shares the DMA interrupt fabric with an MCU domain. Program the
+vendor-defined CPU and MCU masks for the v108 variant.
+
+--- a/drivers/dma/sun6i-dma.c
++++ b/drivers/dma/sun6i-dma.c
+@@ -107,6 +107,10 @@
+ #define LLI_LAST_ITEM	0xfffff800
+ #define NORMAL_WAIT	8
+ #define IOSPEEDUP	0x100
++#define DMA_IRQ_CPU_EN_REG	0x34
++#define DMA_IRQ_MCU_EN_REG	0x38
++#define DMA_IRQ_CPU_ENABLE_MASK	0xff
++#define DMA_IRQ_MCU_DISABLE_MASK	0xff00
+ #define DRQ_SDRAM	1
+ #define LINEAR_MODE     0
+ #define IO_MODE         1
+@@ -147,6 +151,7 @@
+ 	bool has_mbus_clk;
+ 	bool has_mbus_en_clk;
+ 	bool has_io_speedup;
++	bool has_multicore_shared;
+ };
+ 
+ /*
+@@ -1316,6 +1321,7 @@
+ 	.has_mbus_clk = true,
+ 	.has_mbus_en_clk = true,
+ 	.has_io_speedup = true,
++	.has_multicore_shared = true,
+ };
+ 
+ static const struct of_device_id sun6i_dma_match[] = {
+@@ -1522,6 +1528,11 @@
+ 	if (sdc->cfg->clock_autogate_enable)
+ 		sdc->cfg->clock_autogate_enable(sdc);
+ 
++	if (sdc->cfg->has_multicore_shared) {
++		writel(DMA_IRQ_CPU_ENABLE_MASK, sdc->base + DMA_IRQ_CPU_EN_REG);
++		writel(DMA_IRQ_MCU_DISABLE_MASK, sdc->base + DMA_IRQ_MCU_EN_REG);
++	}
++
+ 	return 0;
+ 
+ err_dma_unregister:

@@ -10,11 +10,7 @@
 	compatible = "allwinner,v821b", "allwinner,v821", "allwinner,sun300iw1p1";
 
 	chosen {
-		bootargs = "c2a_no_ovl console= _console=ttyGS0,115200 random.trust_bootloader=on root=/dev/mtdblock_bbt_ro2 rootfstype=erofs init=/usr/bin/carlinkit_otalib ro";
-		rng-seed = [
-			12 34 56 78 9a bc de f0 01 23 45 67 89 ab cd ef
-			91 82 73 64 55 46 37 28 19 2a 3b 4c 5d 6e 7f 80
-		];
+		bootargs = "c2a_no_ovl console= _console=ttyGS0,115200 root=/dev/mtdblock_bbt_ro2 rootfstype=erofs init=/usr/bin/carlinkit_otalib ro";
 	};
 
 	reg_vcc_wifi: regulator-vcc-wifi {
