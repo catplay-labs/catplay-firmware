@@ -29,6 +29,12 @@ RUSTFLAGS:append:mipsel = " -C relocation-model=static -C link-arg=-no-pie"
 RUSTFLAGS:append:riscv32 = " -C relocation-model=static -C link-arg=-no-pie"
 #RUSTFLAGS:append:mipsarch = " -C target-feature=+strict-align"
 
+# LLD leaves some MIPS non-PIE GOT call slots unresolved (for example the
+# pixman getenv call), causing an immediate jump to address zero at startup.
+# Use the GNU linker for this MIPS executable, as for other affected recipes.
+LDFLAGS:append:mipsel = " -fuse-ld=bfd"
+LDFLAGS:remove:mipsel = "-fuse-ld=lld"
+
 # Link atomic helpers statically without making the whole binary static.
 RUSTFLAGS:append:mipsel = " -C link-arg=-Wl,-Bstatic,-latomic,-Bdynamic"
 RUSTFLAGS:append:riscv32 = " -C link-arg=-Wl,-Bstatic,-latomic,-Bdynamic"
