@@ -70,6 +70,44 @@ pub const HOSTAPD_IMX: &str = concat_nl!(
     "",
 );
 
+pub const HOSTAPD_RTL8733BS: &str = concat_nl!(
+    "",
+    "# Basic configuration",
+    "",
+    "interface=wlan0",
+    "ssid=C2A",
+    "",
+    "# WPA and WPA2 configuration",
+    "",
+    "macaddr_acl=0",
+    "auth_algs=1",
+    "ignore_broadcast_ssid=0",
+    "wpa=2",
+    "wpa_passphrase=pass1234",
+    "wpa_key_mgmt=WPA-PSK",
+    "wpa_pairwise=CCMP",
+    "rsn_pairwise=CCMP",
+    "",
+    "driver=nl80211",
+    "ieee80211n=1",
+    "ieee80211ac=0",
+    "country_code=US",
+    "wmm_enabled=1",
+    "#wme_enabled=1",
+    "#hw_mode=g",
+    "#channel=11",
+    "hw_mode=a",
+    "channel=36",
+    "require_ht=1",
+    "require_vht=0",
+    "",
+    "#ht_capab=[SHORT-GI-20]",
+    "#ht_capab=[SHORT-GI-20][SHORT-GI-40][HT40+]",
+    "#ht_capab=[SHORT-GI-20][SHORT-GI-40][HT40-]",
+    "#vht_capab=[SHORT-GI-80][SHORT-GI-160]",
+    "",
+);
+
 pub const P2P_ULTRA: &str = concat_nl!(
     "ctrl_interface=/var/run/wpa_supplicant",
     "disable_scan_offload=1",
@@ -104,6 +142,7 @@ pub const P2P_ULTRA: &str = concat_nl!(
 pub fn match_hostapd_template(radio: Radio) -> &'static str {
     match radio {
         Radio::AIC8800D80 => HOSTAPD_ULTRA,
+        Radio::RTL8733BS => HOSTAPD_RTL8733BS,
         _ => HOSTAPD_IMX,
     }
 }
