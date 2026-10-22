@@ -36,7 +36,8 @@ TARGET_CC_KERNEL_ARCH:remove:toolchain-clang = "-mno-thumb-interwork"
 KERNEL_CC:toolchain-clang = "${CCACHE}${TARGET_PREFIX}clang ${HOST_CC_KERNEL_ARCH} ${DEBUG_PREFIX_MAP} -fno-integrated-as -fdebug-prefix-map=${STAGING_KERNEL_DIR}=${KERNEL_SRC_PATH}"
 
 KERNEL_AR:toolchain-clang = "${CCACHE}${TARGET_PREFIX}llvm-ar"
-KERNEL_NM:toolchain-clang = "${CCACHE}${TARGET_PREFIX}llvm-nm"
+# LTO initcall ordering invokes NM as one executable, not a shell command.
+KERNEL_NM:toolchain-clang = "${TARGET_PREFIX}llvm-nm"
 KERNEL_AS:toolchain-clang = "${CCACHE}${TARGET_PREFIX}llvm-as"
 KERNEL_OBJCOPY:toolchain-clang = "${CCACHE}${TARGET_PREFIX}llvm-objcopy"
 KERNEL_OBJDUMP:toolchain-clang = "${CCACHE}${TARGET_PREFIX}llvm-objdump"
