@@ -7,7 +7,8 @@ C2A_USE_FITIMAGE ?= "0"
 C2A_FITIMAGE_RECIPE ?= "linux-yocto-fitimage"
 C2A_FITIMAGE_DEPENDENCY ?= "${@'%s:do_deploy' % d.getVar('C2A_FITIMAGE_RECIPE') if d.getVar('C2A_USE_FITIMAGE') == '1' else ''}"
 
-C2A_WIC_KERNEL_NAME ?= "fitImage-${INITRAMFS_IMAGE_NAME}-${MACHINE}"
+# The FIT recipe deploys this file with or without an initramfs.
+C2A_WIC_KERNEL_NAME ?= "fitImage"
 C2A_WIC_KERNEL_PATH ?= "${DEPLOY_DIR_IMAGE}/${C2A_WIC_KERNEL_NAME}"
 
 C2A_WIC_KERNEL_IMAGE_NAME ?= "Image"
@@ -22,6 +23,8 @@ C2A_WIC_INITRAMFS_PATH ?= "${DEPLOY_DIR_IMAGE}/${C2A_WIC_INITRAMFS_NAME}"
 
 C2A_WIC_C2AFLASH_NAME ?= "${C2A_SYSTEM_IMAGE}-${MACHINE}.rootfs.c2aflash"
 C2A_WIC_C2AFLASH_PATH ?= "${DEPLOY_DIR_IMAGE}/${C2A_WIC_C2AFLASH_NAME}"
+C2A_WIC_C2AOTA_NAME ?= "${C2A_SYSTEM_IMAGE}-${MACHINE}.rootfs.c2aota"
+C2A_WIC_C2AOTA_PATH ?= "${DEPLOY_DIR_IMAGE}/${C2A_WIC_C2AOTA_NAME}"
 
 C2A_WIC_UBOOT_PATH = "${DEPLOY_DIR_IMAGE}/${UBOOT_BINARY}" 
 
@@ -30,6 +33,7 @@ C2A_WIC_IMAGE_PATH ?= "${DEPLOY_DIR_IMAGE}/${C2A_WIC_IMAGE_NAME}"
 
 C2A_BUNDLE_ARTIFACTS ?= "\
     ${C2A_WIC_C2AFLASH_PATH},${MACHINE}.c2aflash,${@'1' if (d.getVar('C2A_FLASH_PARTITIONS') or '').strip() else '0'} \
+    ${C2A_WIC_C2AOTA_PATH},${MACHINE}.c2aota,${@'1' if (d.getVar('C2A_OTA_PARTITIONS') or '').strip() else '0'} \
     ${C2A_WIC_IMAGE_PATH},${MACHINE}.wic,${@'1' if d.getVar('C2A_SUPPORTS_WIC') == '1' else '0'} \
     ${C2A_WIC_KERNEL_PATH},${MACHINE}.fitImage,${C2A_USE_FITIMAGE} \
     ${C2A_WIC_KERNEL_UZIMAGE_PATH},${MACHINE}.${KERNEL_IMAGETYPE},${@'1' if d.getVar('KERNEL_IMAGETYPE') in ('uzImage', 'uzImage.bin') else '0'} \

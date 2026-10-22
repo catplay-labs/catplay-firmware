@@ -9,6 +9,9 @@ python c2aflash_create_image() {
 
     out = os.path.join(d.getVar("IMGDEPLOYDIR"), f"{d.getVar('IMAGE_NAME')}.c2aflash")
     flash_size = int(d.getVar("C2A_FLASH_SIZE_BYTES"), 0)
+    fill_byte = int(d.getVar("C2A_FLASH_FILL_BYTE") or "0", 0)
+    if not 0 <= fill_byte <= 255:
+        bb.fatal(f"C2A_FLASH_FILL_BYTE must be between 0 and 255, got {fill_byte}")
     parts_raw = d.getVar("C2A_FLASH_PARTITIONS") or ""
 
     bb.note(f"Using C2A_FLASH_PARTITIONS: {parts_raw}")
@@ -32,6 +35,14 @@ python c2aflash_create_image() {
 
     with open(out, "wb") as img:
         img.truncate(flash_size)
+        if fill_byte:
+            fill = bytes([fill_byte]) * (1024 * 1024)
+            img.seek(0)
+            remaining = flash_size
+            while remaining:
+                chunk = fill[:min(len(fill), remaining)]
+                img.write(chunk)
+                remaining -= len(chunk)
 
         for part_file, off_raw, size_raw in zip(parts[0::3], parts[1::3], parts[2::3]):
             off = int(off_raw, 0)
@@ -57,4 +68,4 @@ python c2aflash_create_image() {
 
 IMAGE_CMD:c2aflash = ":"
 do_image_c2aflash[prefuncs] += "c2aflash_create_image"
-do_image_c2aflash[vardeps] += "C2A_FLASH_PARTITIONS C2A_FLASH_SIZE_BYTES"
+do_image_c2aflash[vardeps] += "C2A_FLASH_PARTITIONS C2A_FLASH_SIZE_BYTES C2A_FLASH_FILL_BYTE"
