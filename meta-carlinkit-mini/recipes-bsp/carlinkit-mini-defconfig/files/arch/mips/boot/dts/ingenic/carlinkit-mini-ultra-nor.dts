@@ -379,8 +379,8 @@
 				reg = <0x003a0000 0x00b80000>; /* 11.5MB */
 			};
 
-			userdata@f20000 {
-				label = "userdata";
+			persist@f20000 {
+				label = "persist";
 				reg = <0x00f20000 0x000E0000>; /* 896KB */
 			};
 
@@ -409,8 +409,8 @@
 				reg = <0x02900000 0x00100000>;
 			};
 
-			userdata@2a00000 {
-				label = "userdata";
+			persist@2a00000 {
+				label = "persist";
 				reg = <0x02A00000 0x05300000>;
 			};*/
 		};
