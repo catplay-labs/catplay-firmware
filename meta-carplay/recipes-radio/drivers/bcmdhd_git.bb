@@ -19,5 +19,7 @@ B = "${WORKDIR}/build"
 inherit module
 require module-extra.inc
 
+INSANE_SKIP:${PN} += "buildpaths"
+
 EXTRA_OEMAKE += "KERNELDIR=${STAGING_KERNEL_BUILDDIR} -C ${STAGING_KERNEL_BUILDDIR} M=${S}"
 EXTRA_OEMAKE += "CONFIG_BCMDHD=m"

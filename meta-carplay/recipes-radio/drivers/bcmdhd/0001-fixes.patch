@@ -1,6 +1,7 @@
 
 Date: Mon, 24 Nov 2025 03:37:15 +0100
 Subject: [PATCH] fixes
+Upstream-Status: Pending
 
 ---
  bcmdhd.101.10.591.x/Makefile            | 23 +++++++++-------

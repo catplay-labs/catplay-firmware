@@ -10,6 +10,8 @@ require bundle.inc
 require staging-kernel-modules.inc
 require staging-linux-firmware.inc
 
+INSANE_SKIP:${PN} += "buildpaths"
+
 FILES:${PN} = "/lib/modules/*/kernel/${DRIVER_PATH} /lib/modules/*/kernel/${DRIVER_HELPER_PATH}"
 
 FILES:${PN}-bcm4335 = " \

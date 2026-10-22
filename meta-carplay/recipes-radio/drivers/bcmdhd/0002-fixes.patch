@@ -1,5 +1,6 @@
 Date: Thu, 27 Nov 2025 17:25:20 +0100
 Subject: [PATCH] fixes
+Upstream-Status: Pending
 
 ---
  wl_cfg80211.c | 2 +-

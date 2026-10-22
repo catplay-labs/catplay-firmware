@@ -34,14 +34,14 @@ FILES:${PN}-bcm4358 = " \
 "
 
 do_install() {
-    install -Dm 644 ${WORKDIR}/4335/BCM4335A0.hcd ${D}/lib/firmware/brcm/BCM4335A0.hcd
-    install -Dm 644 ${WORKDIR}/4335/fw_bcm4335_ag_apsta.bin ${D}/lib/firmware/brcm/fw_bcm4335_ag_apsta.bin
+    install -Dm 644 ${UNPACKDIR}/4335/BCM4335A0.hcd ${D}/lib/firmware/brcm/BCM4335A0.hcd
+    install -Dm 644 ${UNPACKDIR}/4335/fw_bcm4335_ag_apsta.bin ${D}/lib/firmware/brcm/fw_bcm4335_ag_apsta.bin
 
-    install -Dm 644 ${WORKDIR}/4354/bcm4350.hcd ${D}/lib/firmware/brcm/bcm4350.hcd
-    install -Dm 644 ${WORKDIR}/4354/fw_bcm4354a1_ag_apsta.bin ${D}/lib/firmware/brcm/fw_bcm4354a1_ag_apsta.bin
+    install -Dm 644 ${UNPACKDIR}/4354/bcm4350.hcd ${D}/lib/firmware/brcm/bcm4350.hcd
+    install -Dm 644 ${UNPACKDIR}/4354/fw_bcm4354a1_ag_apsta.bin ${D}/lib/firmware/brcm/fw_bcm4354a1_ag_apsta.bin
 
-    install -Dm 644 ${WORKDIR}/4358/BCM4358A3.hcd ${D}/lib/firmware/brcm/BCM4358A3.hcd
-    install -Dm 644 ${WORKDIR}/4358/fw_bcm4358_ag_apsta.bin ${D}/lib/firmware/brcm/fw_bcm4358_ag_apsta.bin
+    install -Dm 644 ${UNPACKDIR}/4358/BCM4358A3.hcd ${D}/lib/firmware/brcm/BCM4358A3.hcd
+    install -Dm 644 ${UNPACKDIR}/4358/fw_bcm4358_ag_apsta.bin ${D}/lib/firmware/brcm/fw_bcm4358_ag_apsta.bin
 }
 
 
