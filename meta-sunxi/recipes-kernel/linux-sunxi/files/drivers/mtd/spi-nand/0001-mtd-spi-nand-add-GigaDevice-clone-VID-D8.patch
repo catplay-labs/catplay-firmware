@@ -1,0 +1,43 @@
+Upstream-Status: Inappropriate [V851S hardware-specific support]
+
+--- a/drivers/mtd/nand/spi/core.c
++++ b/drivers/mtd/nand/spi/core.c
+@@ -1359,6 +1359,7 @@
+ 	&fmsh_spinand_manufacturer,
+ 	&foresee_spinand_manufacturer,
+ 	&gigadevice_spinand_manufacturer,
++	&gigadevice_spinand_clone_manufacturer,
+ 	&macronix_spinand_manufacturer,
+ 	&micron_spinand_manufacturer,
+ 	&paragon_spinand_manufacturer,
+--- a/drivers/mtd/nand/spi/gigadevice.c
++++ b/drivers/mtd/nand/spi/gigadevice.c
+@@ -10,6 +10,7 @@
+ #include <linux/mtd/spinand.h>
+ 
+ #define SPINAND_MFR_GIGADEVICE			0xC8
++#define SPINAND_MFR_GIGADEVICE_CLONE		0xD8
+ 
+ #define GD5FXGQ4XA_STATUS_ECC_1_7_BITFLIPS	(1 << 4)
+ #define GD5FXGQ4XA_STATUS_ECC_8_BITFLIPS	(3 << 4)
+@@ -669,3 +670,10 @@
+ 	.ops = &gigadevice_spinand_manuf_ops,
+ };
+ 
++const struct spinand_manufacturer gigadevice_spinand_clone_manufacturer = {
++	.id = SPINAND_MFR_GIGADEVICE_CLONE,
++	.name = "GigaDevice Clone",
++	.chips = gigadevice_spinand_table,
++	.nchips = ARRAY_SIZE(gigadevice_spinand_table),
++	.ops = &gigadevice_spinand_manuf_ops,
++};
+--- a/include/linux/mtd/spinand.h
++++ b/include/linux/mtd/spinand.h
+@@ -437,6 +437,7 @@
+ extern const struct spinand_manufacturer fmsh_spinand_manufacturer;
+ extern const struct spinand_manufacturer foresee_spinand_manufacturer;
+ extern const struct spinand_manufacturer gigadevice_spinand_manufacturer;
++extern const struct spinand_manufacturer gigadevice_spinand_clone_manufacturer;
+ extern const struct spinand_manufacturer macronix_spinand_manufacturer;
+ extern const struct spinand_manufacturer micron_spinand_manufacturer;
+ extern const struct spinand_manufacturer paragon_spinand_manufacturer;

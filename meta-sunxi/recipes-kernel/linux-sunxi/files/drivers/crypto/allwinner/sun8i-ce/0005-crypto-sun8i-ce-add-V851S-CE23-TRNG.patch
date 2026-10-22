@@ -1,0 +1,172 @@
+Subject: [PATCH] crypto: sun8i-ce: add V851S CE 2.3 TRNG path
+Upstream-Status: Inappropriate [V851S-specific Crypto Engine 2.3 support]
+
+Use the CE 2.3 hash/RBG descriptor and HASH_RBG_TRPE launch for the
+V851S TRNG. Keep the existing variants on their current path.
+
+---
+diff --git a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
+@@ -201,3 +201,5 @@ int sun8i_ce_get_engine_number(struct sun8i_ce_dev *ce)
+ {
++	if (sun8i_ce_is_v23(ce))
++		return atomic_inc_return(&ce->flow) % (MAXFLOW - 1) + 1;
+ 	return atomic_inc_return(&ce->flow) % (MAXFLOW - 1);
+ }
+diff --git a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-trng.c b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-trng.c
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-trng.c
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-trng.c
+@@ -13,6 +13,7 @@
+ #include <linux/dma-mapping.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/hw_random.h>
++#include <linux/iopoll.h>
+ /*
+  * Note that according to the algorithm ID, 2 versions of the TRNG exists,
+  * The first present in H3/H5/R40/A64 and the second present in H6.
+@@ -20,6 +21,113 @@
+  * reliabily according to rngtest.
+  **/
+ 
++#define CE23_TRNG_BYTES 32
++#define CE23_TRNG_CMD 0x203
++#define CE23_HASH_RBG_TRPE BIT(1)
++#define CE23_RNG_FLOW 0
++#define CE23_RNG_STATUS (3 << (CE23_RNG_FLOW * 2))
++
++static void sun8i_ce_store_dma_addr(u8 addr[5], dma_addr_t dma)
++{
++	addr[0] = lower_32_bits(dma);
++	addr[1] = lower_32_bits(dma) >> 8;
++	addr[2] = lower_32_bits(dma) >> 16;
++	addr[3] = lower_32_bits(dma) >> 24;
++	addr[4] = upper_32_bits(dma);
++}
++
++static int sun8i_ce_trng_read_ce23(struct sun8i_ce_dev *ce, void *data, size_t max)
++{
++	struct ce23_hash_task *task;
++	dma_addr_t task_dma, dst_dma;
++	u8 *dst;
++	size_t done = 0;
++	int err = 0;
++	u32 v, esr;
++
++	if (!max)
++		return 0;
++	task = dma_alloc_coherent(ce->dev, sizeof(*task), &task_dma, GFP_KERNEL);
++	if (!task)
++		return -ENOMEM;
++	dst = dma_alloc_coherent(ce->dev, CE23_TRNG_BYTES, &dst_dma, GFP_KERNEL);
++	if (!dst) {
++		err = -ENOMEM;
++		goto free_task;
++	}
++
++	err = pm_runtime_resume_and_get(ce->dev);
++	if (err < 0)
++		goto free_dst;
++
++	mutex_lock(&ce->rnglock);
++	while (done < max) {
++		unsigned int copy = min_t(size_t, CE23_TRNG_BYTES, max - done);
++
++		memset(task, 0, sizeof(*task));
++		memset(dst, 0, CE23_TRNG_BYTES);
++		task->ctrl = cpu_to_le32(CE23_RNG_FLOW | BIT(12) | BIT(16));
++		task->cmd = cpu_to_le32(CE23_TRNG_CMD);
++		sun8i_ce_store_dma_addr(task->sg[0].dest_addr, dst_dma);
++		task->sg[0].dest_len = cpu_to_le32(CE23_TRNG_BYTES);
++
++		mutex_lock(&ce->mlock);
++		reinit_completion(&ce->chanlist[CE23_RNG_FLOW].complete);
++		ce->chanlist[CE23_RNG_FLOW].status = 0;
++		writel(CE23_RNG_STATUS, ce->base + CE_ISR);
++		v = readl(ce->base + CE_ICR) | BIT(CE23_RNG_FLOW);
++		writel(v, ce->base + CE_ICR);
++		writel(desc_addr_val(ce, task_dma), ce->base + CE_TDQ);
++		dma_wmb();
++		writel(0, ce->base + CE_TLR);
++		writel(CE23_HASH_RBG_TRPE, ce->base + CE_TLR);
++		mutex_unlock(&ce->mlock);
++
++		if (!wait_for_completion_timeout(
++			    &ce->chanlist[CE23_RNG_FLOW].complete,
++			    msecs_to_jiffies(CE_DMA_TIMEOUT_MS))) {
++			dev_err(ce->dev,
++				"CE 2.3 TRNG timeout flow %d: ISR=%08x ICR=%08x TLR=%08x ESR=%08x TSR=%08x\n",
++				CE23_RNG_FLOW, readl(ce->base + CE_ISR),
++				readl(ce->base + CE_ICR), readl(ce->base + CE_TLR),
++				readl(ce->base + CE_ESR), readl(ce->base + CE_TSR));
++			err = -ETIMEDOUT;
++		} else if (ce->chanlist[CE23_RNG_FLOW].status < 0) {
++			dev_err(ce->dev, "CE 2.3 TRNG task failed on flow %d\n",
++				CE23_RNG_FLOW);
++			err = -EIO;
++		}
++
++		mutex_lock(&ce->mlock);
++		writel(0, ce->base + CE_TLR);
++		v = readl(ce->base + CE_ICR) & ~BIT(CE23_RNG_FLOW);
++		writel(v, ce->base + CE_ICR);
++		mutex_unlock(&ce->mlock);
++		if (err)
++			break;
++
++		esr = readl(ce->base + CE_ESR);
++		esr = (esr >> (CE23_RNG_FLOW * 4)) & 0xf;
++		if (esr) {
++			dev_err(ce->dev, "CE 2.3 TRNG error status: %#x\n", esr);
++			err = -EIO;
++			break;
++		}
++		dma_rmb();
++		memcpy((u8 *)data + done, dst, copy);
++		done += copy;
++	}
++	mutex_unlock(&ce->rnglock);
++	pm_runtime_put(ce->dev);
++	if (!err)
++		err = max;
++free_dst:
++	dma_free_coherent(ce->dev, CE23_TRNG_BYTES, dst, dst_dma);
++free_task:
++	dma_free_coherent(ce->dev, sizeof(*task), task, task_dma);
++	return err;
++}
++
+ static int sun8i_ce_trng_read(struct hwrng *rng, void *data, size_t max, bool wait)
+ {
+ 	struct sun8i_ce_dev *ce;
+@@ -33,6 +141,8 @@
+ 	void *d;
+ 
+ 	ce = container_of(rng, struct sun8i_ce_dev, trng);
++	if (sun8i_ce_is_v23(ce))
++		return sun8i_ce_trng_read_ce23(ce, data, max);
+ 
+ 	/* round the data length to a multiple of 32*/
+ 	todo = max + 32;
+@@ -101,7 +211,7 @@
+ {
+ 	int ret;
+ 
+-	if (ce->variant->trng == CE_ID_NOTSUPP) {
++	if (ce->variant->trng == CE_ID_NOTSUPP && !sun8i_ce_is_v23(ce)) {
+ 		dev_info(ce->dev, "TRNG not supported\n");
+ 		return 0;
+ 	}
+@@ -116,7 +226,7 @@
+ 
+ void sun8i_ce_hwrng_unregister(struct sun8i_ce_dev *ce)
+ {
+-	if (ce->variant->trng == CE_ID_NOTSUPP)
++	if (ce->variant->trng == CE_ID_NOTSUPP && !sun8i_ce_is_v23(ce))
+ 		return;
+ 	hwrng_unregister(&ce->trng);
+ }
+-- 
+2.51.0
+-- 
+2.51.0

@@ -1,0 +1,106 @@
+Subject: [PATCH] media: sunxi: add experimental V853 Cedrus binding
+Upstream-Status: Pending
+
+Local V851S bring-up patch.
+
+diff --git a/Documentation/devicetree/bindings/media/allwinner,sun4i-a10-video-engine.yaml b/Documentation/devicetree/bindings/media/allwinner,sun4i-a10-video-engine.yaml
+--- a/Documentation/devicetree/bindings/media/allwinner,sun4i-a10-video-engine.yaml
++++ b/Documentation/devicetree/bindings/media/allwinner,sun4i-a10-video-engine.yaml
+@@ -19,6 +19,7 @@
+       - allwinner,sun8i-a33-video-engine
+       - allwinner,sun8i-h3-video-engine
+       - allwinner,sun8i-v3s-video-engine
++      - allwinner,sun8i-v853-video-engine
+       - allwinner,sun8i-r40-video-engine
+       - allwinner,sun20i-d1-video-engine
+       - allwinner,sun50i-a64-video-engine
+@@ -57,6 +58,9 @@
+   iommus:
+     maxItems: 1
+ 
++  power-domains:
++    maxItems: 1
++
+   memory-region:
+     maxItems: 1
+     description:
+@@ -80,7 +84,16 @@
+   - clocks
+   - clock-names
+   - resets
+-  - allwinner,sram
++
++allOf:
++  - if:
++      properties:
++        compatible:
++          const: allwinner,sun8i-v853-video-engine
++    then: {}
++    else:
++      required:
++        - allwinner,sram
+ 
+ additionalProperties: false
+ 
+diff --git a/drivers/staging/media/sunxi/cedrus/cedrus.c b/drivers/staging/media/sunxi/cedrus/cedrus.c
+--- a/drivers/staging/media/sunxi/cedrus/cedrus.c
++++ b/drivers/staging/media/sunxi/cedrus/cedrus.c
+@@ -607,6 +607,13 @@
+ 	.mod_rate	= 297000000,
+ };
+ 
++/* Start with the H.264 decoder supported by the closest known VE variant. */
++static const struct cedrus_variant sun8i_v853_cedrus_variant = {
++	.capabilities	= CEDRUS_CAPABILITY_UNTILED |
++			  CEDRUS_CAPABILITY_H264_DEC,
++	.mod_rate	= 297000000,
++};
++
+ static const struct cedrus_variant sun8i_r40_cedrus_variant = {
+ 	.capabilities	= CEDRUS_CAPABILITY_UNTILED |
+ 			  CEDRUS_CAPABILITY_MPEG2_DEC |
+@@ -675,6 +682,10 @@
+ 	{
+ 		.compatible = "allwinner,sun8i-v3s-video-engine",
+ 		.data = &sun8i_v3s_cedrus_variant,
++	},
++	{
++		.compatible = "allwinner,sun8i-v853-video-engine",
++		.data = &sun8i_v853_cedrus_variant,
+ 	},
+ 	{
+ 		.compatible = "allwinner,sun8i-r40-video-engine",
+diff --git a/drivers/staging/media/sunxi/cedrus/cedrus_hw.c b/drivers/staging/media/sunxi/cedrus/cedrus_hw.c
+--- a/drivers/staging/media/sunxi/cedrus/cedrus_hw.c
++++ b/drivers/staging/media/sunxi/cedrus/cedrus_hw.c
+@@ -231,6 +231,11 @@
+ 		goto err_mod_clk;
+ 	}
+ 
++	if (of_device_is_compatible(dev->dev->of_node,
++				    "allwinner,sun8i-v853-video-engine"))
++		dev_info_once(dev->dev, "VE version: %#08x\n",
++			      cedrus_read(dev, VE_VERSION));
++
+ 	return 0;
+ 
+ err_mod_clk:
+@@ -273,11 +278,13 @@
+ 		return ret;
+ 	}
+ 
+-	ret = sunxi_sram_claim(dev->dev);
+-	if (ret) {
+-		dev_err(dev->dev, "Failed to claim SRAM\n");
+-
+-		goto err_mem;
++	if (of_property_read_bool(dev->dev->of_node, "allwinner,sram")) {
++		ret = sunxi_sram_claim(dev->dev);
++		if (ret) {
++			dev_err(dev->dev, "Failed to claim SRAM\n");
++
++			goto err_mem;
++		}
+ 	}
+ 
+ 	dev->ahb_clk = devm_clk_get(dev->dev, "ahb");

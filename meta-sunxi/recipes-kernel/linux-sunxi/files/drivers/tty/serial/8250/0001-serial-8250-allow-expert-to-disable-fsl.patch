@@ -1,0 +1,18 @@
+Subject: [PATCH] serial: 8250: let expert configurations omit FSL support
+
+Keep the existing defaults while allowing a single-platform ARM firmware
+to disable the Freescale-specific driver explicitly.
+
+Upstream-Status: Inappropriate [firmware configuration policy]
+
+--- a/drivers/tty/serial/8250/Kconfig
++++ b/drivers/tty/serial/8250/Kconfig
+@@ -362,7 +362,7 @@
+ 	  If unsure, say N.
+ 
+ config SERIAL_8250_FSL
+-	tristate "Freescale 16550 UART support" if COMPILE_TEST && !(PPC || ARM || ARM64)
++	tristate "Freescale 16550 UART support" if EXPERT || (COMPILE_TEST && !(PPC || ARM || ARM64))
+ 	depends on SERIAL_8250
+ 	default SERIAL_8250 if PPC || ARM || ARM64
+ 	help

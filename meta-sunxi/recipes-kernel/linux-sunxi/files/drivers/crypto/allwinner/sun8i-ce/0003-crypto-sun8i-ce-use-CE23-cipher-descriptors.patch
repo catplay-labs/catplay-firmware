@@ -1,0 +1,99 @@
+Subject: [PATCH] crypto: sun8i-ce: use V851S CE 2.3 cipher descriptors
+Upstream-Status: Inappropriate [V851S-specific CE 2.3 descriptor format]
+
+The TinaSDK V5 driver for V851S uses the CE 2.3 cipher task layout: DMA
+addresses occupy five little-endian bytes and each scatter-gather entry
+contains both source and destination addresses and byte lengths. Keep the
+mainline descriptor for other SoCs, and translate the existing cipher task
+into the V851S layout before submission. Allocate enough coherent memory for
+the V851S task shared with the CE 2.3 TRNG path.
+
+---
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
+@@ -773,7 +773,7 @@
+ 	while (i >= 0) {
+ 		crypto_engine_exit(ce->chanlist[i].engine);
+ 		if (ce->chanlist[i].tl)
+-			dma_free_coherent(ce->dev, sizeof(struct ce_task),
++			dma_free_coherent(ce->dev, (sun8i_ce_is_v23(ce) ? sizeof(struct ce23_hash_task) : sizeof(struct ce_task)),
+ 					  ce->chanlist[i].tl,
+ 					  ce->chanlist[i].t_phy);
+ 		i--;
+@@ -720,4 +720,4 @@
+ 		ce->chanlist[i].tl = dma_alloc_coherent(ce->dev,
+-							sizeof(struct ce_task),
++							(sun8i_ce_is_v23(ce) ? sizeof(struct ce23_hash_task) : sizeof(struct ce_task)),
+ 							&ce->chanlist[i].t_phy,
+ 							GFP_KERNEL);
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-cipher.c
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-cipher.c
+@@ -143,6 +143,44 @@
+ 	}
+ }
+ 
++static void sun8i_ce_store_addr40(u8 dst[5], dma_addr_t addr)
++{
++	unsigned int i;
++
++	for (i = 0; i < 5; i++)
++		dst[i] = (u64)addr >> (i * 8);
++}
++
++static void sun8i_ce_cipher_convert_ce23(struct ce_task *src,
++						struct ce23_cipher_task *dst,
++						struct skcipher_request *areq,
++						struct sun8i_cipher_req_ctx *rctx,
++						int nr_sgs, int nr_sgd)
++{
++	struct scatterlist *sg;
++	int i;
++
++	dst->t_id = src->t_id;
++	dst->t_common_ctl = src->t_common_ctl;
++	dst->t_sym_ctl = src->t_sym_ctl;
++	dst->t_asym_ctl = src->t_asym_ctl;
++	dst->t_dlen = src->t_dlen;
++	sun8i_ce_store_addr40(dst->t_key, rctx->addr_key);
++	if (rctx->addr_iv)
++		sun8i_ce_store_addr40(dst->t_iv, rctx->addr_iv);
++
++	for_each_sg(areq->src, sg, nr_sgs, i) {
++		sun8i_ce_store_addr40(dst->sg[i].source_addr,
++				      sg_dma_address(sg));
++		dst->sg[i].source_len = cpu_to_le32(le32_to_cpu(src->t_src[i].len) * 4);
++	}
++	for_each_sg(areq->dst, sg, nr_sgd, i) {
++		sun8i_ce_store_addr40(dst->sg[i].dest_addr,
++				      sg_dma_address(sg));
++		dst->sg[i].dest_len = cpu_to_le32(le32_to_cpu(src->t_dst[i].len) * 4);
++	}
++}
++
+ static int sun8i_ce_cipher_prepare(struct skcipher_request *areq,
+ 				   struct ce_task *cet)
+ {
+@@ -284,6 +322,14 @@
+ 
+ 	rctx->nr_sgs = ns;
+ 	rctx->nr_sgd = nd;
++	if (sun8i_ce_is_v23(ce)) {
++		struct ce_task task;
++
++		memcpy(&task, cet, sizeof(task));
++		memset(cet, 0, sizeof(struct ce23_cipher_task));
++		sun8i_ce_cipher_convert_ce23(&task, (struct ce23_cipher_task *)cet,
++					     areq, rctx, nr_sgs, nr_sgd);
++	}
+ 	return 0;
+ 
+ theend_sgs:
+@@ -350,7 +396,7 @@
+ 	}
+ 
+ 	if (areq->iv && ivsize > 0) {
+-		if (cet->t_iv)
++		if (rctx->addr_iv)
+ 			dma_unmap_single(ce->dev, rctx->addr_iv, ivsize,
+ 					 DMA_TO_DEVICE);
+ 		offset = areq->cryptlen - ivsize;

@@ -1,0 +1,120 @@
+Subject: [PATCH] crypto: sun8i-ce: add native AES-CTR mode
+Upstream-Status: Pending
+
+Register AES-CTR as a native sun8i CE skcipher mode. The mode is
+enabled only for CE variants that advertise CTR in their existing
+op_mode table. CTR uses AES encryption for both directions and
+returns the next counter in a dedicated CE 2.3 DMA output buffer.
+Keep partial-block requests and unsupported SG layouts on the
+existing software fallback path.
+
+---
+diff --git a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-cipher.c b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-cipher.c
+index 021614b..d39520d 100644
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-cipher.c
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-cipher.c
+@@ -200,7 +200,8 @@ static int sun8i_ce_cipher_prepare(struct skcipher_request *areq,
+ 
+ 	ivsize = crypto_skcipher_ivsize(tfm);
+ 	if (areq->iv && ivsize > 0) {
+-		if (rctx->op_dir & CE_DECRYPTION) {
++		if ((rctx->op_dir & CE_DECRYPTION) &&
++		    algt->ce_blockmode != CE_ID_OP_CTR) {
+ 			offset = areq->cryptlen - ivsize;
+ 			scatterwalk_map_and_copy(rctx->backup_iv, areq->src,
+ 						 offset, ivsize, 0);
+@@ -314,10 +315,13 @@ static void sun8i_ce_cipher_unprepare(struct skcipher_request *areq,
+ 	struct sun8i_cipher_tfm_ctx *op = crypto_skcipher_ctx(tfm);
+ 	struct sun8i_ce_dev *ce = op->ce;
+ 	struct sun8i_cipher_req_ctx *rctx = skcipher_request_ctx(areq);
++	struct skcipher_alg *alg = crypto_skcipher_alg(tfm);
++	struct sun8i_ce_alg_template *algt;
+ 	unsigned int ivsize, offset;
+ 	int nr_sgs = rctx->nr_sgs;
+ 	int nr_sgd = rctx->nr_sgd;
+ 
++	algt = container_of(alg, struct sun8i_ce_alg_template, alg.skcipher.base);
+ 	ivsize = crypto_skcipher_ivsize(tfm);
+ 
+ 	if (areq->src == areq->dst) {
+@@ -385,6 +389,15 @@ int sun8i_ce_skdecrypt(struct skcipher_request *areq)
+ 	rctx->op_dir = CE_DECRYPTION;
+ 	if (sun8i_ce_cipher_need_fallback(areq))
+ 		return sun8i_ce_cipher_fallback(areq);
++	{
++		struct skcipher_alg *alg = crypto_skcipher_alg(tfm);
++		struct sun8i_ce_alg_template *algt;
++
++		algt = container_of(alg, struct sun8i_ce_alg_template,
++				    alg.skcipher.base);
++		if (algt->ce_blockmode == CE_ID_OP_CTR)
++			rctx->op_dir = CE_ENCRYPTION;
++	}
+ 
+ 	e = sun8i_ce_get_engine_number(op->ce);
+ 	rctx->flow = e;
+diff --git a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
+index c6402e8..623fa5b 100644
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
+@@ -321,6 +321,36 @@ static struct sun8i_ce_alg_template ce_algs[] = {
+ 		.do_one_request = sun8i_ce_cipher_do_one,
+ 	},
+ },
++{
++	.type = CRYPTO_ALG_TYPE_SKCIPHER,
++	.ce_algo_id = CE_ID_CIPHER_AES,
++	.ce_blockmode = CE_ID_OP_CTR,
++	.alg.skcipher.base = {
++		.base = {
++			.cra_name = "ctr(aes)",
++			.cra_driver_name = "ctr-aes-sun8i-ce",
++			.cra_priority = 400,
++			.cra_blocksize = 1,
++			.cra_flags = CRYPTO_ALG_TYPE_SKCIPHER |
++				CRYPTO_ALG_ASYNC |
++				CRYPTO_ALG_NEED_FALLBACK,
++			.cra_ctxsize = sizeof(struct sun8i_cipher_tfm_ctx),
++			.cra_module = THIS_MODULE,
++			.cra_alignmask = 0xf,
++			.cra_init = sun8i_ce_cipher_init,
++			.cra_exit = sun8i_ce_cipher_exit,
++		},
++		.min_keysize = AES_MIN_KEY_SIZE,
++		.max_keysize = AES_MAX_KEY_SIZE,
++		.ivsize = AES_BLOCK_SIZE,
++		.setkey = sun8i_ce_aes_setkey,
++		.encrypt = sun8i_ce_skencrypt,
++		.decrypt = sun8i_ce_skdecrypt,
++	},
++	.alg.skcipher.op = {
++		.do_one_request = sun8i_ce_cipher_do_one,
++	},
++},
+ {
+ 	.type = CRYPTO_ALG_TYPE_SKCIPHER,
+ 	.ce_algo_id = CE_ID_CIPHER_AES,
+diff --git a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce.h b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce.h
+index 468d99b..95bc32a 100644
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce.h
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce.h
+@@ -46,6 +46,7 @@
+ 
+ #define CE_OP_ECB	0
+ #define CE_OP_CBC	(1 << 8)
++#define CE_OP_CTR	(2 << 8)
+ 
+ #define CE_ALG_AES		0
+ #define CE_ALG_DES		1
+@@ -77,7 +78,8 @@
+ 
+ #define CE_ID_OP_ECB	0
+ #define CE_ID_OP_CBC	1
+-#define CE_ID_OP_MAX	2
++#define CE_ID_OP_CTR	2
++#define CE_ID_OP_MAX	3
+ 
+ /* Used in CE registers */
+ #define CE_ERR_ALGO_NOTSUP	BIT(0)
+-- 
+2.51.0

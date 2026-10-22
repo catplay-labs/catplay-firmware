@@ -1,0 +1,58 @@
+Subject: [PATCH] crypto: sun8i-ce: define V851S CE variant after TRNG support
+Upstream-Status: Inappropriate [V851S-specific Crypto Engine 2.3 support]
+
+Define the V851S CE variant after the CTR and CE 2.3 TRNG capabilities are
+implemented. Read and retain VER while the engine is runtime-active so the
+driver selects CE 2.3 behavior from hardware identity.
+
+---
+ drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c | 19 ++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
+@@ -152,6 +152,22 @@
+ 	.trng = CE_ALG_TRNG,
+ };
+ 
++static const struct ce_variant ce_v851_variant = {
++	.alg_cipher = { CE_ALG_AES, CE_ALG_DES, CE_ALG_3DES },
++	.alg_hash = { CE_ALG_MD5, CE_ALG_SHA1, CE_ALG_SHA224, CE_ALG_SHA256,
++		CE_ALG_SHA384, CE_ALG_SHA512 },
++	.op_mode = { CE_OP_ECB, CE_OP_CBC, CE_OP_CTR },
++	.ce_clks = {
++		{ "bus", 0, 0 },
++		{ "mod", 400000000, 400000000 },
++		{ "ram", 0, 0 },
++		{ "trng", 0, 0 },
++	},
++	.cipher_t_dlen_in_bytes = true,
++	.esr = ESR_H6,
++	.trng = CE_ID_NOTSUPP,
++};
++
+ static const struct ce_variant ce_r40_variant = {
+ 	.alg_cipher = { CE_ALG_AES, CE_ALG_DES, CE_ALG_3DES,
+ 	},
+@@ -1111,6 +1127,8 @@
+ 	  .data = &ce_r40_variant },
+ 	{ .compatible = "allwinner,sun20i-d1-crypto",
+ 	  .data = &ce_d1_variant },
++	{ .compatible = "allwinner,sun8i-v851-crypto",
++	  .data = &ce_v851_variant },
+ 	{ .compatible = "allwinner,sun50i-a64-crypto",
+ 	  .data = &ce_a64_variant },
+ 	{ .compatible = "allwinner,sun50i-h5-crypto",
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
+@@ -982,6 +982,8 @@ static int sun8i_ce_probe(struct platform_device *pdev)
+ 	err = pm_runtime_resume_and_get(ce->dev);
+ 	if (err < 0)
+ 		goto error_alg;
++	ce->version = readl(ce->base + CE_VER);
++	dev_info(ce->dev, "Crypto Engine version %08x\n", ce->version);
+ 
+ #ifdef CONFIG_CRYPTO_DEV_SUN8I_CE_TRNG
+ 	sun8i_ce_hwrng_register(ce);
+-- 
+2.51.0

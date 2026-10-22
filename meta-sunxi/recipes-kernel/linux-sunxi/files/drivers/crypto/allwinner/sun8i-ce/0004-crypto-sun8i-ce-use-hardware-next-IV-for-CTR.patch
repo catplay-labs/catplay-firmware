@@ -1,0 +1,119 @@
+Subject: [PATCH] crypto: sun8i-ce: wire V851 CE 2.3 AES-CTR counter DMA
+Upstream-Status: Pending
+
+V851 CE 2.3 requires a separate 128-bit counter address in t_ctr and
+uses the counter-size field in sym_ctl. Map a cacheline-isolated next-IV
+buffer as device output, pass its 40-bit address in the CE 2.3 descriptor,
+and copy the returned counter back to the skcipher IV. Also do not register CTR on
+variants whose op_mode table does not advertise it.
+
+---
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce.h
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce.h
+@@ -324,8 +324,10 @@
+ 	int nr_sgs;
+ 	int nr_sgd;
+ 	dma_addr_t addr_iv;
++	dma_addr_t addr_ctr;
+ 	dma_addr_t addr_key;
+ 	u8 bounce_iv[AES_BLOCK_SIZE] __aligned(sizeof(u32));
+ 	u8 backup_iv[AES_BLOCK_SIZE];
++	u8 bounce_ctr[CRYPTO_MINALIGN] __aligned(CRYPTO_MINALIGN);
+ 	struct skcipher_request fallback_req;   // keep at the end
+ };
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-cipher.c
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-cipher.c
+@@ -168,6 +168,8 @@
+ 	sun8i_ce_store_addr40(dst->t_key, rctx->addr_key);
+ 	if (rctx->addr_iv)
+ 		sun8i_ce_store_addr40(dst->t_iv, rctx->addr_iv);
++	if (rctx->addr_ctr)
++		sun8i_ce_store_addr40(dst->t_ctr, rctx->addr_ctr);
+ 
+ 	for_each_sg(areq->src, sg, nr_sgs, i) {
+ 		sun8i_ce_store_addr40(dst->sg[i].source_addr,
+@@ -224,6 +226,8 @@
+ 		cet->t_dlen = cpu_to_le32(areq->cryptlen / 4);
+ 
+ 	sym = ce->variant->op_mode[algt->ce_blockmode];
++	if (algt->ce_blockmode == CE_ID_OP_CTR && sun8i_ce_is_v23(ce))
++		sym |= 3 << 2; /* V851 CE 2.3 uses a 128-bit counter. */
+ 	len = op->keylen;
+ 	switch (len) {
+ 	case 128 / 8:
+@@ -249,6 +253,7 @@
+ 	cet->t_key = desc_addr_val_le32(ce, rctx->addr_key);
+ 
+ 	ivsize = crypto_skcipher_ivsize(tfm);
++	rctx->addr_ctr = 0;
+ 	if (areq->iv && ivsize > 0) {
+ 		if ((rctx->op_dir & CE_DECRYPTION) &&
+ 		    algt->ce_blockmode != CE_ID_OP_CTR) {
+@@ -265,6 +270,18 @@
+ 			goto theend_iv;
+ 		}
+ 		cet->t_iv = desc_addr_val_le32(ce, rctx->addr_iv);
++		if (algt->ce_blockmode == CE_ID_OP_CTR &&
++		    sun8i_ce_is_v23(ce)) {
++			memzero_explicit(rctx->bounce_ctr, AES_BLOCK_SIZE);
++			rctx->addr_ctr = dma_map_single(ce->dev, rctx->bounce_ctr,
++						AES_BLOCK_SIZE, DMA_FROM_DEVICE);
++			if (dma_mapping_error(ce->dev, rctx->addr_ctr)) {
++				rctx->addr_ctr = 0;
++				dev_err(ce->dev, "Cannot DMA MAP CTR\n");
++				err = -ENOMEM;
++				goto theend_iv;
++			}
++		}
+ 	}
+ 
+ 	if (areq->src == areq->dst) {
+@@ -348,12 +365,16 @@
+ 		if (!dma_mapping_error(ce->dev, rctx->addr_iv))
+ 			dma_unmap_single(ce->dev, rctx->addr_iv, ivsize,
+ 					 DMA_TO_DEVICE);
++		if (rctx->addr_ctr)
++			dma_unmap_single(ce->dev, rctx->addr_ctr, AES_BLOCK_SIZE,
++					 DMA_FROM_DEVICE);
+ 
+-		offset = areq->cryptlen - ivsize;
+-		if (rctx->op_dir & CE_DECRYPTION) {
++		if (algt->ce_blockmode == CE_ID_OP_CTR) {
++			memzero_explicit(rctx->bounce_ctr, AES_BLOCK_SIZE);
++		} else if (rctx->op_dir & CE_DECRYPTION) {
+ 			memcpy(areq->iv, rctx->backup_iv, ivsize);
+ 			memzero_explicit(rctx->backup_iv, ivsize);
+ 		} else {
+ 			scatterwalk_map_and_copy(areq->iv, areq->dst, offset,
+ 							 ivsize, 0);
+ 		}
+@@ -399,9 +420,15 @@
+ 		if (rctx->addr_iv)
+ 			dma_unmap_single(ce->dev, rctx->addr_iv, ivsize,
+ 					 DMA_TO_DEVICE);
+-		offset = areq->cryptlen - ivsize;
+-		if (rctx->op_dir & CE_DECRYPTION) {
++		if (algt->ce_blockmode == CE_ID_OP_CTR) {
++			if (rctx->addr_ctr)
++				dma_unmap_single(ce->dev, rctx->addr_ctr, AES_BLOCK_SIZE,
++						 DMA_FROM_DEVICE);
++			memcpy(areq->iv, rctx->bounce_ctr, AES_BLOCK_SIZE);
++			memzero_explicit(rctx->bounce_ctr, AES_BLOCK_SIZE);
++		} else if (rctx->op_dir & CE_DECRYPTION) {
+ 			memcpy(areq->iv, rctx->backup_iv, ivsize);
+ 			memzero_explicit(rctx->backup_iv, ivsize);
+ 		} else {
++			offset = areq->cryptlen - ivsize;
+ 			scatterwalk_map_and_copy(areq->iv, areq->dst, offset,
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
+@@ -950,7 +950,8 @@
+ 			}
+ 			id = ce_algs[i].ce_blockmode;
+ 			ce_method = ce->variant->op_mode[id];
+-			if (ce_method == CE_ID_NOTSUPP) {
++			if (ce_method == CE_ID_NOTSUPP ||
++			    (id == CE_ID_OP_CTR && !ce_method)) {
+ 				dev_dbg(ce->dev, "DEBUG: Blockmode of %s not supported\n",
+ 					ce_algs[i].alg.skcipher.base.base.cra_name);
+ 				ce_algs[i].ce = NULL;

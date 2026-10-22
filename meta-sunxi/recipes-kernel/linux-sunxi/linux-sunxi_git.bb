@@ -9,8 +9,6 @@ PR = "r7"
 
 SRC_URI = "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git;branch=${KBRANCH};protocol=https"
 SRC_URI:append = " file://crypto/0001-crypto-remove-forced-entropy-collection-that-adds-0.5s-lag-to-system-boot.patch"
-SRC_URI:append = " file://crypto/0002-crypto-af_alg-allow-async-AES-CTR-provider.patch"
-SRC_URI:append = " file://crypto/0003-crypto-af_alg-restore-skcipher-splice-zero-copy.patch"
 SRC_URI:append = " file://drivers/net/usb/0001-cdc-ncm-fix-linking-with-generic-CarPlay-Headunits.patch"
 SRC_URI:append = " file://drivers/phy/allwinner/0001-phy-sun4i-usb-add-new-PHY-register-map.patch"
 SRC_URI:append = " file://drivers/phy/allwinner/0002-phy-sun4i-usb-guard-PHY_CTL_VBUSVLDEXT.patch"
@@ -39,6 +37,35 @@ SRC_URI:append = " file://drivers/nvmem/0001-nvmem-sunxi-sid-add-V821-USB-PHY-ca
 SRC_URI:append = " file://arch/riscv/boot/dts/allwinner/sun300i-v821b.dtsi;subdir=."
 SRC_URI:append = " file://drivers/soc/sunxi/0001-soc-allwinner-finish-V821-platform-integration.patch"
 SRC_URI:append = " file://drivers/mtd/0001-mtd-add-read-only-bad-block-aware-mtdblock-device.patch"
+SRC_URI:append = " file://drivers/mtd/spi-nand/0001-mtd-spi-nand-add-GigaDevice-clone-VID-D8.patch"
+SRC_URI:append = " file://drivers/mtd/spi-nand/0002-mtd-spi-nand-enable-DTR-read-for-GD5F1GM7RE.patch"
+SRC_URI:append = " file://drivers/spi/0002-spi-sun6i-add-V851-half-cycle-sample-mode.patch"
+SRC_URI:append = " file://drivers/spi/0003-spi-sun6i-add-V851-sample-delay.patch"
+SRC_URI:append = " file://drivers/crypto/allwinner/sun8i-ce/0001-crypto-sun8i-ce-add-native-AES-CTR.patch"
+SRC_URI:append = " file://drivers/crypto/allwinner/sun8i-ce/0002-crypto-sun8i-ce-add-CE23-descriptor-support.patch"
+SRC_URI:append = " file://drivers/crypto/allwinner/sun8i-ce/0003-crypto-sun8i-ce-use-CE23-cipher-descriptors.patch"
+SRC_URI:append = " file://drivers/crypto/allwinner/sun8i-ce/0004-crypto-sun8i-ce-use-hardware-next-IV-for-CTR.patch"
+SRC_URI:append = " file://drivers/crypto/allwinner/sun8i-ce/0005-crypto-sun8i-ce-add-V851S-CE23-TRNG.patch"
+SRC_URI:append = " file://drivers/crypto/allwinner/sun8i-ce/0006-crypto-sun8i-ce-decode-CE23-flow-interrupt-status.patch"
+SRC_URI:append = " file://drivers/crypto/allwinner/sun8i-ce/0007-crypto-sun8i-ce-clear-CE23-pending-status-before-launch.patch"
+SRC_URI:append = " file://drivers/crypto/allwinner/sun8i-ce/0008-crypto-sun8i-ce-define-v851-variant-and-read-version.patch"
+SRC_URI:append = " file://drivers/crypto/allwinner/sun8i-ce/0009-crypto-sun8i-ce-log-CE-timeout-state.patch"
+SRC_URI:append = " file://drivers/crypto/allwinner/sun8i-ce/0010-crypto-sun8i-ce-split-large-ECB-CTR-requests.patch"
+SRC_URI:append = " file://crypto/0002-crypto-af_alg-allow-async-AES-CTR-provider.patch"
+SRC_URI:append = " file://crypto/0003-crypto-af_alg-restore-skcipher-splice-zero-copy.patch"
+SRC_URI:append = " file://drivers/clk/sunxi-ng/0005-clk-add-V853-V851S-support.patch"
+SRC_URI:append = " file://drivers/pinctrl/sunxi/0002-pinctrl-add-V853-support.patch"
+SRC_URI:append = " file://drivers/phy/allwinner/0007-phy-sun4i-usb-add-V853-support.patch"
+SRC_URI:append = " file://drivers/bluetooth/0002-bluetooth-add-basic-HCI-driver-for-AIC8800.patch"
+SRC_URI:append = " file://arch/arm/mach-sunxi/0001-arm-sunxi-add-V851S-V853-mach-support.patch"
+SRC_URI:append = " file://drivers/tty/serial/8250/0001-serial-8250-allow-expert-to-disable-fsl.patch"
+SRC_URI:append = " file://arch/arm/boot/dts/allwinner/0001-dt-bindings-add-V853-support.patch"
+SRC_URI:append = " file://arch/arm/boot/dts/allwinner/sun8i-v853.dtsi;subdir=."
+SRC_URI:append = " file://drivers/iommu/0001-iommu-sun50i-support-v853-ve.patch"
+SRC_URI:append = " file://drivers/staging/media/sunxi/0001-media-cedrus-add-V853-support.patch"
+SRC_URI:append = " file://drivers/staging/media/sunxi/0002-media-cedrus-port-Bootlin-H264-encoder-to-V853.patch"
+SRC_URI:append = " file://drivers/staging/media/sunxi/0003-media-cedrus-add-v2-h264-encoder.patch"
+SRC_URI:append = " file://drivers/staging/media/sunxi/0004-media-cedrus-allow-userptr-with-dma-iommu.patch"
 SRC_URI:append = " file://drivers/crypto/allwinner/sun4i-ss/0112-crypto-sun4i-ss-add-v821-ctr-support.patch"
 SRC_URI:append = " file://drivers/crypto/allwinner/sun4i-ss/0113-crypto-sun4i-ss-expose-algorithms-to-userspace.patch"
 SRC_URI:append = " file://drivers/crypto/allwinner/sun4i-ss/0114-crypto-sun4i-ss-queue-skciphers-through-crypto-engine.patch"
@@ -57,7 +84,6 @@ SRC_URI:append = " file://drivers/mmc/host/0002-mmc-sunxi-add-explicit-maximum-d
 SRC_URI:append = " file://drivers/mmc/host/0004-mmc-sunxi-allow-controller-specific-DMA-trigger-levels.patch"
 SRC_URI:append = " file://drivers/mmc/host/0005-mmc-sunxi-add-V821-SMHC-v5p3x-support.patch"
 SRC_URI:append = " file://drivers/bluetooth/0001-rtl.patch"
-
 DEPENDS += " \
     coreutils-native \
 "
@@ -66,6 +92,11 @@ do_install_v821_dtsi() {
     install -Dm0644 "${UNPACKDIR}/arch/riscv/boot/dts/allwinner/sun300i-v821b.dtsi" "${S}/arch/riscv/boot/dts/allwinner/sun300i-v821b.dtsi"
 }
 addtask install_v821_dtsi after do_kernel_checkout before do_patch
+
+do_install_v853_dtsi() {
+    install -Dm0644 "${UNPACKDIR}/arch/arm/boot/dts/allwinner/sun8i-v853.dtsi" "${S}/arch/arm/boot/dts/allwinner/sun8i-v853.dtsi"
+}
+addtask install_v853_dtsi after do_kernel_checkout before do_patch
 
 # PV is defined in kernel-c2a-base and uses LINUX_VERSION.
 LINUX_VERSION = "7.2"
@@ -88,3 +119,6 @@ inherit kernel-extra-config-c2a
 inherit kernel-broken-version-c2a
 
 DEPENDS:append = " u-boot-tools-native"
+
+# Keep the ARM32 LTO unlock last in the patch series.
+SRC_URI:append = " file://arch/arm/0002-arm-enable-catplay-clang-lto.patch"

@@ -1,0 +1,45 @@
+Subject: [PATCH] mtd: spinand: enable GD5F1GM7RE Quad DTR read variant
+
+Add the documented EEh 1S-4D-4D cache read with a four-byte address and
+eight dummy bytes as a chip-specific SPI NAND operation candidate.
+SPI-mem support checks retain the SDR variants as
+fallbacks on controllers without DTR support. The D8:81 clone reuses this
+GigaDevice chip entry through the existing manufacturer table alias.
+
+Upstream-Status: Inappropriate [hardware-specific PoC]
+
+--- a/drivers/mtd/nand/spi/gigadevice.c
++++ b/drivers/mtd/nand/spi/gigadevice.c
+@@ -53,6 +53,23 @@
+ 		SPINAND_PAGE_READ_FROM_CACHE_FAST_3A_1S_1S_1S_OP(0, 1, NULL, 0, 0),
+ 		SPINAND_PAGE_READ_FROM_CACHE_3A_1S_1S_1S_OP(0, 0, NULL, 0, 0));
+ 
++/* GD5F1GM7RE DTR quad read (EEh) is enabled per chip variant. */
++#define GD5F1GM7_DTR_READ_OP(addr, ndummy, buf, len, freq) \
++	SPI_MEM_OP(SPI_MEM_OP_CMD(0xee, 1), \
++		   SPI_MEM_DTR_OP_ADDR(4, addr, 4), \
++		   SPI_MEM_DTR_OP_DUMMY(ndummy, 4), \
++		   SPI_MEM_DTR_OP_DATA_IN(len, buf, 4), \
++		   SPI_MEM_OP_MAX_FREQ(freq))
++
++static SPINAND_OP_VARIANTS(read_cache_variants_1gmr,
++		GD5F1GM7_DTR_READ_OP(0, 8, NULL, 0, 104000000),
++		SPINAND_PAGE_READ_FROM_CACHE_1S_4S_4S_OP(0, 2, NULL, 0, 0),
++		SPINAND_PAGE_READ_FROM_CACHE_1S_1S_4S_OP(0, 1, NULL, 0, 0),
++		SPINAND_PAGE_READ_FROM_CACHE_1S_2S_2S_OP(0, 1, NULL, 0, 0),
++		SPINAND_PAGE_READ_FROM_CACHE_1S_1S_2S_OP(0, 1, NULL, 0, 0),
++		SPINAND_PAGE_READ_FROM_CACHE_FAST_1S_1S_1S_OP(0, 1, NULL, 0, 0),
++		SPINAND_PAGE_READ_FROM_CACHE_1S_1S_1S_OP(0, 1, NULL, 0, 0));
++
+ static SPINAND_OP_VARIANTS(read_cache_variants_1gq5,
+ 		SPINAND_PAGE_READ_FROM_CACHE_1S_4S_4S_OP(0, 2, NULL, 0, 0),
+ 		SPINAND_PAGE_READ_FROM_CACHE_1S_1S_4S_OP(0, 1, NULL, 0, 0),
+@@ -539,7 +556,7 @@
+ 		     SPINAND_ID(SPINAND_READID_METHOD_OPCODE_DUMMY, 0x81),
+ 		     NAND_MEMORG(1, 2048, 128, 64, 1024, 20, 1, 1, 1),
+ 		     NAND_ECCREQ(8, 512),
+-		     SPINAND_INFO_OP_VARIANTS(&read_cache_variants_1gq5,
++		     SPINAND_INFO_OP_VARIANTS(&read_cache_variants_1gmr,
+ 					      &write_cache_variants,
+ 					      &update_cache_variants),
+ 		     SPINAND_HAS_QE_BIT,

@@ -1,0 +1,31 @@
+Subject: [PATCH] crypto: sun8i-ce: log V851S CE state on cipher timeout
+Upstream-Status: Inappropriate [temporary V851S hardware diagnostics]
+
+Capture the CE task descriptor, both task address registers, the CE version,
+and control/status registers when a V851S cipher request times out. This
+distinguishes a task that was not accepted by the engine from one that
+completed or faulted without delivering an IRQ.
+
+---
+ drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
+@@ -242,4 +242,15 @@ int sun8i_ce_run_task(struct sun8i_ce_dev *ce, int flow, const char *name)
+ 	if (ce->chanlist[flow].status == 0) {
+-		dev_err(ce->dev, "DMA timeout for %s on flow %d\n", name, flow);
++		dev_err(ce->dev,
++			"DMA timeout for %s on flow %d: TDA=%08x:%08x VER=%08x ISR=%08x ICR=%08x TLR=%08x TSR=%08x ESR=%08x\n",
++			name, flow, readl(ce->base + CE_TDQ),
++			readl(ce->base + CE_CTR), readl(ce->base + 0x90),
++			readl(ce->base + CE_ISR), readl(ce->base + CE_ICR),
++			readl(ce->base + CE_TLR), readl(ce->base + CE_TSR),
++			readl(ce->base + CE_ESR));
++		if (sun8i_ce_is_v23(ce))
++			print_hex_dump(KERN_ERR, "CE23 TASK: ", DUMP_PREFIX_OFFSET,
++				       16, 4, ce->chanlist[flow].tl, 220, false);
++		else
++			sun8i_ce_dump_task_descriptors(&ce->chanlist[flow]);
+ 		err = -EFAULT;
+ 	}

@@ -1,0 +1,341 @@
+Subject: [PATCH] iommu: sun50i: support V853 VE IOMMU variant
+
+Upstream-Status: Pending
+
+Adapt the H6 controller driver for the V851S/V853 register variant.
+Keep unrelated bus masters in bypass mode while the VE uses the DMA
+IOMMU domain. Use range invalidation required by this generation.
+
+---
+--- a/Documentation/devicetree/bindings/iommu/allwinner,sun50i-h6-iommu.yaml
++++ b/Documentation/devicetree/bindings/iommu/allwinner,sun50i-h6-iommu.yaml
+@@ -12,14 +12,16 @@
+ 
+ properties:
+   "#iommu-cells":
+-    const: 1
++    enum: [1, 2]
+     description:
+-      The content of the cell is the master ID.
++      The first cell is the master ID. V853 has a second cell to enable
++      translation for that master.
+ 
+   compatible:
+     oneOf:
+       - const: allwinner,sun50i-h6-iommu
+       - const: allwinner,sun50i-h616-iommu
++      - const: allwinner,sun8i-v853-iommu
+       - items:
+           - const: allwinner,sun55i-a523-iommu
+           - const: allwinner,sun50i-h616-iommu
+@@ -42,7 +44,22 @@
+   - reg
+   - interrupts
+   - clocks
+-  - resets
++
++allOf:
++  - if:
++      properties:
++        compatible:
++          const: allwinner,sun8i-v853-iommu
++    then:
++      properties:
++        "#iommu-cells":
++          const: 2
++    else:
++      properties:
++        "#iommu-cells":
++          const: 1
++      required:
++        - resets
+ 
+ additionalProperties: false
+ 
+--- a/drivers/iommu/sun50i-iommu.c
++++ b/drivers/iommu/sun50i-iommu.c
+@@ -48,14 +48,20 @@
+ #define IOMMU_TLB_FLUSH_REG		0x080
+ #define IOMMU_TLB_FLUSH_PTW_CACHE		BIT(17)
+ #define IOMMU_TLB_FLUSH_MACRO_TLB		BIT(16)
+-#define IOMMU_TLB_FLUSH_MICRO_TLB(i)		(BIT(i) & GENMASK(5, 0))
+-
++#define IOMMU_TLB_FLUSH_MICRO_TLB(i)		BIT(i)
++
++#define IOMMU_TLB_IVLD_MODE_SEL_REG	0x084
++#define IOMMU_TLB_IVLD_START_ADDR_REG	0x088
++#define IOMMU_TLB_IVLD_END_ADDR_REG	0x08c
+ #define IOMMU_TLB_IVLD_ADDR_REG		0x090
+ #define IOMMU_TLB_IVLD_ADDR_MASK_REG	0x094
+ #define IOMMU_TLB_IVLD_ENABLE_REG	0x098
+ #define IOMMU_TLB_IVLD_ENABLE_ENABLE		BIT(0)
+ 
++#define IOMMU_PC_IVLD_MODE_SEL_REG	0x09c
+ #define IOMMU_PC_IVLD_ADDR_REG		0x0a0
++#define IOMMU_PC_IVLD_START_ADDR_REG	0x0a4
++#define IOMMU_PC_IVLD_END_ADDR_REG	0x0ac
+ #define IOMMU_PC_IVLD_ENABLE_REG	0x0a8
+ #define IOMMU_PC_IVLD_ENABLE_ENABLE		BIT(0)
+ 
+@@ -99,6 +105,7 @@
+ 
+ struct sun50i_iommu {
+ 	struct iommu_device iommu;
++	bool v853;
+ 
+ 	/* Lock to modify the IOMMU registers */
+ 	spinlock_t iommu_lock;
+@@ -204,9 +211,12 @@
+ 	return (dte & SUN50I_DTE_PT_ATTRS) == SUN50I_DTE_PT_VALID;
+ }
+ 
+-static u32 sun50i_mk_dte(dma_addr_t pt_dma)
+-{
+-	return (pt_dma & SUN50I_DTE_PT_ADDRESS_MASK) | SUN50I_DTE_PT_VALID;
++static u32 sun50i_mk_dte(dma_addr_t pt_dma, bool v853)
++{
++	u32 flags = v853 ? BIT(2) | BIT(3) : 0;
++
++	return (pt_dma & SUN50I_DTE_PT_ADDRESS_MASK) |
++		SUN50I_DTE_PT_VALID | flags;
+ }
+ 
+ /*
+@@ -269,10 +279,17 @@
+ 	return pte & SUN50I_PTE_PAGE_VALID;
+ }
+ 
+-static u32 sun50i_mk_pte(phys_addr_t page, int prot)
++static u32 sun50i_mk_pte(phys_addr_t page, int prot, bool v853)
+ {
+ 	enum sun50i_iommu_aci aci;
+ 	u32 flags = 0;
++
++	if (v853) {
++		flags = ((prot & IOMMU_READ) ? BIT(2) : 0) |
++			((prot & IOMMU_WRITE) ? BIT(3) : 0);
++		return (page & SUN50I_PTE_PAGE_ADDRESS_MASK) |
++			flags | SUN50I_PTE_PAGE_VALID;
++	}
+ 
+ 	if ((prot & (IOMMU_READ | IOMMU_WRITE)) == (IOMMU_READ | IOMMU_WRITE))
+ 		aci = SUN50I_IOMMU_ACI_RD_WR;
+@@ -331,12 +348,41 @@
+ 		dev_warn(iommu->dev, "PTW cache invalidation timed out!\n");
+ }
+ 
++/* V853 uses start/end invalidation for both TLB and page-table cache. */
++static void sun50i_iommu_zap_range_v853(struct sun50i_iommu *iommu,
++					unsigned long iova, size_t size)
++{
++	u32 reg;
++	unsigned long end = iova + size;
++
++	iommu_write(iommu, IOMMU_TLB_IVLD_START_ADDR_REG, iova);
++	iommu_write(iommu, IOMMU_TLB_IVLD_END_ADDR_REG, end);
++	iommu_write(iommu, IOMMU_TLB_IVLD_ENABLE_REG,
++		    IOMMU_TLB_IVLD_ENABLE_ENABLE);
++	if (readl_poll_timeout_atomic(iommu->base + IOMMU_TLB_IVLD_ENABLE_REG,
++				      reg, !reg, 1, 2000))
++		dev_warn(iommu->dev, "TLB range invalidation timed out!\n");
++
++	iommu_write(iommu, IOMMU_PC_IVLD_START_ADDR_REG, iova);
++	iommu_write(iommu, IOMMU_PC_IVLD_END_ADDR_REG, end);
++	iommu_write(iommu, IOMMU_PC_IVLD_ENABLE_REG,
++		    IOMMU_PC_IVLD_ENABLE_ENABLE);
++	if (readl_poll_timeout_atomic(iommu->base + IOMMU_PC_IVLD_ENABLE_REG,
++				      reg, !reg, 1, 2000))
++		dev_warn(iommu->dev, "PTW range invalidation timed out!\n");
++}
++
+ static void sun50i_iommu_zap_range(struct sun50i_iommu *iommu,
+ 				   unsigned long iova, size_t size)
+ {
+ 	assert_spin_locked(&iommu->iommu_lock);
+ 
+ 	iommu_write(iommu, IOMMU_AUTO_GATING_REG, 0);
++
++	if (iommu->v853) {
++		sun50i_iommu_zap_range_v853(iommu, iova, size);
++		goto out;
++	}
+ 
+ 	sun50i_iommu_zap_iova(iommu, iova);
+ 	sun50i_iommu_zap_iova(iommu, iova + SPAGE_SIZE);
+@@ -351,6 +397,7 @@
+ 		sun50i_iommu_zap_ptw_cache(iommu, iova + size + SZ_1M);
+ 	}
+ 
++out:
+ 	iommu_write(iommu, IOMMU_AUTO_GATING_REG, IOMMU_AUTO_GATING_ENABLE);
+ }
+ 
+@@ -365,6 +412,7 @@
+ 		    IOMMU_TLB_FLUSH_REG,
+ 		    IOMMU_TLB_FLUSH_PTW_CACHE |
+ 		    IOMMU_TLB_FLUSH_MACRO_TLB |
++		    (iommu->v853 ? IOMMU_TLB_FLUSH_MICRO_TLB(6) : 0) |
+ 		    IOMMU_TLB_FLUSH_MICRO_TLB(5) |
+ 		    IOMMU_TLB_FLUSH_MICRO_TLB(4) |
+ 		    IOMMU_TLB_FLUSH_MICRO_TLB(3) |
+@@ -445,6 +493,16 @@
+ 	spin_lock_irqsave(&iommu->iommu_lock, flags);
+ 
+ 	iommu_write(iommu, IOMMU_TTB_REG, sun50i_domain->dt_dma);
++	if (iommu->v853) {
++		/* Keep non-VE masters in physical-address bypass. */
++		iommu_write(iommu, IOMMU_TLB_PREFETCH_REG, 0x30077);
++		iommu_write(iommu, IOMMU_BYPASS_REG, GENMASK(6, 1));
++		iommu_write(iommu, IOMMU_TLB_IVLD_MODE_SEL_REG, 1);
++		iommu_write(iommu, IOMMU_PC_IVLD_MODE_SEL_REG, 1);
++		iommu_write(iommu, IOMMU_INT_ENABLE_REG,
++			    IOMMU_INT_INVALID_L1PG | IOMMU_INT_INVALID_L2PG |
++			    GENMASK(6, 0));
++	} else {
+ 	iommu_write(iommu, IOMMU_TLB_PREFETCH_REG,
+ 		    IOMMU_TLB_PREFETCH_MASTER_ENABLE(0) |
+ 		    IOMMU_TLB_PREFETCH_MASTER_ENABLE(1) |
+@@ -454,6 +512,8 @@
+ 		    IOMMU_TLB_PREFETCH_MASTER_ENABLE(5));
+ 	iommu_write(iommu, IOMMU_BYPASS_REG, 0);
+ 	iommu_write(iommu, IOMMU_INT_ENABLE_REG, IOMMU_INT_MASK);
++	}
++	if (!iommu->v853) {
+ 	iommu_write(iommu, IOMMU_DM_AUT_CTRL_REG(SUN50I_IOMMU_ACI_NONE),
+ 		    IOMMU_DM_AUT_CTRL_RD_UNAVAIL(SUN50I_IOMMU_ACI_NONE, 0) |
+ 		    IOMMU_DM_AUT_CTRL_WR_UNAVAIL(SUN50I_IOMMU_ACI_NONE, 0) |
+@@ -483,6 +543,7 @@
+ 		    IOMMU_DM_AUT_CTRL_RD_UNAVAIL(SUN50I_IOMMU_ACI_WR, 3) |
+ 		    IOMMU_DM_AUT_CTRL_RD_UNAVAIL(SUN50I_IOMMU_ACI_WR, 4) |
+ 		    IOMMU_DM_AUT_CTRL_RD_UNAVAIL(SUN50I_IOMMU_ACI_WR, 5));
++	}
+ 
+ 	ret = sun50i_iommu_flush_all_tlb(iommu);
+ 	if (ret) {
+@@ -573,7 +634,7 @@
+ 	if (IS_ERR(page_table))
+ 		return page_table;
+ 
+-	dte = sun50i_mk_dte(virt_to_phys(page_table));
++	dte = sun50i_mk_dte(virt_to_phys(page_table), iommu->v853);
+ 	old_dte = cmpxchg(dte_addr, 0, dte);
+ 	if (old_dte) {
+ 		phys_addr_t installed_pt_phys =
+@@ -627,7 +688,7 @@
+ 		goto out;
+ 	}
+ 
+-	*pte_addr = sun50i_mk_pte(paddr, prot);
++	*pte_addr = sun50i_mk_pte(paddr, prot, iommu->v853);
+ 	sun50i_table_flush(sun50i_domain, pte_addr, 1);
+ 	*mapped = size;
+ 
+@@ -699,7 +760,11 @@
+ 
+ 	sun50i_domain->domain.pgsize_bitmap = SZ_4K;
+ 
+-	sun50i_domain->domain.geometry.aperture_start = 0;
++	/* V851S vendor DMA IOVA aperture starts above its physical DRAM. */
++	sun50i_domain->domain.geometry.aperture_start =
++		of_device_is_compatible(dev->of_node,
++				"allwinner,sun8i-v853-video-engine") ?
++		0x48400000 : 0;
+ 	sun50i_domain->domain.geometry.aperture_end = DMA_BIT_MASK(32);
+ 	sun50i_domain->domain.geometry.force_aperture = true;
+ 
+@@ -837,8 +902,20 @@
+ 				 const struct of_phandle_args *args)
+ {
+ 	struct platform_device *iommu_pdev = of_find_device_by_node(args->np);
+-	unsigned id = args->args[0];
+-
++	unsigned id;
++
++	if (!iommu_pdev)
++		return -EPROBE_DEFER;
++	if (!platform_get_drvdata(iommu_pdev)) {
++		put_device(&iommu_pdev->dev);
++		return -EPROBE_DEFER;
++	}
++	if (of_device_is_compatible(args->np, "allwinner,sun8i-v853-iommu") &&
++	    (args->args_count != 2 || args->args[0] != 0 || args->args[1] != 1)) {
++		put_device(&iommu_pdev->dev);
++		return -EINVAL;
++	}
++	id = args->args[0];
+ 	dev_iommu_priv_set(dev, platform_get_drvdata(iommu_pdev));
+ 
+ 	put_device(&iommu_pdev->dev);
+@@ -891,7 +968,8 @@
+ 
+ 	iova = iommu_read(iommu, addr_reg);
+ 	blame = iommu_read(iommu, blame_reg);
+-	master = ilog2(blame & IOMMU_INT_MASTER_MASK);
++	master = ilog2(blame & (iommu->v853 ? GENMASK(6, 0) :
++						       IOMMU_INT_MASTER_MASK));
+ 
+ 	/*
+ 	 * If the address is not in the page table, we can't get what
+@@ -914,8 +992,14 @@
+ 	assert_spin_locked(&iommu->iommu_lock);
+ 
+ 	blame = iommu_read(iommu, IOMMU_INT_STA_REG);
+-	master = ilog2(blame & IOMMU_INT_MASTER_MASK);
++	master = ilog2(blame & (iommu->v853 ? GENMASK(6, 0) :
++						       IOMMU_INT_MASTER_MASK));
+ 	iova = iommu_read(iommu, IOMMU_INT_ERR_ADDR_REG(master));
++	if (iommu->v853) {
++		/* Permission bits live in the PTE on this generation. */
++		dir = IOMMU_FAULT_READ;
++		goto report_fault;
++	}
+ 	aci = sun50i_get_pte_aci(iommu_read(iommu,
+ 					    IOMMU_INT_ERR_DATA_REG(master)));
+ 
+@@ -953,6 +1037,7 @@
+ 	 * operation triggered the fault. Assume it's a read
+ 	 * operation.
+ 	 */
++report_fault:
+ 	sun50i_iommu_report_fault(iommu, master, iova, dir);
+ 
+ 	return iova;
+@@ -987,7 +1072,8 @@
+ 
+ 	iommu_write(iommu, IOMMU_INT_CLR_REG, status);
+ 
+-	resets = (status | l1_status | l2_status) & IOMMU_INT_MASTER_MASK;
++	resets = (status | l1_status | l2_status) &
++		(iommu->v853 ? GENMASK(6, 0) : IOMMU_INT_MASTER_MASK);
+ 	iommu_write(iommu, IOMMU_RESET_REG, ~resets);
+ 	iommu_write(iommu, IOMMU_RESET_REG, IOMMU_RESET_RELEASE_ALL);
+ 
+@@ -1006,6 +1092,8 @@
+ 		return -ENOMEM;
+ 	spin_lock_init(&iommu->iommu_lock);
+ 	iommu->domain = &sun50i_iommu_identity_domain;
++	iommu->v853 = of_device_is_compatible(pdev->dev.of_node,
++					      "allwinner,sun8i-v853-iommu");
+ 	platform_set_drvdata(pdev, iommu);
+ 	iommu->dev = &pdev->dev;
+ 
+@@ -1035,7 +1123,10 @@
+ 		goto err_free_cache;
+ 	}
+ 
+-	iommu->reset = devm_reset_control_get(&pdev->dev, NULL);
++	if (iommu->v853)
++		iommu->reset = devm_reset_control_get_optional(&pdev->dev, NULL);
++	else
++		iommu->reset = devm_reset_control_get(&pdev->dev, NULL);
+ 	if (IS_ERR(iommu->reset)) {
+ 		dev_err(&pdev->dev, "Couldn't get our reset line.\n");
+ 		ret = PTR_ERR(iommu->reset);
+@@ -1073,6 +1164,7 @@
+ static const struct of_device_id sun50i_iommu_dt[] = {
+ 	{ .compatible = "allwinner,sun50i-h6-iommu", },
+ 	{ .compatible = "allwinner,sun50i-h616-iommu", },
++	{ .compatible = "allwinner,sun8i-v853-iommu", },
+ 	{ /* sentinel */ },
+ };
+ MODULE_DEVICE_TABLE(of, sun50i_iommu_dt);

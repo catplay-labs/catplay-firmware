@@ -1,0 +1,163 @@
+Subject: [PATCH] crypto: sun8i-ce: split large ECB and CTR requests
+Upstream-Status: Pending
+
+Split AES ECB/CTR requests whose scatterlists exceed the descriptor limit into bounded DMA tasks. Keep each task synchronous within the parent Crypto Engine request, and pass the hardware-returned CTR next-IV into the next task. Other modes and existing fallback conditions retain their current behavior.
+
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce.h
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce.h
+@@ -302,6 +302,7 @@
+  */
+ struct sun8i_cipher_req_ctx {
+ 	u32 op_dir;
++	bool split_req;
+ 	int flow;
+ 	int nr_sgs;
+ 	int nr_sgd;
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-cipher.c
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-cipher.c
+@@ -27,16 +27,21 @@
+ 	struct scatterlist *sg;
+ 	struct skcipher_alg *alg = crypto_skcipher_alg(tfm);
+ 	struct sun8i_ce_alg_template *algt;
++	struct sun8i_cipher_req_ctx *rctx = skcipher_request_ctx(areq);
+ 	unsigned int todo, len;
+ 
+ 	algt = container_of(alg, struct sun8i_ce_alg_template, alg.skcipher.base);
+ 
++	rctx->split_req = false;
+ 	if (sg_nents_for_len(areq->src, areq->cryptlen) > MAX_SG ||
+ 	    sg_nents_for_len(areq->dst, areq->cryptlen) > MAX_SG) {
+-		if (IS_ENABLED(CONFIG_CRYPTO_DEV_SUN8I_CE_DEBUG))
+-			algt->stat_fb_maxsg++;
+-
+-		return true;
++		if (algt->ce_blockmode != CE_ID_OP_ECB &&
++		    algt->ce_blockmode != CE_ID_OP_CTR) {
++			if (IS_ENABLED(CONFIG_CRYPTO_DEV_SUN8I_CE_DEBUG))
++				algt->stat_fb_maxsg++;
++			return true;
++		}
++		rctx->split_req = true;
+ 	}
+ 
+ 	if (areq->cryptlen < crypto_skcipher_ivsize(tfm)) {
+@@ -102,6 +107,56 @@
+ 	return false;
+ }
+ 
++/* Bytes addressable from @offset using no more than MAX_SG entries. */
++static unsigned int sun8i_ce_sg_span(struct scatterlist *sg,
++				     unsigned int offset,
++				     unsigned int remaining)
++{
++	unsigned int nents = 0, span = 0;
++
++	while (sg && offset >= sg->length) {
++		offset -= sg->length;
++		sg = sg_next(sg);
++	}
++	while (sg && nents < MAX_SG && span < remaining) {
++		unsigned int avail = sg->length - offset;
++		unsigned int take = min(avail, remaining - span);
++
++		span += take;
++		nents++;
++		offset = 0;
++		sg = sg_next(sg);
++	}
++	return span;
++}
++
++/* Build a bounded SG view of [@offset, @offset + @len) without copying data. */
++static int sun8i_ce_sg_slice(struct scatterlist view[MAX_SG],
++			     struct scatterlist *sg, unsigned int offset,
++			     unsigned int len)
++{
++	unsigned int nents = 0;
++
++	sg_init_table(view, MAX_SG);
++	while (sg && offset >= sg->length) {
++		offset -= sg->length;
++		sg = sg_next(sg);
++	}
++	while (sg && len && nents < MAX_SG) {
++		unsigned int take = min(len, sg->length - offset);
++
++		sg_set_page(&view[nents], sg_page(sg), take, sg->offset + offset);
++		len -= take;
++		nents++;
++		offset = 0;
++		sg = sg_next(sg);
++	}
++	if (len || !nents)
++		return -EINVAL;
++	sg_mark_end(&view[nents - 1]);
++	return nents;
++}
++
+ static int sun8i_ce_cipher_fallback(struct skcipher_request *areq)
+ {
+ 	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(areq);
+@@ -446,18 +501,56 @@
+ 	struct sun8i_cipher_tfm_ctx *ctx = crypto_skcipher_ctx(tfm);
+ 	struct sun8i_ce_dev *ce = ctx->ce;
+ 	struct sun8i_ce_flow *chan;
++	struct scatterlist *orig_src = req->src;
++	struct scatterlist *orig_dst = req->dst;
++	unsigned int orig_len = req->cryptlen;
++	unsigned int offset = 0;
+ 	int err;
+ 
+ 	chan = &ce->chanlist[rctx->flow];
+ 
+-	err = sun8i_ce_cipher_prepare(req, chan->tl);
+-	if (err)
+-		return err;
++	do {
++		struct scatterlist src_view[MAX_SG], dst_view[MAX_SG];
++		struct scatterlist *src = orig_src, *dst = orig_dst;
++		unsigned int len = orig_len - offset;
++
++		if (rctx->split_req) {
++			len = min(sun8i_ce_sg_span(orig_src, offset, len),
++				  sun8i_ce_sg_span(orig_dst, offset, len));
++			len &= ~0xfU;
++			if (!len) {
++				err = -EINVAL;
++				break;
++			}
++			err = sun8i_ce_sg_slice(src_view, orig_src, offset, len);
++			if (err < 0)
++				break;
++			src = src_view;
++			if (orig_src == orig_dst) {
++				dst = src_view;
++			} else {
++				err = sun8i_ce_sg_slice(dst_view, orig_dst, offset, len);
++				if (err < 0)
++					break;
++				dst = dst_view;
++			}
++		}
+ 
+-	err = sun8i_ce_run_task(ce, rctx->flow,
+-				crypto_tfm_alg_name(req->base.tfm));
++		skcipher_request_set_crypt(req, src, dst, len, req->iv);
++		err = sun8i_ce_cipher_prepare(req, chan->tl);
++		if (err)
++			break;
++
++		err = sun8i_ce_run_task(ce, rctx->flow,
++					crypto_tfm_alg_name(req->base.tfm));
++		sun8i_ce_cipher_unprepare(req, chan->tl);
++		if (err || !rctx->split_req)
++			break;
++		offset += len;
++	} while (offset < orig_len);
+ 
+-	sun8i_ce_cipher_unprepare(req, chan->tl);
++	/* Restore the caller's request before Crypto Engine invokes its callback. */
++	skcipher_request_set_crypt(req, orig_src, orig_dst, orig_len, req->iv);
+ 
+ 	local_bh_disable();
+ 	crypto_finalize_skcipher_request(engine, req, err);

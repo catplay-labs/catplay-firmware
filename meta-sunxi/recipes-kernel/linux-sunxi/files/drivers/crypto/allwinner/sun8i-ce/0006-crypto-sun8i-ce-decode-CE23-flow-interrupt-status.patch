@@ -1,0 +1,33 @@
+Subject: [PATCH] crypto: sun8i-ce: decode V851S CE 2.3 flow interrupts
+Upstream-Status: Inappropriate [V851S-specific Crypto Engine 2.3 support]
+
+The V851S CE 2.3 interrupt status register allocates two status bits per
+flow. The upstream sun8i-ce handler assumes one bit per flow, so it misses
+completion interrupts for these requests and waits until timeout. Decode and
+acknowledge the two-bit status field for each flow on this variant. The
+interrupt control register remains one enable bit per flow.
+
+---
+ drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
+@@ -307,8 +307,13 @@ static irqreturn_t ce_irq_handler(int irq, void *data)
+ 	p = readl(ce->base + CE_ISR);
+ 	for (flow = 0; flow < MAXFLOW; flow++) {
+-		if (p & (BIT(flow))) {
+-			writel(BIT(flow), ce->base + CE_ISR);
++		u32 flow_status;
++		u32 flow_mask;
++
++		flow_mask = sun8i_ce_is_v23(ce) ? 0x3 << (flow * 2) : BIT(flow);
++		flow_status = p & flow_mask;
++		if (flow_status) {
++			writel(flow_mask, ce->base + CE_ISR);
+ 			ce->chanlist[flow].status = 1;
+ 			complete(&ce->chanlist[flow].complete);
+ 		}
+ 	}
+-- 
+2.51.0

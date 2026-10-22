@@ -1,0 +1,119 @@
+Upstream-Status: Inappropriate [V851S hardware-specific support]
+
+--- a/drivers/spi/spi-sun6i.c
++++ b/drivers/spi/spi-sun6i.c
+@@ -28,6 +28,7 @@
+ #define SUN8I_FIFO_DEPTH		64
+ 
+ #define SUN6I_GBL_CTL_REG		0x04
++#define SUN6I_GBL_CTL_SAMP_MODE_EN	BIT(2)
+ #define SUN6I_GBL_CTL_BUS_ENABLE		BIT(0)
+ #define SUN6I_GBL_CTL_MASTER			BIT(1)
+ #define SUN6I_GBL_CTL_TP			BIT(7)
+@@ -38,5 +39,6 @@
+ #define SUN6I_TFR_CTL_DHB			BIT(8)
+ #define SUN6I_TFR_CTL_SDC			BIT(11)
++#define SUN6I_TFR_CTL_SDC1			BIT(15)
+ #define SUN6I_TFR_CTL_FBS			BIT(12)
+ #define SUN6I_TFR_CTL_SDM			BIT(13)
+ #define SUN6I_TFR_CTL_XCH			BIT(31)
+@@ -70,6 +72,9 @@
+ #define SUN6I_FIFO_STA_TF_CNT_MASK		GENMASK(23, 16)
+ 
+ #define SUN6I_CLK_CTL_REG		0x24
++#define SUN6I_SAMP_DL_REG		0x28
++#define SUN6I_SAMP_DL_SW_EN		BIT(7)
++#define SUN6I_SAMP_DL_VALUE_MASK	GENMASK(5, 0)
+ #define SUN6I_CLK_CTL_CDR2_MASK			0xff
+ #define SUN6I_CLK_CTL_CDR2(div)			(((div) & SUN6I_CLK_CTL_CDR2_MASK) << 0)
+ #define SUN6I_CLK_CTL_CDR1_MASK			0xf
+@@ -94,6 +99,7 @@
+ 	unsigned long		fifo_depth;
+ 	bool			has_clk_ctl;
+ 	bool			force_half_cycle_sample;
++	bool			use_v851_sample_delay;
+ 	u32			mode_bits;
+ };
+ 
+@@ -107,4 +113,7 @@
+ 	int			len;
+ 	const struct sun6i_spi_cfg *cfg;
++	bool			sample_configured;
++	u32			sample_mode;
++	u32			sample_delay;
+ };
+ 
+@@ -419,7 +428,18 @@
+ 		 * - delay one-cycle sample mode  : CLK >= 80MHz SDM=0 SDC=1
+ 		 */
+ 		reg = sun6i_spi_read(sspi, SUN6I_TFR_CTL_REG);
+-		reg &= ~(SUN6I_TFR_CTL_SDM | SUN6I_TFR_CTL_SDC);
++		reg &= ~(SUN6I_TFR_CTL_SDM | SUN6I_TFR_CTL_SDC |
++			 SUN6I_TFR_CTL_SDC1);
+ 
+-		if (!sspi->cfg->force_half_cycle_sample) {
++		if (sspi->sample_configured) {
++			static const u16 sample_modes[] = {
++				SUN6I_TFR_CTL_SDM, 0, SUN6I_TFR_CTL_SDC,
++				SUN6I_TFR_CTL_SDM | SUN6I_TFR_CTL_SDC,
++				SUN6I_TFR_CTL_SDM | SUN6I_TFR_CTL_SDC1,
++				SUN6I_TFR_CTL_SDC1,
++				SUN6I_TFR_CTL_SDC | SUN6I_TFR_CTL_SDC1,
++			};
++
++			reg |= sample_modes[sspi->sample_mode];
++		} else if (!sspi->cfg->force_half_cycle_sample) {
+ 			if (tfr->effective_speed_hz <= 24000000)
+@@ -429,6 +449,17 @@
+ 		}
+ 
+ 		sun6i_spi_write(sspi, SUN6I_TFR_CTL_REG, reg);
++
++		if (sspi->sample_configured) {
++			reg = sun6i_spi_read(sspi, SUN6I_GBL_CTL_REG);
++			reg |= SUN6I_GBL_CTL_SAMP_MODE_EN;
++			sun6i_spi_write(sspi, SUN6I_GBL_CTL_REG, reg);
++
++			reg = sun6i_spi_read(sspi, SUN6I_SAMP_DL_REG);
++			reg &= ~SUN6I_SAMP_DL_VALUE_MASK;
++			reg |= SUN6I_SAMP_DL_SW_EN | sspi->sample_delay;
++			sun6i_spi_write(sspi, SUN6I_SAMP_DL_REG, reg);
++		}
+ 	}
+ 
+ 	/* Finally enable the bus - doing so before might raise SCK to HIGH */
+@@ -668,4 +699,26 @@
+ 	sspi->host = host;
+ 	sspi->cfg = of_device_get_match_data(&pdev->dev);
+ 
++	if (sspi->cfg->use_v851_sample_delay &&
++	    (of_find_property(pdev->dev.of_node, "allwinner,sample-mode", NULL) ||
++	     of_find_property(pdev->dev.of_node, "allwinner,sample-delay", NULL))) {
++		ret = of_property_read_u32(pdev->dev.of_node,
++					   "allwinner,sample-mode",
++					   &sspi->sample_mode);
++		if (ret)
++			return ret;
++		ret = of_property_read_u32(pdev->dev.of_node,
++					   "allwinner,sample-delay",
++					   &sspi->sample_delay);
++		if (ret)
++			return ret;
++		if (sspi->sample_mode > 6 ||
++		    sspi->sample_delay > SUN6I_SAMP_DL_VALUE_MASK) {
++			dev_err(&pdev->dev, "invalid SPI sampling mode or delay\n");
++			ret = -EINVAL;
++			return ret;
++		}
++		sspi->sample_configured = true;
++	}
++
+ 	host->max_speed_hz = 100 * 1000 * 1000;
+@@ -789,6 +842,7 @@
+ static const struct sun6i_spi_cfg sun8i_v851_spi_cfg = {
+ 	.fifo_depth	= SUN8I_FIFO_DEPTH,
+ 	.force_half_cycle_sample = true,
++	.use_v851_sample_delay = true,
+ 	.mode_bits	= SPI_RX_DUAL | SPI_TX_DUAL | SPI_RX_QUAD | SPI_TX_QUAD,
+ };
+ 

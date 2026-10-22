@@ -1,0 +1,22 @@
+Subject: [PATCH] crypto: sun8i-ce: clear V851S pending status before launch
+Upstream-Status: Inappropriate [V851S-specific Crypto Engine 2.3 support]
+
+The V851S CE uses a two-bit pending status field per flow. Clear the selected
+flow's stale status before enabling the interrupt and submitting a new task,
+matching the TinaSDK CE V5 submission sequence.
+
+---
+ drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce-core.c
+@@ -214,4 +214,6 @@ int sun8i_ce_run_task(struct sun8i_ce_dev *ce, int flow, const char *name)
+ 	mutex_lock(&ce->mlock);
++	if (sun8i_ce_is_v23(ce))
++		writel(0x3 << (flow * 2), ce->base + CE_ISR);
+ 
+ 	v = readl(ce->base + CE_ICR);
+ 	v |= 1 << flow;
+-- 
+2.51.0

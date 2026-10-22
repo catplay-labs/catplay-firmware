@@ -1,0 +1,42 @@
+Date: Thu, 22 Oct 2026 02:00:00 +0200
+Subject: [PATCH] ARM: unlock experimental Clang LTO
+
+Adapt the existing linux-fslc CatPlay arm32 LTO patch to linux-sunxi.
+As in linux-fslc, omit the ar/nm help probes: Yocto configme can use
+make defaults for those tools before do_configure supplies LLVM tools.
+As in the original patch, exclude the ARM decompressor from LTO.
+
+Upstream-Status: Inappropriate [experimental C2A size optimization]
+
+--- a/arch/Kconfig
++++ b/arch/Kconfig
+@@ -806,8 +806,6 @@
+ config HAS_LTO_CLANG
+ 	def_bool y
+ 	depends on CC_IS_CLANG && LD_IS_LLD && AS_IS_LLVM
+-	depends on $(success,$(NM) --help | head -n 1 | grep -qi llvm)
+-	depends on $(success,$(AR) --help | head -n 1 | grep -qi llvm)
+ 	depends on ARCH_SUPPORTS_LTO_CLANG
+ 	depends on !FTRACE_MCOUNT_USE_RECORDMCOUNT
+ 	depends on !GCOV_KERNEL
+--- a/arch/arm/Kconfig
++++ b/arch/arm/Kconfig
+@@ -39,6 +39,8 @@
+ 	select ARCH_OPTIONAL_KERNEL_RWX_DEFAULT if CPU_V7
+ 	select ARCH_NEED_CMPXCHG_1_EMU if CPU_V6
+ 	select ARCH_SUPPORTS_ATOMIC_RMW
++	select ARCH_SUPPORTS_LTO_CLANG if CPU_LITTLE_ENDIAN
++	select ARCH_SUPPORTS_LTO_CLANG_THIN
+ 	select ARCH_SUPPORTS_CFI
+ 	select ARCH_SUPPORTS_HUGETLBFS if ARM_LPAE
+ 	select ARCH_SUPPORTS_PER_VMA_LOCK
+--- a/arch/arm/boot/compressed/Makefile
++++ b/arch/arm/boot/compressed/Makefile
+@@ -91,6 +91,7 @@
+ targets       := vmlinux vmlinux.lds piggy_data piggy.o \
+ 		 head.o $(OBJS)
+ 
++KBUILD_CFLAGS := $(filter-out $(CC_FLAGS_LTO), $(KBUILD_CFLAGS))
+ KBUILD_CFLAGS += -DDISABLE_BRANCH_PROFILING
+ 
+ ccflags-y := -fpic $(call cc-option,-mno-single-pic-base,) -fno-builtin \

@@ -1,0 +1,100 @@
+Subject: [PATCH] media: cedrus: allow USERPTR with a DMA IOMMU
+Upstream-Status: Pending
+
+Expose USERPTR only when the VE uses IOMMU-aware DMA ops. ARM32 uses
+an unmanaged paging domain for its DMA API; newer architectures use a
+DMA domain. vb2-dma-contig still validates that the mapped DMA addresses
+form one continuous IOVA; devices without an IOMMU retain the original
+MMAP and DMA-BUF modes.
+Set the VE DMA segment limit to the full address space when attached to
+a translating domain. ARM32 otherwise splits the SG table at its default
+64 KiB limit, and vb2-dma-contig rejects the resulting multiple IOVAs.
+
+---
+--- a/drivers/staging/media/sunxi/cedrus/cedrus_context.c
++++ b/drivers/staging/media/sunxi/cedrus/cedrus_context.c
+@@ -8,6 +8,7 @@
+  * Author: Paul Kocialkowski <paul.kocialkowski@bootlin.com>
+  */
+ 
++#include <linux/iommu.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/videodev2.h>
+ #include <media/v4l2-ctrls.h>
+@@ -655,12 +656,30 @@
+ {
+ 	struct cedrus_context *ctx = private;
+ 	struct cedrus_proc *proc = ctx->proc;
++	struct iommu_domain *domain;
++	bool dma_iommu;
+ 	int ret;
+ 
++	/*
++	 * The VE needs one DMA address, but an IOMMU can map USERPTR pages
++	 * scattered in physical memory into one contiguous IOVA.
++	 */
++	domain = iommu_get_domain_for_dev(proc->dev->dev);
++	dma_iommu = domain && iommu_is_dma_domain(domain);
++#ifdef CONFIG_ARM_DMA_USE_IOMMU
++	/* ARM32's IOMMU DMA ops attach an unmanaged paging domain. */
++	dma_iommu |= domain && domain->type == IOMMU_DOMAIN_UNMANAGED &&
++		proc->dev->dev->archdata.mapping;
++#endif
++	dev_info_once(proc->dev->dev, "Cedrus DMA IOMMU: %s (domain type %u)\n",
++		dma_iommu ? "mapped" : "absent",
++		domain ? domain->type : 0);
++
+ 	/* Source (output) */
+ 
+ 	src_queue->type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+-	src_queue->io_modes = VB2_MMAP | VB2_DMABUF;
++	src_queue->io_modes = VB2_MMAP | VB2_DMABUF |
++		(dma_iommu ? VB2_USERPTR : 0);
+ 	src_queue->buf_struct_size = sizeof(struct cedrus_buffer);
+ 	src_queue->ops = &cedrus_context_queue_ops;
+ 	src_queue->mem_ops = &vb2_dma_contig_memops;
+@@ -685,7 +713,8 @@
+ 	/* Destination (capture) */
+ 
+ 	dst_queue->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+-	dst_queue->io_modes = VB2_MMAP | VB2_DMABUF;
++	dst_queue->io_modes = VB2_MMAP | VB2_DMABUF |
++		(dma_iommu ? VB2_USERPTR : 0);
+ 	dst_queue->buf_struct_size = sizeof(struct cedrus_buffer);
+ 	dst_queue->ops = &cedrus_context_queue_ops;
+ 	dst_queue->mem_ops = &vb2_dma_contig_memops;
+--- a/drivers/staging/media/sunxi/cedrus/cedrus.c
++++ b/drivers/staging/media/sunxi/cedrus/cedrus.c
+@@ -10,6 +10,8 @@
+ 
+ #include <linux/clk.h>
++#include <linux/dma-mapping.h>
+ #include <linux/interrupt.h>
++#include <linux/iommu.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/of_reserved_mem.h>
+@@ -418,7 +420,8 @@
+ static int cedrus_probe(struct platform_device *platform_dev)
+ {
+ 	struct cedrus_device *cedrus_dev;
+ 	struct device *dev = &platform_dev->dev;
++	struct iommu_domain *domain;
+ 	int ret;
+ 
+ 	cedrus_dev = devm_kzalloc(dev, sizeof(*cedrus_dev), GFP_KERNEL);
+@@ -427,6 +430,14 @@
+ 	cedrus_dev->dev = dev;
+ 	platform_set_drvdata(platform_dev, cedrus_dev);
+ 
++	domain = iommu_get_domain_for_dev(dev);
++	if (domain && domain->type != IOMMU_DOMAIN_IDENTITY) {
++		/* ARM32 must map the entire SG buffer to one IOVA segment. */
++		dma_set_max_seg_size(dev, UINT_MAX);
++		dev_info(dev, "maximum DMA segment size %u\n",
++			 dma_get_max_seg_size(dev));
++	}
++
+ 	INIT_DELAYED_WORK(&cedrus_dev->watchdog_work, cedrus_watchdog);
+ 
+ 	ret = cedrus_resources_setup(cedrus_dev, platform_dev);
