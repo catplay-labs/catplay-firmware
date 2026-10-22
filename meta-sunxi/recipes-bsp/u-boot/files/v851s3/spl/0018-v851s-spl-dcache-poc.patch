@@ -1,0 +1,115 @@
+Subject: [PATCH] sunxi: V851S: optionally enable D-cache in SPI-NAND SPL
+Upstream-Status: Inappropriate [platform-specific implementation]
+
+Enable the ARMv7 MMU/D-cache after DRAM initialization and before the
+SPI-NAND loader reads an image. Keep the executing SRAM section executable
+and place an aligned L1 table in SPL's DRAM BSS. Its MMU section remains
+uncached. Flush and disable D-cache in the common SPL pre-jump hook for
+Linux and U-Boot proper.
+
+Enable this path only when SPL_SUNXI_DCACHE is selected. With the
+32-bit SPI-NAND FIFO reader, live V851S tests loaded the FIT in 572 ms
+versus 589-590 ms without D-cache.
+
+---
+diff --git a/arch/arm/mach-sunxi/Kconfig b/arch/arm/mach-sunxi/Kconfig
+--- a/arch/arm/mach-sunxi/Kconfig
++++ b/arch/arm/mach-sunxi/Kconfig
+@@ -1330,6 +1330,15 @@
+ if SPL_SUNXI_SPI_NAND
+ 
++config SPL_SUNXI_DCACHE
++	bool "Enable D-cache in sunxi SPI-NAND SPL"
++	depends on MACH_SUN8I_V851S && SYS_ARM_MMU && !SPL_SYS_DCACHE_OFF
++	default n
++	help
++	  Enable the ARMv7 MMU and D-cache after DRAM initialization and
++	  disable them before handing control to Linux or U-Boot proper.
++	  Reserve the translation table in SPL's DRAM BSS.
++
+ config SPL_SUNXI_SPI_NAND_QUAD
+ 	bool "Use quad-output cache reads in sunxi SPI NAND SPL"
+ 	depends on MACH_SUN8I_V851S
+ 	help
+diff --git a/arch/arm/mach-sunxi/spl_spi_sunxi.c b/arch/arm/mach-sunxi/spl_spi_sunxi.c
+--- a/arch/arm/mach-sunxi/spl_spi_sunxi.c
++++ b/arch/arm/mach-sunxi/spl_spi_sunxi.c
+@@ -9,15 +9,66 @@
+ #include <spl_load.h>
+ #include <asm/arch/clock.h>
+ #include <asm/arch/spl.h>
++#include <asm/cache.h>
++#include <asm/global_data.h>
+ #include <asm/gpio.h>
+ #include <asm/io.h>
+ #include <asm/unaligned.h>
++#include <asm/system.h>
++#include <cpu_func.h>
+ #include <linux/bitops.h>
+ #include <linux/delay.h>
+ #include <linux/libfdt.h>
+ #include <linux/mtd/spinand_spl.h>
+ #include <time.h>
+ #include <sunxi_gpio.h>
++
++DECLARE_GLOBAL_DATA_PTR;
++
++#ifdef CONFIG_SPL_SUNXI_DCACHE
++/* CONFIG_SPL_BSS_START_ADDR places this table in initialized DRAM. */
++static u8 sunxi_spinand_mmu_table[PGTABLE_SIZE] __aligned(16 * 1024);
++
++/*
++ * ARMv7's default MMU table makes non-DRAM sections execute-never. SPL runs
++ * from SRAM at 0x20000, so its section must remain executable. The BSS
++ * section holding the translation table must stay uncached.
++ */
++void dram_bank_mmu_setup(int bank)
++{
++	unsigned int section, end;
++
++	if (bank)
++		return;
++
++	set_section_dcache(0,
++		(enum dcache_option)(DCACHE_OFF & ~TTB_SECT_XN_MASK));
++	end = (PHYS_SDRAM_0 + gd->ram_size) >> MMU_SECTION_SHIFT;
++	for (section = PHYS_SDRAM_0 >> MMU_SECTION_SHIFT;
++	     section < end; section++)
++		set_section_dcache(section, DCACHE_DEFAULT_OPTION);
++	set_section_dcache((ulong)sunxi_spinand_mmu_table >> MMU_SECTION_SHIFT,
++			   DCACHE_OFF);
++}
++
++static int sunxi_spinand_enable_dcache(void)
++{
++	if (gd->ram_size < MMU_SECTION_SIZE ||
++	    (gd->ram_size & (MMU_SECTION_SIZE - 1)))
++		return -EINVAL;
++
++	gd->arch.tlb_addr = (ulong)sunxi_spinand_mmu_table;
++	gd->arch.tlb_size = sizeof(sunxi_spinand_mmu_table);
++	dcache_enable();
++	return 0;
++}
++
++/* Covers both SPL -> Linux and SPL -> U-Boot proper. */
++void spl_board_prepare_for_boot(void)
++{
++	dcache_disable();
++}
++#endif
+ 
+ #if defined(CONFIG_SPL_OS_BOOT) && !defined(CONFIG_SPL_SUNXI_SPI_NAND)
+ #error CONFIG_SPL_OS_BOOT is not supported yet
+@@ -601,6 +649,11 @@
+ 		return -EINVAL;
+ 
+ 	spi0_init();
++#ifdef CONFIG_SPL_SUNXI_DCACHE
++	ret = sunxi_spinand_enable_dcache();
++	if (ret)
++		goto out;
++#endif
+ 	ret = spi0_nand_transfer(NULL, read_id, sizeof(read_id), id, sizeof(id));
+ 	if (ret)
+ 		goto out;

@@ -1,0 +1,23 @@
+Subject: [PATCH] spl: compile gzip decompressor with -O3
+Upstream-Status: Pending
+
+The V851S SPL spends most FIT load time outside NAND reads. Keep the
+compression-sensitive zlib code at -O3 while the rest of SPL uses -Oz.
+The standalone object preserves its optimization through the LTO link.
+
+---
+ lib/zlib/Makefile | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/lib/zlib/Makefile b/lib/zlib/Makefile
+--- a/lib/zlib/Makefile
++++ b/lib/zlib/Makefile
+@@ -3,4 +3,8 @@
+ # (C) Copyright 2000-2006
+ # Wolfgang Denk, DENX Software Engineering, wd@denx.de.
+ 
++ifeq ($(CONFIG_SPL_BUILD),y)
++CFLAGS_zlib.o += -O3 -fno-lto
++endif
++
+ obj-y += zlib.o

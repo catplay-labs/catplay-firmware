@@ -1,0 +1,37 @@
+Subject: [PATCH] spi: sunxi: Use receive-only transfers without dummy TX data
+
+Upstream-Status: Pending
+
+---
+diff --git a/drivers/spi/spi-sunxi.c b/drivers/spi/spi-sunxi.c
+--- a/drivers/spi/spi-sunxi.c
++++ b/drivers/spi/spi-sunxi.c
+@@ -351,6 +351,7 @@
+ 	struct dm_spi_slave_plat *slave_plat = dev_get_parent_plat(dev);
+ 
+ 	u32 rst, val, len = bitlen / 8;
++	bool rx_only = din && !dout;
+ 	u8 nbytes;
+ 	int ret;
+ 
+@@ -378,14 +379,16 @@
+ 
+ 		/* Setup the counters */
+ 		writel(SUN4I_BURST_CNT(nbytes), SPI_REG(priv, SPI_BC));
+-		writel(SUN4I_XMIT_CNT(nbytes), SPI_REG(priv, SPI_TC));
++		writel(SUN4I_XMIT_CNT(rx_only ? 0 : nbytes),
++		       SPI_REG(priv, SPI_TC));
+ 
+ 		if (priv->variant->has_burst_ctl)
+-			writel(SUN4I_BURST_CNT(nbytes),
++			writel(SUN4I_BURST_CNT(rx_only ? 0 : nbytes),
+ 			       SPI_REG(priv, SPI_BCTL));
+ 
+-		/* Fill the TX FIFO */
+-		sun4i_spi_fill_fifo(priv, nbytes);
++		/* An RX-only burst clocks data in without filling TX FIFO. */
++		if (!rx_only)
++			sun4i_spi_fill_fifo(priv, nbytes);
+ 
+ 		/* Start the transfer */
+ 		setbits_le32(SPI_REG(priv, SPI_TCR),

@@ -1,0 +1,16 @@
+Subject: [PATCH] spi: sunxi: Keep BootROM module clock on controllers without CCR
+
+Upstream-Status: Pending
+
+---
+diff --git a/drivers/spi/spi-sunxi.c b/drivers/spi/spi-sunxi.c
+--- a/drivers/spi/spi-sunxi.c
++++ b/drivers/spi/spi-sunxi.c
+@@ -302,6 +302,7 @@
+ 	if (ret)
+ 		return ret;
+ 
++	/* Keep the module clock programmed by BootROM until CCU rate support lands. */
+ 	setbits_le32(SPI_REG(priv, SPI_GCR), SUN4I_CTL_ENABLE |
+ 		     SUN4I_CTL_MASTER | SPI_BIT(priv, SPI_GCR_TP));
+ 

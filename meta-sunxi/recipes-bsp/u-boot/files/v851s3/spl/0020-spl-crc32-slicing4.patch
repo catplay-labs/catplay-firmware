@@ -1,0 +1,159 @@
+Subject: [PATCH] spl: accelerate FIT CRC32 with cached slicing-by-4
+Upstream-Status: Pending
+
+Use a slicing-by-4 CRC32 backend for FIT image hashes in SPL. Build
+its lookup tables in SPL malloc memory after DRAM setup, allowing
+them to reside in cacheable DRAM instead of uncached SRAM or BSS.
+The ordinary CRC32 entry points remain available for other users.
+Fall back to the original routine if allocation fails.
+
+---
+diff --git a/common/hash.c b/common/hash.c
+index 71c4bef5..2efca529 100644
+--- a/common/hash.c
++++ b/common/hash.c
+@@ -362,7 +362,11 @@ static struct hash_algo hash_algo[] = {
+ 		.name		= "crc32",
+ 		.digest_size	= 4,
+ 		.chunk_size	= CHUNKSZ_CRC32,
++#if defined(CONFIG_SPL_BUILD) && defined(CONFIG_SPL_CRC32_SLICING4)
++		.hash_func_ws	= crc32_slicing4_wd_buf,
++#else
+ 		.hash_func_ws	= crc32_wd_buf,
++#endif
+ 		.hash_init	= hash_init_crc32,
+ 		.hash_update	= hash_update_crc32,
+ 		.hash_finish	= hash_finish_crc32,
+diff --git a/include/u-boot/crc.h b/include/u-boot/crc.h
+index b2badaf6..3453ff66 100644
+--- a/include/u-boot/crc.h
++++ b/include/u-boot/crc.h
+@@ -99,6 +99,11 @@ uint32_t crc32_no_comp(uint32_t crc, const unsigned char *buf, uint len);
+ void crc32_wd_buf(const uint8_t *input, uint ilen, uint8_t *output,
+ 		  uint chunk_sz);
+ 
++#if defined(CONFIG_SPL_BUILD) && defined(CONFIG_SPL_CRC32_SLICING4)
++void crc32_slicing4_wd_buf(const uint8_t *input, uint ilen, uint8_t *output,
++			   uint chunk_sz);
++#endif
++
+ /* lib/crc32c.c */
+ 
+ /**
+diff --git a/lib/Kconfig b/lib/Kconfig
+index 9e0f0ad7..0e0f1266 100644
+--- a/lib/Kconfig
++++ b/lib/Kconfig
+@@ -638,6 +638,17 @@ config SPL_CRC32
+ 	  detected accidental image corruption. For secure applications you
+ 	  should consider SHA256 or SHA384.
+ 
++config SPL_CRC32_SLICING4
++	bool "Use slicing-by-4 CRC32 for FIT hashes in SPL"
++	depends on SPL_CRC32 && SYS_LITTLE_ENDIAN && !DYNAMIC_CRC_TABLE
++	depends on !ARM64_CRC32
++	help
++	  Use four parallel table lookups per four bytes when checking FIT
++	  image CRC32 hashes. The lookup tables are allocated in SPL's cached
++	  DRAM after memory initialization. Other CRC32 callers keep the
++	  original implementation. If allocation fails, FIT hashing falls
++	  back to the original CRC32 function.
++
+ config SPL_SHA1
+ 	bool "Enable SHA1 support in SPL"
+ 	default y if SHA1
+diff --git a/lib/crc32.c b/lib/crc32.c
+index f36f1763..eb94dfcc 100644
+--- a/lib/crc32.c
++++ b/lib/crc32.c
+@@ -14,6 +14,9 @@
+ #include <efi_loader.h>
+ #endif
+ #include <compiler.h>
++#if defined(CONFIG_SPL_BUILD) && defined(CONFIG_SPL_CRC32_SLICING4)
++#include <malloc.h>
++#endif
+ #include <u-boot/crc.h>
+ 
+ #if defined(CONFIG_HW_WATCHDOG) || defined(CONFIG_WATCHDOG)
+@@ -271,3 +274,80 @@ void crc32_wd_buf(const unsigned char *input, unsigned int ilen,
+ 	crc = htonl(crc);
+ 	memcpy(output, &crc, sizeof(crc));
+ }
++
++#if defined(CONFIG_SPL_BUILD) && defined(CONFIG_SPL_CRC32_SLICING4)
++/* FIT runs after DRAM setup and SPL malloc has moved to cached DRAM. */
++static uint32_t *crc_slicing4;
++
++static bool crc32_init_slicing4(void)
++{
++	uint32_t *table;
++	unsigned int i, slice;
++
++	if (crc_slicing4)
++		return true;
++	table = malloc(4 * 256 * sizeof(*table));
++	if (!table)
++		return false;
++	for (i = 0; i < 256; i++) {
++		uint32_t value = crc_table[i];
++
++		table[i] = value;
++		for (slice = 1; slice < 4; slice++) {
++			value = crc_table[value & 0xff] ^ (value >> 8);
++			table[slice * 256 + i] = value;
++		}
++	}
++	crc_slicing4 = table;
++	return true;
++}
++
++static uint32_t crc32_slicing4(uint32_t crc, const uint8_t *buf, uint len)
++{
++	const uint32_t *table = crc_slicing4;
++
++	crc ^= 0xffffffffU;
++	while (len && ((uintptr_t)buf & 3)) {
++		crc = table[(crc ^ *buf++) & 0xff] ^ (crc >> 8);
++		len--;
++	}
++	while (len >= 4) {
++		uint32_t word = *(const uint32_t *)buf ^ crc;
++
++		crc = table[3 * 256 + (word & 0xff)] ^
++		      table[2 * 256 + ((word >> 8) & 0xff)] ^
++		      table[1 * 256 + ((word >> 16) & 0xff)] ^
++		      table[word >> 24];
++		buf += 4;
++		len -= 4;
++	}
++	while (len--)
++		crc = table[(crc ^ *buf++) & 0xff] ^ (crc >> 8);
++	return crc ^ 0xffffffffU;
++}
++
++void crc32_slicing4_wd_buf(const uint8_t *input, uint ilen, uint8_t *output,
++			   uint chunk_sz)
++{
++	uint32_t crc = 0;
++
++	if (!crc32_init_slicing4()) {
++		crc32_wd_buf(input, ilen, output, chunk_sz);
++		return;
++	}
++	if (!chunk_sz)
++		chunk_sz = ilen;
++	while (ilen) {
++		uint chunk = ilen < chunk_sz ? ilen : chunk_sz;
++
++		crc = crc32_slicing4(crc, input, chunk);
++		input += chunk;
++		ilen -= chunk;
++#if defined(CONFIG_HW_WATCHDOG) || defined(CONFIG_WATCHDOG)
++		schedule();
++#endif
++	}
++	crc = htonl(crc);
++	memcpy(output, &crc, sizeof(crc));
++}
++#endif

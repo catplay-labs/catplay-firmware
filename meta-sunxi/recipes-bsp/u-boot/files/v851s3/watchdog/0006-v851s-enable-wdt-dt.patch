@@ -1,0 +1,17 @@
+Subject: [PATCH] sunxi: enable V851S watchdog in U-Boot DT
+Upstream-Status: Inappropriate [CatPlay V851S board port]
+
+---
+diff --git a/arch/arm/dts/sunxi-u-boot.dtsi b/arch/arm/dts/sunxi-u-boot.dtsi
+index e1a9a7f5..92f3e75a 100644
+--- a/arch/arm/dts/sunxi-u-boot.dtsi
++++ b/arch/arm/dts/sunxi-u-boot.dtsi
+@@ -20,7 +20,7 @@
+ };
+ 
+ /* Let U-Boot be the firmware layer that controls the watchdog. */
+-#ifdef CONFIG_MACH_SUN8I_R528
++#if defined(CONFIG_MACH_SUN8I_R528) || defined(CONFIG_MACH_SUN8I_V851S)
+ &wdt {
+ 	status = "okay";
+ };

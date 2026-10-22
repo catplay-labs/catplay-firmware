@@ -1,0 +1,65 @@
+Date: Sun, 18 Oct 2026 15:04:13 +0200
+Subject: [PATCH 08/15] u-boot: add weak boot failure and hang hooks
+
+Introduce weak, empty arch_hang() and board_boot_failure() hooks.
+Call them from hang() and after autoboot returns, respectively.
+Platforms may override either hook without changing generic flow.
+
+arch_hang() aims to redirect hang()/panic() calls into FEL when overriden downstream
+
+board_boot_failure() aims to redirect to FEL when `CONFIG_BOOTCOMMAND` returns
+without passing control to Linux and would otherwise result in starting the CLI shell
+
+Upstream-Status: Pending
+---
+ common/main.c | 6 ++++++
+ lib/hang.c    | 5 +++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/common/main.c b/common/main.c
+index 4b4504557f..a49363bada 100644
+--- a/common/main.c
++++ b/common/main.c
+@@ -21,6 +21,10 @@
+ #include <efi_loader.h>
+ #include <event.h>
+ 
++__weak void board_boot_failure(void)
++{
++}
++
+ static void run_preboot_environment_command(void)
+ {
+ 	char *p;
+@@ -83,6 +87,8 @@ void main_loop(void)
+ 		panic("Failed to boot");
+ 	}
+ 
++	board_boot_failure();
++
+ 	cli_loop();
+ 
+ 	panic("No CLI available");
+diff --git a/lib/hang.c b/lib/hang.c
+index f3c3c896f0..78dd2cc0af 100644
+--- a/lib/hang.c
++++ b/lib/hang.c
+@@ -12,6 +12,10 @@
+ #include <stdio.h>
+ #include <os.h>
+ 
++__weak void arch_hang(void)
++{
++}
++
+ /**
+  * hang - stop processing by staying in an endless loop
+  *
+@@ -22,6 +26,7 @@
+  */
+ void hang(void)
+ {
++	arch_hang();
+ #if !defined(CONFIG_XPL_BUILD) || \
+ 		(CONFIG_IS_ENABLED(LIBCOMMON_SUPPORT) && \
+ 		 CONFIG_IS_ENABLED(SERIAL))

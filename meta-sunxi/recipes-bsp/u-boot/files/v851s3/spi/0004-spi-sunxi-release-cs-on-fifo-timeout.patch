@@ -1,0 +1,21 @@
+Subject: [PATCH] spi: sunxi: Release chip select on FIFO reset timeout
+
+Upstream-Status: Pending
+
+---
+diff --git a/drivers/spi/spi-sunxi.c b/drivers/spi/spi-sunxi.c
+--- a/drivers/spi/spi-sunxi.c
++++ b/drivers/spi/spi-sunxi.c
+@@ -370,8 +370,11 @@
+ 	rst = SPI_BIT(priv, SPI_FCR_RF_RST) | SPI_BIT(priv, SPI_FCR_TF_RST);
+ 	setbits_le32(SPI_REG(priv, SPI_FCR), rst);
+ 	ret = readl_poll_timeout(SPI_REG(priv, SPI_FCR), val, !(rst & val), 20);
+-	if (ret)
++	if (ret) {
++		if (flags & SPI_XFER_BEGIN)
++			sun4i_spi_set_cs(bus, slave_plat->cs[0], false);
+ 		return -EBUSY;
++	}
+ 
+ 	while (len) {
+ 		/* Setup the transfer now... */

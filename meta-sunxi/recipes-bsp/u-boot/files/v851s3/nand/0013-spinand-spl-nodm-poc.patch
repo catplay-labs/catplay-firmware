@@ -1,0 +1,402 @@
+Date: Sun, 18 Oct 2026 15:30:17 +0200
+Subject: [PATCH] mtd: spinand: add callback-based non-DM SPL reader
+
+Upstream-Status: Inappropriate [proof of concept]
+---
+ drivers/mtd/Makefile            |   4 +-
+ drivers/mtd/nand/Makefile       |   1 +
+ drivers/mtd/nand/spi/Kconfig    |  10 ++
+ drivers/mtd/nand/spi/Makefile   |   4 +
+ drivers/mtd/nand/spi/spl.c      | 255 +++++++++++++++++++++++++++++++++++
+ include/linux/mtd/spinand_spl.h |  59 ++++++++
+ 6 files changed, 332 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/mtd/nand/spi/spl.c
+ create mode 100644 include/linux/mtd/spinand_spl.h
+
+diff --git a/drivers/mtd/Makefile b/drivers/mtd/Makefile
+index ce05e20607..f948f0a1ee 100644
+--- a/drivers/mtd/Makefile
++++ b/drivers/mtd/Makefile
+@@ -34,7 +34,9 @@ else
+ ifneq ($(mtd-y),)
+ obj-$(CONFIG_SPL_MTD) += mtd.o
+ endif
+-obj-$(CONFIG_$(PHASE_)NAND_SUPPORT) += nand/
++ifneq ($(filter y,$(CONFIG_$(PHASE_)NAND_SUPPORT) $(CONFIG_$(PHASE_)MTD_SPI_NAND)),)
++obj-y += nand/
++endif
+ obj-$(CONFIG_SPL_ONENAND_SUPPORT) += onenand/
+ obj-$(CONFIG_$(PHASE_)SPI_FLASH_SUPPORT) += spi/
+ obj-$(CONFIG_SPL_UBI) += ubispl/
+diff --git a/drivers/mtd/nand/Makefile b/drivers/mtd/nand/Makefile
+index c8169cf739..90462bf09c 100644
+--- a/drivers/mtd/nand/Makefile
++++ b/drivers/mtd/nand/Makefile
+@@ -7,4 +7,5 @@ obj-$(CONFIG_MTD_RAW_NAND) += raw/
+ obj-$(CONFIG_MTD_SPI_NAND) += spi/
+ else
+ obj-$(CONFIG_$(PHASE_)NAND_SUPPORT) += raw/
++obj-$(CONFIG_$(PHASE_)MTD_SPI_NAND) += spi/
+ endif
+diff --git a/drivers/mtd/nand/spi/Kconfig b/drivers/mtd/nand/spi/Kconfig
+index 1124dada95..ac3b11aeae 100644
+--- a/drivers/mtd/nand/spi/Kconfig
++++ b/drivers/mtd/nand/spi/Kconfig
+@@ -6,3 +6,13 @@ menuconfig MTD_SPI_NAND
+ 	select SPI_MEM
+ 	help
+ 	  This is the framework for the SPI NAND device drivers.
++
++config SPL_MTD_SPI_NAND
++	bool "Read-only SPI NAND support in SPL without driver model"
++	depends on SPL && !SPL_DM_SPI
++	help
++	  Build the small SPI NAND page reader in SPL. The board supplies a
++	  command/data transfer callback, chip geometry and ECC status mask.
++	  No DM_SPI, DM_MTD or SPI_MEM is required.
++	  This option does not add an SPL image loader or initialize a SPI
++	  controller. The full SPI NAND driver remains used by U-Boot proper.
+diff --git a/drivers/mtd/nand/spi/Makefile b/drivers/mtd/nand/spi/Makefile
+index a7a0b2cb4b..15c15688d3 100644
+--- a/drivers/mtd/nand/spi/Makefile
++++ b/drivers/mtd/nand/spi/Makefile
+@@ -1,6 +1,10 @@
+ # SPDX-License-Identifier: GPL-2.0
+ 
++ifdef CONFIG_XPL_BUILD
++obj-$(CONFIG_$(PHASE_)MTD_SPI_NAND) += spl.o
++else
+ spinand-objs := core.o otp.o
+ spinand-objs += alliancememory.o ato.o esmt.o fmsh.o foresee.o gigadevice.o macronix.o
+ spinand-objs += micron.o paragon.o skyhigh.o toshiba.o winbond.o xtx.o
+ obj-$(CONFIG_MTD_SPI_NAND) += spinand.o
++endif
+diff --git a/drivers/mtd/nand/spi/spl.c b/drivers/mtd/nand/spi/spl.c
+new file mode 100644
+index 0000000000..4a96d08024
+--- /dev/null
++++ b/drivers/mtd/nand/spi/spl.c
+@@ -0,0 +1,255 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* Small non-DM SPI NAND reader for SPL. The full core stays in proper. */
++
++#include <errno.h>
++#include <linux/mtd/spinand_spl.h>
++#include <linux/delay.h>
++#include <linux/kernel.h>
++#include <time.h>
++
++#define SPINAND_PAGE_READ	0x13
++#define SPINAND_GET_FEATURE	0x0f
++#define SPINAND_SET_FEATURE	0x1f
++#define SPINAND_CFG_REG		0xb0
++#define SPINAND_CFG_ECC_ENABLE	0x10
++#define SPINAND_STATUS_REG	0xc0
++#define SPINAND_STATUS_BUSY	0x01
++#define SPINAND_READ_POLLS	80000 /* 400 ms at 5 us per poll */
++
++static int spinand_spl_transfer(const struct spinand_spl *nand, const u8 *cmd,
++			       unsigned int cmd_len, void *data,
++			       unsigned int data_len)
++{
++	return nand->transfer(nand->priv, cmd, cmd_len, data, data_len);
++}
++
++static int spinand_spl_get_feature(const struct spinand_spl *nand, u8 reg,
++				   u8 *value)
++{
++	u8 cmd[] = { SPINAND_GET_FEATURE, reg };
++
++	return spinand_spl_transfer(nand, cmd, sizeof(cmd), value, 1);
++}
++
++static int spinand_spl_set_feature(const struct spinand_spl *nand, u8 reg,
++				   u8 value)
++{
++	u8 cmd[] = { SPINAND_SET_FEATURE, reg, value };
++
++	return spinand_spl_transfer(nand, cmd, sizeof(cmd), NULL, 0);
++}
++
++static int spinand_spl_load_page(const struct spinand_spl *nand, u32 page,
++				 bool check_ecc)
++{
++	u8 cmd[] = { SPINAND_PAGE_READ, page >> 16, page >> 8, page };
++	u8 status;
++	unsigned int poll;
++	int ret;
++
++	ret = spinand_spl_transfer(nand, cmd, sizeof(cmd), NULL, 0);
++	if (ret)
++		return ret;
++
++	for (poll = 0; poll < SPINAND_READ_POLLS; poll++) {
++		ret = spinand_spl_get_feature(nand, SPINAND_STATUS_REG, &status);
++		if (ret)
++			return ret;
++		if (!(status & SPINAND_STATUS_BUSY))
++			return check_ecc && (status & nand->ecc_mask) ==
++				nand->ecc_uncorrectable ? -EBADMSG : 0;
++		udelay(5);
++	}
++
++	return -ETIMEDOUT;
++}
++
++static int spinand_spl_read_cache(const struct spinand_spl *nand, u32 column,
++				  void *buf, size_t len)
++{
++	u8 cmd[5];
++	unsigned int cmd_len;
++
++	cmd[0] = nand->cache_read_opcode;
++	cmd_len = 1;
++	if (nand->column_addr_bytes == 3)
++		cmd[cmd_len++] = column >> 16;
++	cmd[cmd_len++] = column >> 8;
++	cmd[cmd_len++] = column;
++	if (nand->dummy_bytes)
++		cmd[cmd_len++] = 0xff;
++
++	return spinand_spl_transfer(nand, cmd, cmd_len, buf, len);
++}
++
++static int spinand_spl_block_isbad(const struct spinand_spl *nand, u32 block)
++{
++	u8 cfg, marker[2];
++	bool ecc_enabled;
++	int ret, restore;
++
++	ret = spinand_spl_get_feature(nand, SPINAND_CFG_REG, &cfg);
++	if (ret)
++		return ret;
++	ecc_enabled = cfg & SPINAND_CFG_ECC_ENABLE;
++	if (ecc_enabled) {
++		ret = spinand_spl_set_feature(nand, SPINAND_CFG_REG,
++					      cfg & ~SPINAND_CFG_ECC_ENABLE);
++		if (ret)
++			return ret;
++	}
++
++	/* The proper driver tests the first two OOB bytes of page zero in RAW mode. */
++	ret = spinand_spl_load_page(nand, block * nand->pages_per_block, false);
++	if (!ret)
++		ret = spinand_spl_read_cache(nand, nand->page_size,
++					     marker, sizeof(marker));
++
++	if (ecc_enabled) {
++		restore = spinand_spl_set_feature(nand, SPINAND_CFG_REG, cfg);
++		if (!ret)
++			ret = restore;
++	}
++	if (ret)
++		return ret;
++
++	return marker[0] != 0xff || marker[1] != 0xff;
++}
++
++static int spinand_spl_map_block(const struct spinand_spl *nand, u32 first,
++				 u32 logical, u32 *physical)
++{
++	u32 block;
++	int bad;
++
++	/*
++	 * A payload is contiguous in logical space: bad physical erase blocks
++	 * consume no payload bytes. The writer must skip these same blocks.
++	 */
++	for (block = first;
++	     block < nand->first_block + nand->block_count; block++) {
++		bad = spinand_spl_block_isbad(nand, block);
++		if (bad < 0)
++			return bad;
++		if (!bad && !logical) {
++			*physical = block;
++			return 0;
++		}
++		if (!bad)
++			logical--;
++	}
++
++	return -ENOSPC;
++}
++
++int spinand_spl_read(const struct spinand_spl *nand, u64 offset,
++		     size_t len, void *buf)
++{
++	u8 *out = buf;
++	u64 block_size, capacity, in_block;
++	u32 page, column, logical_block, physical_block = 0;
++	u32 mapped_block = ~0U;
++	u32 loaded_page = ~0U;
++	size_t chunk;
++	u8 saved_cfg;
++	int ret, restore;
++	ulong read_start_us;
++
++	if (!nand || !nand->transfer || !nand->page_size ||
++	    nand->page_size > 65536 || !nand->page_count ||
++	    nand->page_count > 0x1000000 || !nand->pages_per_block ||
++	    !nand->block_count || nand->page_count % nand->pages_per_block ||
++	    nand->first_block >= nand->page_count / nand->pages_per_block ||
++	    nand->block_count > nand->page_count / nand->pages_per_block -
++				 nand->first_block || nand->oob_size < 2 ||
++	    !nand->cache_read_opcode || !nand->io_chunk ||
++	    nand->io_chunk > nand->page_size ||
++	    !nand->ecc_mask || !nand->ecc_uncorrectable ||
++	    (nand->ecc_uncorrectable & ~nand->ecc_mask) ||
++	    (nand->column_addr_bytes != 2 &&
++	     nand->column_addr_bytes != 3) || nand->dummy_bytes > 1 ||
++	    (len && !buf))
++		return -EINVAL;
++
++	if (nand->column_addr_bytes == 2 && nand->page_size >= 65535)
++		return -EINVAL;
++
++	block_size = (u64)nand->page_size * nand->pages_per_block;
++	capacity = block_size * nand->block_count;
++	if (offset > capacity || len > capacity - offset)
++		return -ERANGE;
++	if (!len)
++		return 0;
++	if (nand->bench)
++		read_start_us = timer_get_us();
++
++	ret = spinand_spl_get_feature(nand, SPINAND_CFG_REG, &saved_cfg);
++	if (ret)
++		return ret;
++	if (!(saved_cfg & SPINAND_CFG_ECC_ENABLE)) {
++		ret = spinand_spl_set_feature(nand, SPINAND_CFG_REG,
++					      saved_cfg | SPINAND_CFG_ECC_ENABLE);
++		if (ret)
++			goto restore_cfg;
++	}
++
++	while (len) {
++		logical_block = offset / block_size;
++		if (logical_block != mapped_block) {
++			u32 first = nand->first_block;
++			u32 skip = logical_block;
++
++			/* Sequential reads continue after the last mapped block. */
++			if (mapped_block != ~0U) {
++				first = physical_block + 1;
++				skip -= mapped_block + 1;
++			}
++			ret = spinand_spl_map_block(nand, first, skip,
++						    &physical_block);
++			if (ret)
++				goto restore_cfg;
++			mapped_block = logical_block;
++		}
++		in_block = offset % block_size;
++		page = physical_block * nand->pages_per_block +
++			in_block / nand->page_size;
++		column = offset % nand->page_size;
++		chunk = min_t(size_t, len, nand->page_size - column);
++		chunk = min_t(size_t, chunk, nand->io_chunk);
++
++		if (page != loaded_page) {
++			ulong started;
++
++			if (nand->bench)
++				started = timer_get_us();
++			ret = spinand_spl_load_page(nand, page, true);
++			if (nand->bench)
++				nand->bench->page_us += timer_get_us() - started;
++			if (ret)
++				goto restore_cfg;
++			loaded_page = page;
++		}
++		ret = spinand_spl_read_cache(nand, column, out, chunk);
++		if (ret)
++			goto restore_cfg;
++
++		offset += chunk;
++		out += chunk;
++		len -= chunk;
++	}
++
++	ret = 0;
++
++restore_cfg:
++	/* Also retry restoration if a raw marker read failed midway. */
++	if (!(saved_cfg & SPINAND_CFG_ECC_ENABLE) || ret) {
++		restore = spinand_spl_set_feature(nand, SPINAND_CFG_REG,
++						 saved_cfg);
++		if (!ret)
++			ret = restore;
++	}
++
++	if (nand->bench)
++		nand->bench->read_us += timer_get_us() - read_start_us;
++	return ret;
++}
+diff --git a/include/linux/mtd/spinand_spl.h b/include/linux/mtd/spinand_spl.h
+new file mode 100644
+index 0000000000..26e564e049
+--- /dev/null
++++ b/include/linux/mtd/spinand_spl.h
+@@ -0,0 +1,59 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef __LINUX_MTD_SPINAND_SPL_H
++#define __LINUX_MTD_SPINAND_SPL_H
++
++#include <linux/types.h>
++
++/**
++ * struct spinand_spl - Read-only SPI NAND configuration for SPL
++ * @transfer: Board transaction with one command followed by optional data
++ * @priv: Controller context passed to @transfer
++ * @page_size: Data bytes per page (excluding OOB)
++ * @page_count: Number of addressable physical pages
++ * @pages_per_block: Pages in one erase block
++ * @first_block: First physical block in the image region
++ * @block_count: Number of physical blocks in the image region
++ * @oob_size: Spare bytes per page, including the bad-block marker
++ * @cache_read_opcode: Cache read command, normally 0x03
++ * @io_chunk: Maximum data bytes in one cache-read transaction
++ * @column_addr_bytes: Cache column address width (2 or 3)
++ * @dummy_bytes: Dummy bytes before cache data
++ * @ecc_mask: ECC status bits in feature register 0xc0
++ * @ecc_uncorrectable: Value of those bits on uncorrectable data
++ * @bench: Optional read timing counters; NULL disables timing
++ *
++ * The caller must verify the chip ID. The reader manages on-die ECC: it
++ * disables ECC for raw OOB markers, enables it for payload reads, then
++ * restores the entry state. It checks the first two OOB bytes of each
++ * block's first page and skips marked blocks, matching the proper core.
++ * The writer must use the same mapping. No write/erase API exists.
++ */
++struct spinand_spl_bench {
++	u32 read_us;
++	u32 page_us;
++};
++
++struct spinand_spl {
++	int (*transfer)(void *priv, const u8 *cmd, unsigned int cmd_len,
++			void *data, unsigned int data_len);
++	void *priv;
++	u32 page_size;
++	u32 page_count;
++	u32 pages_per_block;
++	u32 first_block;
++	u32 block_count;
++	u32 oob_size;
++	u32 io_chunk;
++	u8 cache_read_opcode;
++	u8 column_addr_bytes;
++	u8 dummy_bytes;
++	u8 ecc_mask;
++	u8 ecc_uncorrectable;
++	struct spinand_spl_bench *bench;
++};
++
++/* offset is logical data bytes from the first good block in the region. */
++int spinand_spl_read(const struct spinand_spl *nand, u64 offset,
++		     size_t len, void *buf);
++
++#endif /* __LINUX_MTD_SPINAND_SPL_H */
+-- 
+2.56.0
+

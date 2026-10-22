@@ -1,0 +1,44 @@
+Subject: [PATCH] sunxi: map BootROM SPI NAND media to a dedicated SPL device
+
+Upstream-Status: Pending
+
+V851S BootROM writes boot_media=4 when it loads eGON from SPI NAND.
+Keep that source code separate from SPL's boot-device enum and route it
+to a dedicated SPI NAND loader device.
+
+---
+diff --git a/arch/arm/include/asm/arch-sunxi/spl.h b/arch/arm/include/asm/arch-sunxi/spl.h
+--- a/arch/arm/include/asm/arch-sunxi/spl.h
++++ b/arch/arm/include/asm/arch-sunxi/spl.h
+@@ -17,6 +17,7 @@
+ #define SUNXI_BOOTED_FROM_NAND	1
+ #define SUNXI_BOOTED_FROM_MMC2	2
+ #define SUNXI_BOOTED_FROM_SPI	3
++#define SUNXI_BOOTED_FROM_SPI_NAND	4
+ #define SUNXI_BOOTED_FROM_MMC0_HIGH	0x10
+ #define SUNXI_BOOTED_FROM_MMC2_HIGH	0x12
+ 
+diff --git a/arch/arm/include/asm/spl.h b/arch/arm/include/asm/spl.h
+--- a/arch/arm/include/asm/spl.h
++++ b/arch/arm/include/asm/spl.h
+@@ -34,6 +34,7 @@ enum {
+ 	BOOT_DEVICE_SMH,
+ 	BOOT_DEVICE_UFS,
+-	BOOT_DEVICE_NONE
++	BOOT_DEVICE_NONE,
++	BOOT_DEVICE_SPI_NAND,
+ };
+ #endif
+ 
+diff --git a/arch/arm/mach-sunxi/board.c b/arch/arm/mach-sunxi/board.c
+--- a/arch/arm/mach-sunxi/board.c
++++ b/arch/arm/mach-sunxi/board.c
+@@ -320,6 +320,8 @@ uint32_t sunxi_get_boot_device(void)
+ 		return BOOT_DEVICE_MMC2;
+ 	case SUNXI_BOOTED_FROM_SPI:
+ 		return BOOT_DEVICE_SPI;
++	case SUNXI_BOOTED_FROM_SPI_NAND:
++		return BOOT_DEVICE_SPI_NAND;
+ 	}
+ 
+ 	panic("Unknown boot source %d\n", boot_source);

@@ -1,0 +1,129 @@
+Subject: [PATCH] spi: sunxi: Support programmable sample delay
+
+Upstream-Status: Pending
+
+---
+diff --git a/drivers/spi/spi-sunxi.c b/drivers/spi/spi-sunxi.c
+--- a/drivers/spi/spi-sunxi.c
++++ b/drivers/spi/spi-sunxi.c
+@@ -50,7 +50,11 @@
+ #define SUN6I_FIFO_CTL_REG		0x18
+ #define SUN6I_FIFO_STA_REG		0x1c
+ #define SUN6I_CLK_CTL_REG		0x24
++#define SUN6I_SAMP_DL_REG		0x28
+ #define SUN6I_BURST_CNT_REG		0x30
++
++#define SUN6I_SAMP_DL_DELAY_MASK		GENMASK(5, 0)
++#define SUN6I_SAMP_DL_ENABLE		BIT(7)
+ #define SUN6I_XMIT_CNT_REG		0x34
+ #define SUN6I_BURST_CTL_REG		0x38
+ #define SUN6I_TXDATA_REG		0x200
+@@ -100,6 +104,7 @@
+ 	SPI_BCTL,
+ 	SPI_TXD,
+ 	SPI_RXD,
++	SPI_SAMP_DL,
+ };
+ 
+ /* sun spi register bits */
+@@ -116,6 +121,8 @@
+ 	SPI_TCR_CS_LEVEL,
+ 	SPI_TCR_SDC,
+ 	SPI_TCR_SDM,
++	SPI_TCR_SDC1,
++	SPI_GCR_SAMP_MODE_EN,
+ 	SPI_FCR_TF_RST,
+ 	SPI_FCR_RF_RST,
+ 	SPI_FSR_RF_CNT_MASK,
+@@ -128,6 +135,7 @@
+ 	bool has_soft_reset;
+ 	bool has_burst_ctl;
+ 	bool has_clk_ctl;
++	bool has_sample_delay;
+ };
+ 
+ struct sun4i_spi_plat {
+@@ -294,6 +302,46 @@
+ 	clrsetbits_le32(SPI_REG(priv, SPI_TCR), mask, value);
+ }
+ 
++static int sun4i_spi_configure_sampling(struct udevice *bus)
++{
++	struct sun4i_spi_priv *priv = dev_get_priv(bus);
++	static const u16 sample_modes[] = {
++		BIT(13), 0, BIT(11), BIT(13) | BIT(11),
++		BIT(13) | BIT(15), BIT(15), BIT(11) | BIT(15),
++	};
++	u32 mode, delay, mask, tcr;
++	int ret;
++
++	if (!dev_read_prop(bus, "allwinner,sample-mode", NULL) ||
++	    !dev_read_prop(bus, "allwinner,sample-delay", NULL))
++		return -ENOENT;
++
++	ret = dev_read_u32(bus, "allwinner,sample-mode", &mode);
++	if (ret)
++		return ret;
++	ret = dev_read_u32(bus, "allwinner,sample-delay", &delay);
++	if (ret)
++		return ret;
++
++	if (mode >= ARRAY_SIZE(sample_modes) || delay > 0x3f)
++		return -EINVAL;
++
++	mask = SPI_BIT(priv, SPI_TCR_SDC) |
++	       SPI_BIT(priv, SPI_TCR_SDM) |
++	       SPI_BIT(priv, SPI_TCR_SDC1);
++	tcr = readl(SPI_REG(priv, SPI_TCR));
++	tcr = (tcr & ~mask) | sample_modes[mode];
++	writel(tcr, SPI_REG(priv, SPI_TCR));
++
++	setbits_le32(SPI_REG(priv, SPI_GCR),
++		     SPI_BIT(priv, SPI_GCR_SAMP_MODE_EN));
++	clrsetbits_le32(SPI_REG(priv, SPI_SAMP_DL),
++			SUN6I_SAMP_DL_DELAY_MASK,
++			SUN6I_SAMP_DL_ENABLE | delay);
++
++	return 0;
++}
++
+ static int sun4i_spi_claim_bus(struct udevice *dev)
+ {
+ 	struct sun4i_spi_priv *priv = dev_get_priv(dev->parent);
+@@ -318,12 +366,14 @@
+ 
+ 	if (priv->variant->has_clk_ctl) {
+ 		sun4i_spi_set_clock_divider(dev->parent);
++	} else if (priv->variant->has_sample_delay) {
++		ret = sun4i_spi_configure_sampling(dev->parent);
++		if (ret) {
++			sun4i_spi_set_clock(dev->parent, false);
++			return ret;
++		}
+ 	} else {
+-		/*
+-		 * At this moment there is no ability to change input clock.
+-		 * Therefore, we can only use default HOSC@24MHz clock and
+-		 * set SPI sampling mode to normal
+-		 */
++		/* Normal sampling on controllers without a programmable delay. */
+ 		clrsetbits_le32(SPI_REG(priv, SPI_TCR),
+ 				SPI_BIT(priv, SPI_TCR_SDC) |
+ 				SPI_BIT(priv, SPI_TCR_SDM),
+@@ -599,6 +649,7 @@
+ 	[SPI_BCTL]		= SUN6I_BURST_CTL_REG,
+ 	[SPI_TXD]		= SUN6I_TXDATA_REG,
+ 	[SPI_RXD]		= SUN6I_RXDATA_REG,
++	[SPI_SAMP_DL]		= SUN6I_SAMP_DL_REG,
+ };
+ 
+ static const u32 sun6i_spi_bits[] = {
+@@ -613,6 +664,8 @@
+ 	[SPI_TCR_CS_LEVEL]	= BIT(7),
+ 	[SPI_TCR_SDC]		= BIT(11),
+ 	[SPI_TCR_SDM]		= BIT(13),
++	[SPI_TCR_SDC1]		= BIT(15),
++	[SPI_GCR_SAMP_MODE_EN]	= BIT(2),
+ 	[SPI_TCR_XCH]		= BIT(31),
+ 	[SPI_FCR_RF_RST]	= BIT(15),
+ 	[SPI_FCR_TF_RST]	= BIT(31),

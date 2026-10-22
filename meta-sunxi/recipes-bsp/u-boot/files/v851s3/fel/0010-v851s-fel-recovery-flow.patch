@@ -1,0 +1,120 @@
+Subject: [PATCH 10/16] sunxi: route V851S eGON boot failures through FEL
+
+Upstream-Status: Pending
+
+The eGON SPL consumes the one-shot RTC request and arms recovery for
+subsequent boot failures. SPL panic and hang, and proper autoboot
+failure, request a watchdog reset with the marker set.
+
+---
+diff --git a/arch/arm/mach-sunxi/Kconfig b/arch/arm/mach-sunxi/Kconfig
+index 875410f9fd..c8f5fe7007 100644
+--- a/arch/arm/mach-sunxi/Kconfig
++++ b/arch/arm/mach-sunxi/Kconfig
+@@ -512,4 +512,15 @@ config MACH_SUN8I_V851S
+ 
++config SUNXI_FEL_RECOVERY
++	bool "Recover V851S boot failures through FEL"
++	depends on MACH_SUN8I_V851S && SPL_IMAGE_TYPE_SUNXI_EGON
++	help
++	  Use the RTC FEL request between eGON SPL and the BootROM, and
++	  reset to FEL if booting fails in SPL or U-Boot proper. The early
++	  SPL request check runs independently of this failure-hook option.
++	  The RTC FEL flag is not cleared before jumping to Linux. Only a
++	  Linux kernel configured to clear it during an orderly reboot can
++	  disarm recovery; otherwise the next start enters FEL.
++
+ config MACH_SUN9I
+ 	bool "sun9i (Allwinner A80)"
+ 	select CPU_V7A
+diff --git a/arch/arm/mach-sunxi/board.c b/arch/arm/mach-sunxi/board.c
+index 6b87368c40..55692a2830 100644
+--- a/arch/arm/mach-sunxi/board.c
++++ b/arch/arm/mach-sunxi/board.c
+@@ -21,6 +21,7 @@
+ #include <asm/gpio.h>
+ #include <asm/io.h>
+ #include <asm/arch/clock.h>
++#include <asm/arch/fel.h>
+ #include <asm/arch/spl.h>
+ #include <asm/arch/sys_proto.h>
+ #include <asm/arch/timer.h>
+@@ -533,6 +534,9 @@ void board_init_f(ulong dummy)
+ 	spl_init();
+ 	preloader_console_init();
+ 
++	/* Consume a pending FEL request before DRAM initialization. */
++	sunxi_fel_jump_if_requested();
++
+ #if CONFIG_IS_ENABLED(I2C) && CONFIG_IS_ENABLED(SYS_I2C_LEGACY)
+ 	/* Needed early by sunxi_board_init if PMU is enabled */
+ 	i2c_init_board();
+diff --git a/arch/arm/mach-sunxi/fel.c b/arch/arm/mach-sunxi/fel.c
+index 2896af09f8..8bcabdc9d1 100644
+--- a/arch/arm/mach-sunxi/fel.c
++++ b/arch/arm/mach-sunxi/fel.c
+@@ -120,2 +120,9 @@ void sunxi_fel_jump_if_requested(void)
+ 		sunxi_fel_recover();
+ }
++
++#ifdef CONFIG_SUNXI_FEL_RECOVERY
++void arch_hang(void)
++{
++	sunxi_fel_recover();
++}
++#endif
+diff --git a/board/sunxi/board.c b/board/sunxi/board.c
+index e4f98241f4..e64b103bac 100644
+--- a/board/sunxi/board.c
++++ b/board/sunxi/board.c
+@@ -26,6 +26,7 @@
+ #include <asm/arch/cpu.h>
+ #include <asm/arch/display.h>
+ #include <asm/arch/dram.h>
++#include <asm/arch/fel.h>
+ #include <asm/arch/mmc.h>
+ #include <asm/arch/prcm.h>
+ #include <asm/arch/pmic_bus.h>
+@@ -194,6 +195,12 @@ int board_init(void)
+ {
+ 	__maybe_unused int id_pfr1, ret;
+ 
++#ifdef CONFIG_SUNXI_FEL_RECOVERY
++	/* SPL already did this on NAND; cover standalone U-Boot proper too. */
++	if (sunxi_fel_set())
++		sunxi_fel_recover();
++#endif
++
+ 	gd->bd->bi_boot_params = (PHYS_SDRAM_0 + 0x100);
+ 
+ #if !defined(CONFIG_ARM64) && !defined(CONFIG_MACH_SUNIV)
+@@ -875,6 +882,14 @@ int board_late_init(void)
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_SUNXI_FEL_RECOVERY
++/* Called after autoboot returns, including failed bootm and aborted boot. */
++void board_boot_failure(void)
++{
++	sunxi_fel_recover();
++}
++#endif
++
+ static void bluetooth_dt_fixup(void *blob)
+ {
+ 	/* Some devices ship with a Bluetooth controller default address.
+diff --git a/lib/panic.c b/lib/panic.c
+index 0f578b5b51..d6d848abb1 100644
+--- a/lib/panic.c
++++ b/lib/panic.c
+@@ -21,6 +21,10 @@ static void panic_finish(void) __attribute__ ((noreturn));
+ static void panic_finish(void)
+ {
+ 	putc('\n');
++#ifdef CONFIG_SUNXI_FEL_RECOVERY
++	/* Route panic through the early-SPL-safe FEL reset path. */
++	hang();
++#endif
+ #if defined(CONFIG_PANIC_HANG)
+ 	hang();
+ #else

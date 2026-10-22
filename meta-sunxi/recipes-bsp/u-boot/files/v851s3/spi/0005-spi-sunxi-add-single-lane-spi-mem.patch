@@ -1,0 +1,98 @@
+Subject: [PATCH] spi: sunxi: Add single-lane SPI memory operations
+
+Upstream-Status: Pending
+
+---
+diff --git a/drivers/spi/spi-sunxi.c b/drivers/spi/spi-sunxi.c
+--- a/drivers/spi/spi-sunxi.c
++++ b/drivers/spi/spi-sunxi.c
+@@ -22,6 +22,7 @@
+ #include <dm.h>
+ #include <log.h>
+ #include <spi.h>
++#include <spi-mem.h>
+ #include <errno.h>
+ #include <fdt_support.h>
+ #include <reset.h>
+@@ -443,12 +444,81 @@
+ 	return 0;
+ }
+ 
++static bool sun4i_spi_mem_supports_op(struct spi_slave *slave,
++				     const struct spi_mem_op *op)
++{
++	if (op->cmd.nbytes != 1 || op->cmd.buswidth != 1 || op->cmd.dtr)
++		return false;
++	if (op->addr.nbytes > 4 ||
++	    (op->addr.nbytes && op->addr.buswidth != 1) || op->addr.dtr)
++		return false;
++	if (op->dummy.nbytes > 8 ||
++	    (op->dummy.nbytes && op->dummy.buswidth != 1) || op->dummy.dtr)
++		return false;
++	if (op->data.nbytes && (op->data.buswidth != 1 || op->data.dtr))
++		return false;
++
++	return true;
++}
++
++static int sun4i_spi_mem_exec_op(struct spi_slave *slave,
++				const struct spi_mem_op *op)
++{
++	struct dm_spi_slave_plat *plat = dev_get_parent_plat(slave->dev);
++	struct udevice *bus = slave->dev->parent;
++	u8 header[1 + 4 + 8];
++	unsigned int len = 0, i;
++	ulong flags = SPI_XFER_BEGIN;
++	int ret;
++
++	if (!sun4i_spi_mem_supports_op(slave, op))
++		return -EOPNOTSUPP;
++
++	header[len++] = op->cmd.opcode;
++	for (i = 0; i < op->addr.nbytes; i++)
++		header[len++] = op->addr.val >>
++				(8 * (op->addr.nbytes - i - 1));
++	memset(header + len, 0, op->dummy.nbytes);
++	len += op->dummy.nbytes;
++
++	if (!op->data.nbytes)
++		flags |= SPI_XFER_END;
++
++	ret = sun4i_spi_xfer(slave->dev, len * 8, header, NULL, flags);
++	if (ret)
++		goto err_cs;
++	if (!op->data.nbytes)
++		return 0;
++
++	if (op->data.dir == SPI_MEM_DATA_IN)
++		ret = sun4i_spi_xfer(slave->dev, op->data.nbytes * 8,
++				    NULL, op->data.buf.in, SPI_XFER_END);
++	else if (op->data.dir == SPI_MEM_DATA_OUT)
++		ret = sun4i_spi_xfer(slave->dev, op->data.nbytes * 8,
++				    op->data.buf.out, NULL, SPI_XFER_END);
++	else
++		ret = -EOPNOTSUPP;
++	if (!ret)
++		return 0;
++
++err_cs:
++	/* A failed multi-phase operation must never leave CS asserted. */
++	sun4i_spi_set_cs(bus, plat->cs[0], false);
++	return ret;
++}
++
++static const struct spi_controller_mem_ops sun4i_spi_mem_ops = {
++	.supports_op = sun4i_spi_mem_supports_op,
++	.exec_op = sun4i_spi_mem_exec_op,
++};
++
+ static const struct dm_spi_ops sun4i_spi_ops = {
+ 	.claim_bus		= sun4i_spi_claim_bus,
+ 	.release_bus		= sun4i_spi_release_bus,
+ 	.xfer			= sun4i_spi_xfer,
+ 	.set_speed		= sun4i_spi_set_speed,
+ 	.set_mode		= sun4i_spi_set_mode,
++	.mem_ops		= &sun4i_spi_mem_ops,
+ };
+ 
+ static int sun4i_spi_probe(struct udevice *bus)

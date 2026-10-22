@@ -1,0 +1,23 @@
+Date: Sun, 18 Oct 2026 15:04:13 +0200
+Subject: [PATCH 07/15] ram: sunxi: enable V851 MBUS masters
+Upstream-Status: Inappropriate [CatPlay V851S board port]
+
+Enable all V851 MBUS masters in the common D1/V851 SPL DRAM setup. The
+0xffff MAER1 mask includes V851 CE master 40 at MAER1 bit 8.
+---
+ drivers/ram/sunxi/dram_sun20i_d1.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/ram/sunxi/dram_sun20i_d1.c b/drivers/ram/sunxi/dram_sun20i_d1.c
+index befc69fbb4..abbc3bc462 100644
+--- a/drivers/ram/sunxi/dram_sun20i_d1.c
++++ b/drivers/ram/sunxi/dram_sun20i_d1.c
+@@ -105,7 +105,7 @@ static void dram_enable_all_master(void)
+ 			(struct sunxi_mctl_com_reg *)SUNXI_DRAM_COM_BASE;
+ 	
+ 	writel(~0, &mctl_com->maer0);
+-	writel(0xff, &mctl_com->maer1);
++	writel(0xffff, &mctl_com->maer1);
+ 	writel(0xffff, &mctl_com->maer2);
+ 	udelay(10);
+ }

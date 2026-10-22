@@ -1,0 +1,180 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+// Copyright (C) 2022 Arm Ltd.
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/leds/common.h>
+
+/dts-v1/;
+
+#include "sun8i-v851s.dtsi"
+
+/ {
+	model = "CatPlay on Wooboobox T2";
+	compatible = "wooboobox,t2", "allwinner,sun8i-v851s";
+
+	aliases {
+		serial0 = &uart0;
+		spi0 = &spi0;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	// leds {
+	// 	compatible = "gpio-leds";
+
+	// 	led-0 {
+	// 		color = <LED_COLOR_ID_BLUE>;
+	// 		function = LED_FUNCTION_STATUS;
+	// 		gpios = <&pio 3 22 GPIO_ACTIVE_LOW>; /* PD22 */
+	// 	};
+	// };
+
+	/* board wide 5V supply directly from the USB-C socket */
+	reg_vcc5v: regulator-5v {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc-5v";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-always-on;
+	};
+
+	/* SY8008 DC/DC regulator on the board */
+	reg_3v3: regulator-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc-3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&reg_vcc5v>;
+	};
+
+	/* SY8008 DC/DC regulator on the board, also supplying VDD-SYS */
+	reg_vcc_core: regulator-core {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc-core";
+		regulator-min-microvolt = <880000>;
+		regulator-max-microvolt = <880000>;
+		vin-supply = <&reg_vcc5v>;
+	};
+
+	/* XC6206 LDO on the board */
+	reg_avdd2v8: regulator-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "avdd2v8";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		vin-supply = <&reg_3v3>;
+	};
+};
+
+&cpu0 {
+	cpu-supply = <&reg_vcc_core>;
+};
+
+&dcxo {
+	clock-frequency = <24000000>;
+};
+
+&ehci0 {
+	status = "okay";
+};
+
+&ohci0 {
+	status = "okay";
+};
+
+// &mmc0 {
+// 	pinctrl-names = "default";
+// 	pinctrl-0 = <&mmc0_pins>;
+// 	vmmc-supply = <&reg_3v3>;
+// 	cd-gpios = <&pio 4 12 GPIO_ACTIVE_LOW>;
+// 	disable-wp;
+// 	bus-width = <4>;
+// 	status = "okay";
+// };
+
+/* V851S SPI0 is routed to the onboard GigaDevice SPI NAND on PC0-PC5. */
+&pio {
+	vcc-pb-supply = <&reg_3v3>;
+	vcc-pd-supply = <&reg_3v3>;
+	vcc-pe-supply = <&reg_avdd2v8>;
+	vcc-pf-supply = <&reg_3v3>;
+	vcc-pg-supply = <&reg_3v3>;
+
+	uart0_ph_pins: uart0-ph-pins {
+		pins = "PH9", "PH10";
+		function = "uart0";
+	};
+
+	spi0_pc_pins: spi0-pc-pins {
+		pins = "PC0", "PC1", "PC2", "PC3", "PC4", "PC5";
+		function = "spi0";
+	};
+};
+
+&spi0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi0_pc_pins>;
+	allwinner,sample-mode = <1>;
+	allwinner,sample-delay = <18>;
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	flash@0 {
+		compatible = "spi-nand";
+		reg = <0>;
+		spi-max-frequency = <5000000>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			/* Keep in sync with Linux DTB and Bitbake OTA builder */
+			partition@0 {
+				label = "boot0";
+				reg = <0x00000000 0x00100000>;
+			};
+
+			partition@100000 {
+				label = "uboot";
+				reg = <0x00100000 0x00100000>;
+			};
+
+			partition@200000 {
+				label = "kernel";
+				reg = <0x00200000 0x00800000>;
+			};
+
+			partition@a00000 {
+				label = "rootfs";
+				reg = <0x00a00000 0x01000000>;
+			};
+
+			partition@1a00000 {
+				label = "persist";
+				reg = <0x01a00000 0x01000000>;
+			};
+		};
+	};
+};
+
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_ph_pins>;
+	status = "okay";
+};
+
+/* The USB-C socket has its CC pins pulled to GND, so is hardwired as a UFP. */
+&usb_otg {
+	dr_mode = "otg";
+	status = "okay";
+};
+
+&usbphy {
+	usb1_vbus-supply = <&reg_vcc5v>;
+	status = "okay";
+};

@@ -1,0 +1,45 @@
+Date: Sun, 18 Oct 2026 15:04:12 +0200
+Subject: [PATCH 04/15] sunxi: preserve callee-saved r4 across FEL return
+
+return_to_fel() is called from C and must preserve the AAPCS callee-saved
+r4 register. Save it alongside the BootROM state before SPL uses it and
+restore it immediately before returning to FEL.
+
+Upstream-Status: Pending
+---
+ arch/arm/cpu/armv7/sunxi/fel_utils.S | 2 ++
+ arch/arm/mach-sunxi/board.c          | 1 +
+ 2 files changed, 3 insertions(+)
+
+diff --git a/arch/arm/cpu/armv7/sunxi/fel_utils.S b/arch/arm/cpu/armv7/sunxi/fel_utils.S
+index 78bb1657fc..85936fec2e 100644
+--- a/arch/arm/cpu/armv7/sunxi/fel_utils.S
++++ b/arch/arm/cpu/armv7/sunxi/fel_utils.S
+@@ -20,6 +20,7 @@ ENTRY(save_boot_params)
+ 	str	lr, [r0, #12]
+ 	mrc	p15, 0, lr, c12, c0, 0	@ Read VBAR
+ 	str	lr, [r0, #16]
++	str	r4, [r0, #32]
+ 	b	save_boot_params_ret
+ ENDPROC(save_boot_params)
+ 
+@@ -32,6 +33,7 @@ ENTRY(return_to_fel)
+ 	ldr	r1, [r0, #12]
+ 	mcr	p15, 0, r1, c1, c0, 0	@ Write CP15 SCTLR Register
+ 	ldr	r1, [r0, #8]
++	ldr	r4, [r0, #32]
+ 	msr	cpsr, r1		@ Write CPSR
+ 	bx	lr
+ ENDPROC(return_to_fel)
+diff --git a/arch/arm/mach-sunxi/board.c b/arch/arm/mach-sunxi/board.c
+index 86e6c7e600..0c571fde0b 100644
+--- a/arch/arm/mach-sunxi/board.c
++++ b/arch/arm/mach-sunxi/board.c
+@@ -38,6 +38,7 @@ struct fel_stash {
+ 	uint32_t sp_irq;
+ 	uint32_t icc_pmr;
+ 	uint32_t icc_igrpen1;
++	uint32_t r4;
+ };
+ 
+ struct fel_stash fel_stash __section(".data");

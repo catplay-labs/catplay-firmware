@@ -1,0 +1,19 @@
+Subject: [PATCH] sunxi: clock V851S CPU PLL at 888 MHz in SPL
+Upstream-Status: Pending
+
+---
+diff --git a/arch/arm/mach-sunxi/clock_sun50i_h6.c b/arch/arm/mach-sunxi/clock_sun50i_h6.c
+--- a/arch/arm/mach-sunxi/clock_sun50i_h6.c
++++ b/arch/arm/mach-sunxi/clock_sun50i_h6.c
+@@ -42,7 +42,11 @@
+ 		setbits_le32(prcm + CCU_PRCM_PLL_LDO_CFG, 0x60000);
+ 	}
+ 
++#ifdef CONFIG_MACH_SUN8I_V851S
++	clock_set_pll1(888000000);
++#else
+ 	clock_set_pll1(408000000);
++#endif
+ 
+ 	writel(CCM_PLL6_DEFAULT, ccm + CCU_H6_PLL6_CFG);
+ 	while (!(readl(ccm + CCU_H6_PLL6_CFG) & CCM_PLL_LOCK))

@@ -1,0 +1,4 @@
+# FEL-loaded U-Boot proper reads the already-flashed kernel FIT from SPI-NAND.
+# This flow is not used for anything right now, but allows regression-testing non-SPL SPI-NAND driver patches.
+CONFIG_BOOTCOMMAND="mtd read kernel 0x41000000 0 0x800000; bootm 0x41000000"
+CONFIG_BOOTDELAY=-2

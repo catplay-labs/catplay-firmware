@@ -1,0 +1,93 @@
+Subject: [PATCH] sunxi: set V851S UART and SPI pinmux
+Upstream-Status: Inappropriate [CatPlay V851S board port]
+
+---
+diff --git a/arch/arm/mach-sunxi/board.c b/arch/arm/mach-sunxi/board.c
+index 432b1c10..86e6c7e6 100644
+--- a/arch/arm/mach-sunxi/board.c
++++ b/arch/arm/mach-sunxi/board.c
+@@ -161,6 +161,10 @@ static int gpio_init(void)
+ 	sunxi_gpio_set_cfgpin(SUNXI_GPE(2), 6);
+ 	sunxi_gpio_set_cfgpin(SUNXI_GPE(3), 6);
+ 	sunxi_gpio_set_pull(SUNXI_GPE(3), SUNXI_GPIO_PULL_UP);
++#elif CONFIG_CONS_INDEX == 1 && defined(CONFIG_MACH_SUN8I_V851S)
++	sunxi_gpio_set_cfgpin(SUNXI_GPH(9), SUN8I_V851S_GPH_UART0);
++	sunxi_gpio_set_cfgpin(SUNXI_GPH(10), SUN8I_V851S_GPH_UART0);
++	sunxi_gpio_set_pull(SUNXI_GPH(10), SUNXI_GPIO_PULL_UP);
+ #elif CONFIG_CONS_INDEX == 2 && defined(CONFIG_MACH_SUNIV)
+ 	sunxi_gpio_set_cfgpin(SUNXI_GPA(2), SUNIV_GPE_UART0);
+ 	sunxi_gpio_set_cfgpin(SUNXI_GPA(3), SUNIV_GPE_UART0);
+diff --git a/arch/arm/mach-sunxi/spl_spi_sunxi.c b/arch/arm/mach-sunxi/spl_spi_sunxi.c
+index 5f72e809..4de81ae5 100644
+--- a/arch/arm/mach-sunxi/spl_spi_sunxi.c
++++ b/arch/arm/mach-sunxi/spl_spi_sunxi.c
+@@ -122,10 +122,12 @@ static void spi0_pinmux_setup(unsigned int pin_function)
+ 		sunxi_gpio_set_cfgpin(SUNXI_GPC(1), pin_function);
+ 
+ 	if (IS_ENABLED(CONFIG_MACH_SUN50I_H6) ||
+-	    IS_ENABLED(CONFIG_MACH_SUN8I_R528))
++	    IS_ENABLED(CONFIG_MACH_SUN8I_R528) ||
++	    IS_ENABLED(CONFIG_MACH_SUN8I_V851S))
+ 		sunxi_gpio_set_cfgpin(SUNXI_GPC(5), pin_function);
+ 	if (IS_ENABLED(CONFIG_MACH_SUN50I_H616) ||
+-	    IS_ENABLED(CONFIG_MACH_SUN8I_R528))
++	    IS_ENABLED(CONFIG_MACH_SUN8I_R528) ||
++	    IS_ENABLED(CONFIG_MACH_SUN8I_V851S))
+ 		sunxi_gpio_set_cfgpin(SUNXI_GPC(4), pin_function);
+ 
+ 	/* Older generations use PC23 for CS, newer ones use PC3. */
+@@ -257,7 +259,8 @@ static void spi0_init(void)
+ 	unsigned int pin_function = SUNXI_GPC_SPI0;
+ 
+ 	if (IS_ENABLED(CONFIG_MACH_SUN50I) ||
+-	    IS_ENABLED(CONFIG_SUN50I_GEN_H6))
++	    IS_ENABLED(CONFIG_SUN50I_GEN_H6) ||
++	    IS_ENABLED(CONFIG_MACH_SUN8I_V851S))
+ 		pin_function = SUN50I_GPC_SPI0;
+ 	else if (IS_ENABLED(CONFIG_MACH_SUNIV) ||
+ 		 IS_ENABLED(CONFIG_MACH_SUN8I_R528))
+diff --git a/drivers/pinctrl/sunxi/Kconfig b/drivers/pinctrl/sunxi/Kconfig
+index 54314992..fc0a41f3 100644
+--- a/drivers/pinctrl/sunxi/Kconfig
++++ b/drivers/pinctrl/sunxi/Kconfig
+@@ -136,7 +136,7 @@ config PINCTRL_SUN50I_A100_R
+ 
+ config PINCTRL_SUN20I_D1
+ 	bool "Support for the Allwinner D1/R528 PIO"
+-	default MACH_SUN8I_R528
++	default MACH_SUN8I_R528 || MACH_SUN8I_V851S
+ 	select PINCTRL_SUNXI
+ 
+ config PINCTRL_SUN55I_A523
+diff --git a/drivers/pinctrl/sunxi/pinctrl-sunxi.c b/drivers/pinctrl/sunxi/pinctrl-sunxi.c
+index a8632aea..6c724cb6 100644
+--- a/drivers/pinctrl/sunxi/pinctrl-sunxi.c
++++ b/drivers/pinctrl/sunxi/pinctrl-sunxi.c
+@@ -607,9 +607,15 @@ static const struct sunxi_pinctrl_function sun20i_d1_pinctrl_functions[] = {
+ 	{ "mmc0",	2 },	/* PF0-PF5 */
+ 	{ "mmc1",	2 },	/* PG0-PG5 */
+ 	{ "mmc2",	3 },	/* PC2-PC7 */
++#if defined(CONFIG_MACH_SUN8I_V851S)
++	{ "spi0",	4 },	/* PC0-PC5 */
++#else
+ 	{ "spi0",	2 },	/* PC2-PC7 */
++#endif
+ #if IS_ENABLED(CONFIG_UART0_PORT_F)
+ 	{ "uart0",	3 },	/* PF2,PF4 */
++#elif defined(CONFIG_MACH_SUN8I_V851S)
++	{ "uart0",	5 },	/* PH9,PH10 */
+ #else
+ 	{ "uart0",	6 },	/* PB0-PB1, PB8-PB9, PE2-PE3 */
+ #endif
+diff --git a/include/sunxi_gpio.h b/include/sunxi_gpio.h
+index 12b54c8d..9582412b 100644
+--- a/include/sunxi_gpio.h
++++ b/include/sunxi_gpio.h
+@@ -116,6 +116,7 @@ enum sunxi_gpio_number {
+ #define SUN8I_A33_GPB_UART0	3
+ #define SUN8I_A83T_GPB_UART0	2
+ #define SUN8I_V3S_GPB_UART0	3
++#define SUN8I_V851S_GPH_UART0	5
+ #define SUN50I_GPB_UART0	4
+ 
+ #define SUNXI_GPC_NAND		2

@@ -1,0 +1,590 @@
+Date: Sun, 18 Oct 2026 15:30:25 +0200
+Subject: [PATCH] sunxi: add optional SPI NAND SPL image loader
+
+Upstream-Status: Inappropriate [proof of concept]
+---
+diff --git a/arch/arm/mach-sunxi/Kconfig b/arch/arm/mach-sunxi/Kconfig
+index 37907244..95e62eb2 100644
+--- a/arch/arm/mach-sunxi/Kconfig
++++ b/arch/arm/mach-sunxi/Kconfig
+@@ -1315,6 +1315,141 @@ config SPL_SPI_SUNXI
+ 	  sunxi SPI Flash. It uses the same method as the boot ROM, so does
+ 	  not need any extra configuration.
+ 
++config SPL_SUNXI_SPI_NAND
++	bool "Load U-Boot from SPI NAND with the sunxi SPL SPI0 controller"
++	depends on SPL && SUNXI_GEN_NCAT2 && !SPL_SPI_SUNXI && !SPL_DM_SPI
++	select SPL_MTD_SPI_NAND
++	help
++	  Use the small sunxi SPI0 controller path and the non-DM SPI NAND
++	  reader to load a FIT or uncompressed legacy image. The image
++	  starts at logical offset zero in a bounded region; bad physical blocks
++	  are skipped.
++	  The flash writer must use the same region and skip rule. This option
++	  replaces the SRAM FIT handoff when the boot source is SPI or NAND.
++
++if SPL_SUNXI_SPI_NAND
++
++config SPL_SUNXI_SPI_NAND_QUAD
++	bool "Use quad-output cache reads in sunxi SPI NAND SPL"
++	depends on MACH_SUN8I_V851S
++	help
++	  Enable the matched GD5F1GM7RExxG chip's QE bit and use the 0x6b
++	  (1-1-4) cache-read command. ID, feature and status commands stay
++	  on one data line. Restore the original QE setting before handoff.
++
++config SPL_SUNXI_SPI_NAND_IO_CHUNK
++	int "Maximum SPI NAND cache-read data bytes per transaction"
++	range 1 2048
++	default 60
++	help
++	  The SPI0 PIO reader drains its 64-byte RX FIFO while a transfer is
++	  active, so a transaction may cover a full NAND page. Choose a value
++	  validated at the selected SPI clock. RX FIFO overflow is fatal.
++
++config SPL_SUNXI_SPI_NAND_BENCH_RTC
++	bool "Record SPL SPI NAND load time in V851S RTC GP7"
++	depends on MACH_SUN8I_V851S
++	help
++	  Diagnostic option. Store the elapsed milliseconds from SPI0 init
++	  through image load in RTC GP7 (0x0709011c). GP3/GP4 hold total
++	  NAND-read and page-load microseconds; GP5/GP6 hold cache-read
++	  and other SPI transaction microseconds.
++	  GP2 remains reserved for FEL. Leave disabled in production images.
++
++config SPL_SUNXI_SPI_NAND_CLOCK_HZ
++	int "V851S SPL SPI NAND clock ceiling in Hz"
++	depends on MACH_SUN8I_V851S
++	range 1000000 300000000
++	default 24000000
++	help
++	  Use OSC24M by default. For another requested rate, select the
++	  fastest SPI0 parent/divider combination that does not exceed it.
++	  PLL_PERIPH0 is initialized before the SPI NAND loader runs.
++
++config SPL_SUNXI_SPI_NAND_SAMPLING
++	bool "Configure V851S SPL SPI NAND sampling"
++	depends on MACH_SUN8I_V851S
++	help
++	  Enable both sampling controls below. When disabled, leave the SPI0
++	  sampling registers at their existing settings.
++
++config SPL_SUNXI_SPI_NAND_SAMPLE_MODE
++	int "V851S SPL SPI NAND sample mode"
++	depends on SPL_SUNXI_SPI_NAND_SAMPLING
++	range 0 6
++	default 1
++	help
++	  Use the same 0..6 mode encoding as allwinner,sample-mode in the
++	  U-Boot SPI controller device tree.
++
++config SPL_SUNXI_SPI_NAND_SAMPLE_DELAY
++	int "V851S SPL SPI NAND sample delay"
++	depends on SPL_SUNXI_SPI_NAND_SAMPLING
++	range 0 63
++	default 0
++	help
++	  Use the same 0..63 delay encoding as allwinner,sample-delay in the
++	  U-Boot SPI controller device tree.
++
++config SPL_SUNXI_SPI_NAND_MFR
++	hex "SPI NAND manufacturer ID after 9f 00"
++	default 0x0
++	help
++	  Must be set to the ID returned by the target chip. Zero is rejected.
++
++config SPL_SUNXI_SPI_NAND_DEVID
++	hex "SPI NAND device ID after 9f 00"
++	default 0x0
++	help
++	  Must be set to the ID returned by the target chip. Zero is rejected.
++
++config SPL_SUNXI_SPI_NAND_PAGE_SIZE
++	int "SPI NAND data bytes per page"
++	default 2048
++
++config SPL_SUNXI_SPI_NAND_OOB_SIZE
++	int "SPI NAND OOB bytes per page"
++	default 64
++
++config SPL_SUNXI_SPI_NAND_PAGES_PER_BLOCK
++	int "SPI NAND pages per erase block"
++	default 64
++
++config SPL_SUNXI_SPI_NAND_PAGE_COUNT
++	int "SPI NAND total physical pages"
++	default 65536
++
++config SPL_SUNXI_SPI_NAND_FIRST_BLOCK
++	int "First physical erase block of the logical SPI NAND address space"
++	default 0
++	help
++	  Logical offsets are measured from the first good block at or after
++	  this block. IMAGE_OFFSET selects the payload within this space.
++
++config SPL_SUNXI_SPI_NAND_BLOCK_COUNT
++	int "Number of physical erase blocks in the logical SPI NAND address space"
++	default 0
++	help
++	  Zero is rejected at runtime. Include blocks before IMAGE_OFFSET and
++	  enough bad-block headroom for the payload without crossing its slot.
++
++config SPL_SUNXI_SPI_NAND_IMAGE_OFFSET
++	hex "Logical byte offset of the U-Boot image in the SPI NAND region"
++	default 0x0
++	help
++	  Count only good blocks from FIRST_BLOCK. The image writer must use
++	  the same bad-block mapping when placing the image.
++
++config SPL_SUNXI_SPI_NAND_ECC_MASK
++	hex "SPI NAND ECC status mask"
++	default 0x30
++
++config SPL_SUNXI_SPI_NAND_ECC_UNCORRECTABLE
++	hex "SPI NAND uncorrectable ECC status value"
++	default 0x20
++
++endif # SPL_SUNXI_SPI_NAND
++
+ config PINE64_DT_SELECTION
+ 	bool "Enable Pine64 device tree selection code"
+ 	depends on MACH_SUN50I
+diff --git a/arch/arm/mach-sunxi/Makefile b/arch/arm/mach-sunxi/Makefile
+index 818d51dc..aa5557a1 100644
+--- a/arch/arm/mach-sunxi/Makefile
++++ b/arch/arm/mach-sunxi/Makefile
+@@ -39,6 +39,7 @@ obj-$(CONFIG_DRAM_SUN8I_A33)	+= dram_sun8i_a33.o
+ obj-$(CONFIG_DRAM_SUN8I_A83T)	+= dram_sun8i_a83t.o
+ obj-$(CONFIG_DRAM_SUN9I)	+= dram_sun9i.o
+ obj-$(CONFIG_SPL_SPI_SUNXI)	+= spl_spi_sunxi.o
++obj-$(CONFIG_SPL_SUNXI_SPI_NAND)	+= spl_spi_sunxi.o
+ obj-$(CONFIG_SUNXI_DRAM_DW)	+= dram_sunxi_dw.o
+ obj-$(CONFIG_SUNXI_DRAM_DW)	+= dram_timings/
+ obj-$(CONFIG_DRAM_SUN50I_H6)	+= dram_sun50i_h6.o dram_dw_helpers.o
+diff --git a/arch/arm/mach-sunxi/spl_spi_sunxi.c b/arch/arm/mach-sunxi/spl_spi_sunxi.c
+index 4de81ae5..f2af5533 100644
+--- a/arch/arm/mach-sunxi/spl_spi_sunxi.c
++++ b/arch/arm/mach-sunxi/spl_spi_sunxi.c
+@@ -6,15 +6,20 @@
+ #include <image.h>
+ #include <log.h>
+ #include <spl.h>
++#include <spl_load.h>
++#include <asm/arch/clock.h>
+ #include <asm/arch/spl.h>
+ #include <asm/gpio.h>
+ #include <asm/io.h>
++#include <asm/unaligned.h>
+ #include <linux/bitops.h>
+ #include <linux/delay.h>
+ #include <linux/libfdt.h>
++#include <linux/mtd/spinand_spl.h>
++#include <time.h>
+ #include <sunxi_gpio.h>
+ 
+-#ifdef CONFIG_SPL_OS_BOOT
++#if defined(CONFIG_SPL_OS_BOOT) && !defined(CONFIG_SPL_SUNXI_SPI_NAND)
+ #error CONFIG_SPL_OS_BOOT is not supported yet
+ #endif
+ 
+@@ -62,6 +67,10 @@
+ #define SUN6I_SPI0_CCTL             0x24
+ #define SUN6I_SPI0_GCR              0x04
+ #define SUN6I_SPI0_TCR              0x08
++#define SUN6I_SPI0_FCR              0x18
++#define SUN6I_SPI0_ISR              0x14
++#define SUN6I_SPI0_BCC_QUAD_EN      BIT(29)
++#define SUN6I_SPI0_SAMP_DL          0x28
+ #define SUN6I_SPI0_FIFO_STA         0x1C
+ #define SUN6I_SPI0_MBC              0x30
+ #define SUN6I_SPI0_MTC              0x34
+@@ -72,8 +80,18 @@
+ #define SUN6I_CTL_ENABLE            BIT(0)
+ #define SUN6I_CTL_MASTER            BIT(1)
+ #define SUN6I_CTL_SRST              BIT(31)
++#define SUN6I_CTL_TP                BIT(7)
++#define SUN6I_TCR_SDC               BIT(11)
+ #define SUN6I_TCR_SDM               BIT(13)
++#define SUN6I_TCR_SDC1              BIT(15)
+ #define SUN6I_TCR_XCH               BIT(31)
++#define SUN6I_TCR_CS_ACTIVE_LOW     BIT(2)
++#define SUN6I_TCR_CS_MANUAL         BIT(6)
++#define SUN6I_TCR_CS_LEVEL          BIT(7)
++#define SUN6I_GCR_SAMP_MODE_EN      BIT(2)
++#define SUN6I_FCR_RF_RST            BIT(15)
++#define SUN6I_FCR_TF_RST            BIT(31)
++#define SUN6I_ISR_RF_OVF            BIT(8)
+ 
+ /*****************************************************************************/
+ 
+@@ -97,6 +114,35 @@
+ #define AHB_RESET_SPI0_SHIFT        20
+ #define AHB_GATE_OFFSET_SPI0        20
+ 
++#if defined(CONFIG_MACH_SUN8I_V851S) && defined(CONFIG_SPL_SUNXI_SPI_NAND)
++static u32 v851s_spi0_clock_config(u32 requested_hz)
++{
++	u32 pll_periph = clock_get_pll6();
++	u32 parents[] = { 24000000, pll_periph / 2, pll_periph / 3 };
++	u32 best_hz = 0, config = BIT(31);
++	unsigned int source, p, m;
++
++	for (source = 0; source < ARRAY_SIZE(parents); source++) {
++		for (p = 0; p < 4; p++) {
++			for (m = 1; m <= 16; m++) {
++				u32 divisor = m << p;
++				u32 hz = parents[source] / divisor;
++
++				if (hz > best_hz &&
++				    (parents[source] + divisor - 1) / divisor <=
++				    requested_hz) {
++					best_hz = hz;
++					config = BIT(31) | (source << 24) |
++						 (p << 8) | (m - 1);
++				}
++			}
++		}
++	}
++
++	return config;
++}
++#endif
++
+ #define SPI0_CLK_DIV_BY_2           0x1000
+ #define SPI0_CLK_DIV_BY_4           0x1001
+ #define SPI0_CLK_DIV_BY_32          0x100f
+@@ -196,8 +242,15 @@ static void spi0_enable_clock(void)
+ 			       SUN4I_SPI0_CCTL));
+ 		}
+ 
+-		/* 24MHz from OSC24M */
+-		writel((1 << 31), CCM_SPI0_CLK);
++		/* Keep OSC24M unless V851S SPI NAND requests another rate. */
++#if defined(CONFIG_MACH_SUN8I_V851S) && defined(CONFIG_SPL_SUNXI_SPI_NAND)
++		if (CONFIG_SPL_SUNXI_SPI_NAND_CLOCK_HZ != 24000000)
++			writel(v851s_spi0_clock_config(
++				       CONFIG_SPL_SUNXI_SPI_NAND_CLOCK_HZ),
++			       CCM_SPI0_CLK);
++		else
++#endif
++			writel(BIT(31), CCM_SPI0_CLK);
+ 	}
+ 
+ 	if (is_sun6i_gen_spi()) {
+@@ -257,6 +310,7 @@ static void spi0_disable_clock(void)
+ static void spi0_init(void)
+ {
+ 	unsigned int pin_function = SUNXI_GPC_SPI0;
++	uintptr_t base = spi0_base_address();
+ 
+ 	if (IS_ENABLED(CONFIG_MACH_SUN50I) ||
+ 	    IS_ENABLED(CONFIG_SUN50I_GEN_H6) ||
+@@ -268,6 +322,32 @@ static void spi0_init(void)
+ 
+ 	spi0_pinmux_setup(pin_function);
+ 	spi0_enable_clock();
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_SPI_NAND)) {
++		/* Match the V851 SPI-mem path: one manual CS pulse per command. */
++		setbits_le32(base + SUN6I_SPI0_GCR, SUN6I_CTL_TP);
++		setbits_le32(base + SUN6I_SPI0_TCR,
++			     SUN6I_TCR_CS_MANUAL |
++			     SUN6I_TCR_CS_ACTIVE_LOW |
++			     SUN6I_TCR_CS_LEVEL);
++#ifdef CONFIG_SPL_SUNXI_SPI_NAND_SAMPLING
++		{
++			static const u16 sample_modes[] = {
++				BIT(13), 0, BIT(11), BIT(13) | BIT(11),
++				BIT(13) | BIT(15), BIT(15), BIT(11) | BIT(15),
++			};
++
++			clrsetbits_le32(base + SUN6I_SPI0_TCR,
++					 SUN6I_TCR_SDC | SUN6I_TCR_SDM |
++					 SUN6I_TCR_SDC1,
++					 sample_modes[CONFIG_SPL_SUNXI_SPI_NAND_SAMPLE_MODE]);
++			setbits_le32(base + SUN6I_SPI0_GCR,
++				     SUN6I_GCR_SAMP_MODE_EN);
++			clrsetbits_le32(base + SUN6I_SPI0_SAMP_DL, 0x3f,
++					 BIT(7) |
++					 CONFIG_SPL_SUNXI_SPI_NAND_SAMPLE_DELAY);
++		}
++#endif
++	}
+ }
+ 
+ static void spi0_deinit(void)
+@@ -286,6 +366,7 @@ static void spi0_deinit(void)
+ 
+ #define SPI_READ_MAX_SIZE 60 /* FIFO size, minus 4 bytes of the header */
+ 
++#ifdef CONFIG_SPL_SPI_SUNXI
+ static void sunxi_spi0_read_data(u8 *buf, u32 addr, u32 bufsize,
+ 				 ulong spi_ctl_reg,
+ 				 ulong spi_ctl_xch_bitmask,
+@@ -411,3 +492,267 @@ static int spl_spi_load_image(struct spl_image_info *spl_image,
+ }
+ /* Use priorty 0 to override the default if it happens to be linked in */
+ SPL_LOAD_IMAGE_METHOD("sunxi SPI", 0, BOOT_DEVICE_SPI, spl_spi_load_image);
++#endif /* CONFIG_SPL_SPI_SUNXI */
++
++#ifdef CONFIG_SPL_SUNXI_SPI_NAND
++/* The 64-byte FIFO is drained during a page-sized PIO cache read. */
++#define SUNXI_SPINAND_FIFO_DEPTH	64
++#define SUNXI_SPINAND_TIMEOUT_US	10000
++
++#ifdef CONFIG_SPL_SUNXI_SPI_NAND_BENCH_RTC
++static ulong sunxi_spinand_cache_us;
++static ulong sunxi_spinand_other_us;
++#endif
++
++static int spi0_nand_transfer(void *priv, const u8 *cmd,
++			      unsigned int cmd_len, void *data,
++			      unsigned int data_len)
++{
++	uintptr_t base = spi0_base_address();
++	u8 *buf = data;
++	unsigned int i, timeout, phases, phase, tx_len, data_bytes, rx_len;
++	unsigned int received, available;
++	ulong started;
++	bool quad;
++	int ret = 0;
++#ifdef CONFIG_SPL_SUNXI_SPI_NAND_BENCH_RTC
++	ulong transfer_start_us;
++#endif
++
++	if (!cmd || !cmd_len || cmd_len > SUNXI_SPINAND_FIFO_DEPTH ||
++	    data_len > 2048 || (data_len && !buf) ||
++	    (data_len && cmd[0] != 0x03 && cmd[0] != 0x6b &&
++	     cmd_len + data_len > SUNXI_SPINAND_FIFO_DEPTH))
++		return -EINVAL;
++	quad = cmd[0] == 0x6b && data_len;
++	phases = quad ? 2 : 1;
++#ifdef CONFIG_SPL_SUNXI_SPI_NAND_BENCH_RTC
++	transfer_start_us = timer_get_us();
++#endif
++
++	/* Keep CS asserted across the single-lane header and quad data phases. */
++	clrbits_le32(base + SUN6I_SPI0_TCR, SUN6I_TCR_CS_LEVEL);
++	for (phase = 0; phase < phases; phase++) {
++		tx_len = phase ? 0 : cmd_len;
++		data_bytes = quad && !phase ? 0 : data_len;
++		rx_len = tx_len + data_bytes;
++
++		setbits_le32(base + SUN6I_SPI0_FCR,
++			     SUN6I_FCR_RF_RST | SUN6I_FCR_TF_RST);
++		for (timeout = 0; timeout < SUNXI_SPINAND_TIMEOUT_US; timeout++) {
++			if (!(readl(base + SUN6I_SPI0_FCR) &
++			      (SUN6I_FCR_RF_RST | SUN6I_FCR_TF_RST)))
++				break;
++			udelay(1);
++		}
++		if (timeout == SUNXI_SPINAND_TIMEOUT_US) {
++			ret = -ETIMEDOUT;
++			goto release_cs;
++		}
++
++		writel(rx_len, base + SUN6I_SPI0_MBC);
++		writel(tx_len, base + SUN6I_SPI0_MTC);
++		writel(tx_len | (phase ? SUN6I_SPI0_BCC_QUAD_EN : 0),
++		       base + SUN6I_SPI0_BCC);
++		for (i = 0; i < tx_len; i++)
++			writeb(cmd[i], base + SUN6I_SPI0_TXD);
++		writel(SUN6I_ISR_RF_OVF, base + SUN6I_SPI0_ISR);
++		setbits_le32(base + SUN6I_SPI0_TCR, SUN6I_TCR_XCH);
++
++		received = 0;
++		started = get_timer(0);
++		while (received < rx_len) {
++			available = readl(base + SUN6I_SPI0_FIFO_STA) & 0xff;
++			if (readl(base + SUN6I_SPI0_ISR) & SUN6I_ISR_RF_OVF) {
++				ret = -EOVERFLOW;
++				goto release_cs;
++			}
++			if (available > rx_len - received) {
++				ret = -EOVERFLOW;
++				goto release_cs;
++			}
++			if (!available) {
++				if (get_timer(started) > 10) {
++					ret = -ETIMEDOUT;
++					goto release_cs;
++				}
++				continue;
++			}
++			for (i = 0; i + 4 <= available; i += 4) {
++				u32 word = readl(base + SUN6I_SPI0_RXD);
++				unsigned int j;
++
++				if (received >= tx_len) {
++					put_unaligned_le32(word, buf + received - tx_len);
++					received += 4;
++					continue;
++				}
++				for (j = 0; j < 4; j++, received++, word >>= 8) {
++					if (received >= tx_len)
++						buf[received - tx_len] = word;
++				}
++			}
++			for (; i < available; i++) {
++				u8 byte = readb(base + SUN6I_SPI0_RXD);
++
++				if (received >= tx_len)
++					buf[received - tx_len] = byte;
++				received++;
++			}
++		}
++		for (timeout = 0; timeout < SUNXI_SPINAND_TIMEOUT_US; timeout++) {
++			if (!(readl(base + SUN6I_SPI0_TCR) & SUN6I_TCR_XCH))
++				break;
++			udelay(1);
++		}
++		if (timeout == SUNXI_SPINAND_TIMEOUT_US) {
++			ret = -ETIMEDOUT;
++			goto release_cs;
++		}
++		if (readl(base + SUN6I_SPI0_ISR) & SUN6I_ISR_RF_OVF) {
++			ret = -EOVERFLOW;
++			goto release_cs;
++		}
++	}
++
++release_cs:
++	setbits_le32(base + SUN6I_SPI0_TCR, SUN6I_TCR_CS_LEVEL);
++	/* SPI-NAND tSHSL requires CS to stay high between commands. */
++	udelay(1);
++#ifdef CONFIG_SPL_SUNXI_SPI_NAND_BENCH_RTC
++	if (cmd[0] == 0x03 || cmd[0] == 0x6b)
++		sunxi_spinand_cache_us += timer_get_us() - transfer_start_us;
++	else
++		sunxi_spinand_other_us += timer_get_us() - transfer_start_us;
++#endif
++	return ret;
++}
++
++static ulong sunxi_spinand_load_read(struct spl_load_info *load, ulong offset,
++				     ulong size, void *buf)
++{
++	struct spinand_spl *nand = load->priv;
++
++	return spinand_spl_read(nand, offset, size, buf) ? 0 : size;
++}
++
++static int sunxi_spinand_feature(u8 opcode, u8 *cfg)
++{
++	u8 cmd[] = { opcode, 0xb0, opcode == 0x1f ? *cfg : 0 };
++
++	return spi0_nand_transfer(NULL, cmd, opcode == 0x1f ? 3 : 2,
++				  opcode == 0x0f ? cfg : NULL,
++				  opcode == 0x0f ? 1 : 0);
++}
++
++static int spl_sunxi_spinand_load_image(struct spl_image_info *spl_image,
++				       struct spl_boot_device *bootdev)
++{
++	const u8 read_id[] = { 0x9f, 0x00 };
++	struct legacy_img_hdr *header =
++		spl_get_load_buffer(-sizeof(*header), sizeof(*header));
++#ifdef CONFIG_SPL_SUNXI_SPI_NAND_BENCH_RTC
++	struct spinand_spl_bench bench = {};
++#endif
++	u8 id[2], cfg = 0;
++	bool restore_quad = false;
++	struct spinand_spl nand = {
++		.transfer = spi0_nand_transfer,
++		.page_size = CONFIG_SPL_SUNXI_SPI_NAND_PAGE_SIZE,
++		.page_count = CONFIG_SPL_SUNXI_SPI_NAND_PAGE_COUNT,
++		.pages_per_block = CONFIG_SPL_SUNXI_SPI_NAND_PAGES_PER_BLOCK,
++		.first_block = CONFIG_SPL_SUNXI_SPI_NAND_FIRST_BLOCK,
++		.block_count = CONFIG_SPL_SUNXI_SPI_NAND_BLOCK_COUNT,
++		.oob_size = CONFIG_SPL_SUNXI_SPI_NAND_OOB_SIZE,
++		.io_chunk = CONFIG_SPL_SUNXI_SPI_NAND_IO_CHUNK,
++		.cache_read_opcode = IS_ENABLED(CONFIG_SPL_SUNXI_SPI_NAND_QUAD) ?
++				     0x6b : 0x03,
++		.column_addr_bytes = 2,
++		.dummy_bytes = 1,
++		.ecc_mask = CONFIG_SPL_SUNXI_SPI_NAND_ECC_MASK,
++		.ecc_uncorrectable =
++			CONFIG_SPL_SUNXI_SPI_NAND_ECC_UNCORRECTABLE,
++#ifdef CONFIG_SPL_SUNXI_SPI_NAND_BENCH_RTC
++		.bench = &bench,
++#endif
++	};
++	struct spl_load_info load;
++	ulong start_ms = get_timer(0);
++	int ret;
++
++	if (!CONFIG_SPL_SUNXI_SPI_NAND_MFR ||
++	    !CONFIG_SPL_SUNXI_SPI_NAND_DEVID || !nand.block_count)
++		return -EINVAL;
++
++	spi0_init();
++	ret = spi0_nand_transfer(NULL, read_id, sizeof(read_id), id, sizeof(id));
++	if (ret)
++		goto out;
++	if (id[0] != CONFIG_SPL_SUNXI_SPI_NAND_MFR ||
++	    id[1] != CONFIG_SPL_SUNXI_SPI_NAND_DEVID) {
++		ret = -ENODEV;
++		goto out;
++	}
++
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_SPI_NAND_QUAD)) {
++		ret = sunxi_spinand_feature(0x0f, &cfg);
++		if (ret)
++			goto out;
++		if (!(cfg & BIT(0))) {
++			cfg |= BIT(0);
++			ret = sunxi_spinand_feature(0x1f, &cfg);
++			if (ret)
++				goto out;
++			restore_quad = true;
++		}
++	}
++
++	spl_load_init(&load, sunxi_spinand_load_read, &nand, 1);
++	ret = spinand_spl_read(&nand, CONFIG_SPL_SUNXI_SPI_NAND_IMAGE_OFFSET,
++			       sizeof(*header), header);
++	if (ret)
++		goto out;
++
++	if (IS_ENABLED(CONFIG_SPL_LOAD_FIT) &&
++	    image_get_magic(header) == FDT_MAGIC) {
++		ret = spl_load_simple_fit(spl_image, &load,
++				  CONFIG_SPL_SUNXI_SPI_NAND_IMAGE_OFFSET,
++				  header);
++	} else {
++		if (image_get_magic(header) == IH_MAGIC &&
++		    image_get_comp(header) != IH_COMP_NONE) {
++			ret = -EOPNOTSUPP;
++			goto out;
++		}
++		ret = spl_parse_image_header(spl_image, bootdev, header);
++		if (!ret)
++			ret = spinand_spl_read(&nand,
++					       CONFIG_SPL_SUNXI_SPI_NAND_IMAGE_OFFSET,
++					       spl_image->size,
++					       (void *)spl_image->load_addr);
++	}
++out:
++#ifdef CONFIG_SPL_SUNXI_SPI_NAND_BENCH_RTC
++	writel(bench.read_us, (void *)0x0709010c);
++	writel(bench.page_us, (void *)0x07090110);
++	writel(sunxi_spinand_cache_us, (void *)0x07090114);
++	writel(sunxi_spinand_other_us, (void *)0x07090118);
++	writel(BIT(31) | ((ret & 0x7f) << 24) |
++	       (get_timer(start_ms) & 0xffffff),
++	       (void *)0x0709011c);
++#endif
++	if (restore_quad) {
++		int restore;
++
++		cfg &= ~BIT(0);
++		restore = sunxi_spinand_feature(0x1f, &cfg);
++		if (!ret)
++			ret = restore;
++	}
++	spi0_deinit();
++	return ret;
++}
++
++SPL_LOAD_IMAGE_METHOD("sunxi SPI NAND", 0, BOOT_DEVICE_SPI_NAND,
++		      spl_sunxi_spinand_load_image);
++#endif /* CONFIG_SPL_SUNXI_SPI_NAND */

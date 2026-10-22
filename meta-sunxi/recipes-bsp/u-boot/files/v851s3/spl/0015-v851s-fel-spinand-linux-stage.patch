@@ -1,0 +1,29 @@
+Subject: [PATCH] ARM: skip PSCI DT fixup in V851S SPL OS boot
+
+Upstream-Status: Inappropriate [proof of concept]
+
+The ARMv7 SPL FIT path does not link armv7_boot_nonsec() from bootm.c.
+V851S SPL also enters Linux directly without installing a PSCI monitor.
+Skip the PSCI DT fixup in V851S SPL; U-Boot proper retains its boot-mode
+check and PSCI fixup. FEL-loaded SPI-NAND staging selects NAND through the
+sunxi SPL boot-device choice introduced earlier in this series.
+
+---
+diff --git a/arch/arm/cpu/armv7/virt-dt.c b/arch/arm/cpu/armv7/virt-dt.c
+index 5dc7ed5e27..1f3c6d61c8 100644
+--- a/arch/arm/cpu/armv7/virt-dt.c
++++ b/arch/arm/cpu/armv7/virt-dt.c
+@@ -55,7 +55,12 @@ int armv7_apply_memory_carveout(u64 *start, u64 *size)
+ 
+ int psci_update_dt(void *fdt)
+ {
++	/* V851S SPL jumps directly to Linux without a resident monitor. */
++#if defined(CONFIG_MACH_SUN8I_V851S) && defined(CONFIG_XPL_BUILD)
++	return 0;
++#endif
++
+-#ifdef CONFIG_ARMV7_NONSEC
++#if defined(CONFIG_ARMV7_NONSEC) && !defined(CONFIG_XPL_BUILD)
+ 	if (!armv7_boot_nonsec())
+ 		return 0;
+ #endif

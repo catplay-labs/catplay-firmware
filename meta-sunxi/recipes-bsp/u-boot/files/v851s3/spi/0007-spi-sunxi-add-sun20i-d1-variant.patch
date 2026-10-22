@@ -1,0 +1,35 @@
+Subject: [PATCH] spi: sunxi: Add sun20i-d1 compatible with sample delay
+
+Upstream-Status: Pending
+
+---
+diff --git a/drivers/spi/spi-sunxi.c b/drivers/spi/spi-sunxi.c
+--- a/drivers/spi/spi-sunxi.c
++++ b/drivers/spi/spi-sunxi.c
+@@ -695,6 +695,15 @@
+ 	.has_burst_ctl		= true,
+ };
+ 
++static const struct sun4i_spi_variant sun20i_d1_spi_variant = {
++	.regs			= sun6i_spi_regs,
++	.bits			= sun6i_spi_bits,
++	.fifo_depth		= 64,
++	.has_soft_reset		= true,
++	.has_burst_ctl		= true,
++	.has_sample_delay	= true,
++};
++
+ static const struct udevice_id sun4i_spi_ids[] = {
+ 	{
+ 	  .compatible = "allwinner,sun4i-a10-spi",
+@@ -709,6 +718,10 @@
+ 	  .data = (ulong)&sun8i_h3_spi_variant,
+ 	},
+ 	{
++	  .compatible = "allwinner,sun20i-d1-spi",
++	  .data = (ulong)&sun20i_d1_spi_variant,
++	},
++	{
+ 	  .compatible = "allwinner,sun50i-r329-spi",
+ 	  .data = (ulong)&sun50i_r329_spi_variant,
+ 	},

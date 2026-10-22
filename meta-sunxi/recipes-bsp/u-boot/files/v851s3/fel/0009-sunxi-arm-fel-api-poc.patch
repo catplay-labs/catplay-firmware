@@ -1,0 +1,193 @@
+Date: Sun, 18 Oct 2026 15:04:13 +0200
+Subject: [PATCH 09/15] sunxi: add ARM FEL request and ROM entry API PoC
+
+Expose RTC FEL request, direct ROM entry, early request handling and
+emergency reset APIs in mach-sunxi for ARM. V851S constants are taken
+from brandy-2.0 sun8iw21p1. Other SoCs return -EOPNOTSUPP where
+parameters are unknown. Restore ROM VBAR before the direct jump.
+
+Upstream-Status: Pending
+---
+ arch/arm/include/asm/arch-sunxi/fel.h |  30 +++++++
+ arch/arm/mach-sunxi/Makefile          |   2 +-
+ arch/arm/mach-sunxi/fel.c             | 121 ++++++++++++++++++++++++++
+ 3 files changed, 152 insertions(+), 1 deletion(-)
+ create mode 100644 arch/arm/include/asm/arch-sunxi/fel.h
+ create mode 100644 arch/arm/mach-sunxi/fel.c
+
+diff --git a/arch/arm/include/asm/arch-sunxi/fel.h b/arch/arm/include/asm/arch-sunxi/fel.h
+new file mode 100644
+index 0000000000..56da0b2da2
+--- /dev/null
++++ b/arch/arm/include/asm/arch-sunxi/fel.h
+@@ -0,0 +1,30 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef _SUNXI_FEL_H
++#define _SUNXI_FEL_H
++
++/*
++ * FEL request is a bootloader-to-bootloader contract: BootROM is not known
++ * to inspect this RTC word. Keep SoC constants here, not in the generic API.
++ */
++#if defined(CONFIG_MACH_SUN8I_V851S)
++#define SUNXI_FEL_RTC_REG		0x07090108
++#define SUNXI_FEL_RTC_MAGIC		0x5aa5a55a
++/* Only the non-secure eGON/boot0 path has this verified entry. */
++#if defined(CONFIG_SPL_IMAGE_TYPE_SUNXI_EGON)
++#define SUNXI_FEL_ENTRY_ADDR		0x20
++#endif
++#endif
++
++/* Return 1 if requested, 0 if clear, or -EOPNOTSUPP on unknown SoCs. */
++int sunxi_fel_probe(void);
++/* Return 0 when readback confirms the write, otherwise an error. */
++int sunxi_fel_set(void);
++int sunxi_fel_clear(void);
++/* Direct ROM entry is for the early boot stage after platform quiesce. */
++int sunxi_fel_jump(void);
++/* Request FEL and reset on V851S; return -EOPNOTSUPP on other SoCs. */
++int sunxi_fel_recover(void);
++/* Consume a pending request, then arm recovery for the next reset. */
++void sunxi_fel_jump_if_requested(void);
++
++#endif /* _SUNXI_FEL_H */
+diff --git a/arch/arm/mach-sunxi/Makefile b/arch/arm/mach-sunxi/Makefile
+index 9c79b55abf..818d51dc10 100644
+--- a/arch/arm/mach-sunxi/Makefile
++++ b/arch/arm/mach-sunxi/Makefile
+@@ -26,7 +26,7 @@ obj-$(CONFIG_MACH_SUN9I)	+= clock_sun9i.o gtbus_sun9i.o
+ obj-$(CONFIG_SUN50I_GEN_H6)	+= clock_sun50i_h6.o
+ obj-$(CONFIG_SUNXI_GEN_NCAT2)	+= clock_sun50i_h6.o
+ ifndef CONFIG_ARM64
+-obj-y	+= timer.o
++obj-y	+= timer.o fel.o
+ endif
+ 
+ ifdef CONFIG_XPL_BUILD
+diff --git a/arch/arm/mach-sunxi/fel.c b/arch/arm/mach-sunxi/fel.c
+new file mode 100644
+index 0000000000..066b3a4e09
+--- /dev/null
++++ b/arch/arm/mach-sunxi/fel.c
+@@ -0,0 +1,121 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* PoC of the sunxi ARM FEL request and early ROM entry API. */
++#include <cpu_func.h>
++#include <linux/errno.h>
++#include <stdio.h>
++#include <asm/barriers.h>
++#include <asm/io.h>
++#include <asm/u-boot-arm.h>
++#include <asm/arch/fel.h>
++
++#ifdef SUNXI_FEL_RTC_REG
++#define FEL_WRITE_RETRIES	1000
++
++static int sunxi_fel_write(unsigned int value)
++{
++	unsigned int i;
++
++	for (i = 0; i < FEL_WRITE_RETRIES; i++) {
++		writel(value, (void *)SUNXI_FEL_RTC_REG);
++		dsb();
++		isb();
++		if (readl((void *)SUNXI_FEL_RTC_REG) == value)
++			return 0;
++	}
++
++	return -EIO;
++}
++#endif
++
++int sunxi_fel_probe(void)
++{
++#ifdef SUNXI_FEL_RTC_REG
++	return readl((void *)SUNXI_FEL_RTC_REG) == SUNXI_FEL_RTC_MAGIC;
++#else
++	return -EOPNOTSUPP;
++#endif
++}
++
++int sunxi_fel_set(void)
++{
++#ifdef SUNXI_FEL_RTC_REG
++	return sunxi_fel_write(SUNXI_FEL_RTC_MAGIC);
++#else
++	return -EOPNOTSUPP;
++#endif
++}
++
++int sunxi_fel_clear(void)
++{
++#ifdef SUNXI_FEL_RTC_REG
++	return sunxi_fel_write(0);
++#else
++	return -EOPNOTSUPP;
++#endif
++}
++
++int sunxi_fel_jump(void)
++{
++#ifdef SUNXI_FEL_ENTRY_ADDR
++	int ret;
++
++	/*
++	 * Vendor boot0_clear_env() calls sunxi_board_exit(),
++	 * sunxi_board_clock_reset(), mmu_disable() and mdelay(10) before
++	 * boot0_jmp(). This only cleans CPU state; caller must also quiesce
++	 * clocks, devices and watchdog. Use first from SRAM SPL; proper
++	 * should request FEL through the RTC flag and reset.
++	 */
++	ret = cleanup_before_linux();
++	if (ret)
++		return ret;
++
++	/* Restore ROM exception vectors before re-entering FEL. */
++	asm volatile("mcr p15, 0, %0, c12, c0, 0" : : "r" (0) : "memory");
++	isb();
++
++	((void (*)(void))SUNXI_FEL_ENTRY_ADDR)();
++	return -EIO; /* A ROM FEL entry must not return. */
++#else
++	return -EOPNOTSUPP;
++#endif
++}
++
++int sunxi_fel_recover(void)
++{
++#if defined(CONFIG_MACH_SUN8I_V851S)
++	u8 *const wdt = (u8 *)0x020500a0;
++	u32 val;
++
++	/* The RTC write is idempotent when SPL has already armed recovery. */
++	sunxi_fel_set();
++
++	/* V851S sun20i WDT: request its shortest reset, independent of DM. */
++	val = readl(wdt + 0x14);
++	val = (val & ~0x3) | 0x16aa0001;
++	writel(val, wdt + 0x14);
++	val = readl(wdt + 0x18);
++	val = (val & ~(0xf << 4)) | 0x16aa0001;
++	writel(val, wdt + 0x18);
++	writel((0x0a57 << 1) | 1, wdt + 0x10);
++	dsb();
++	for (;;)
++		asm volatile("wfi");
++#else
++	return -EOPNOTSUPP;
++#endif
++}
++
++void sunxi_fel_jump_if_requested(void)
++{
++	int fel_requested = sunxi_fel_probe();
++
++	if (fel_requested == 1) {
++		if (sunxi_fel_clear())
++			puts("FEL: RTC clear failed; entering ROM anyway\n");
++		if (sunxi_fel_jump())
++			sunxi_fel_recover();
++	}
++	if (fel_requested < 0 || sunxi_fel_set())
++		sunxi_fel_recover();
++}

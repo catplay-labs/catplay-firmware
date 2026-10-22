@@ -1,0 +1,65 @@
+Date: Sun, 18 Oct 2026 15:04:14 +0200
+Subject: [PATCH 12/15] sunxi: enforce optional eGON image length
+
+Add CONFIG_EGON_MAX_SIZE to check the complete sunxi eGON image after
+binman combines SPL and its payload. Round up to the 512-byte length
+used in the eGON header and read by the BootROM.
+
+Upstream-Status: Pending
+---
+ Makefile                    | 14 ++++++++++++++
+ arch/arm/mach-sunxi/Kconfig |  9 +++++++++
+ 2 files changed, 23 insertions(+)
+
+diff --git a/Makefile b/Makefile
+index 7f5d83658d..6b2620842e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1164,6 +1164,19 @@ else
+ BOARD_SIZE_CHECK =
+ endif
+ 
++ifneq ($(filter-out 0x0,$(CONFIG_EGON_MAX_SIZE)),)
++# The BootROM reads the eGON length field, which must be 512-byte aligned.
++EGON_SIZE_CHECK = @actual=$$(wc -c < u-boot-sunxi-with-spl.bin); \
++	actual=$$(( (actual + 511) / 512 * 512 )); \
++	limit=$$(printf "%d" $(CONFIG_EGON_MAX_SIZE)); \
++	if test $$actual -gt $$limit; then \
++		echo "eGON length exceeds CONFIG_EGON_MAX_SIZE:" >&2; \
++		echo "  limit:  $$(printf 0x%x $$limit) bytes" >&2; \
++		echo "  length: $$(printf 0x%x $$actual) bytes" >&2; \
++		exit 1; \
++	fi
++endif
++
+ ifneq ($(CONFIG_SPL_SIZE_LIMIT),0x0)
+ SPL_SIZE_CHECK = @$(call size_check,$@,$$(tools/spl_size_limit))
+ else
+@@ -1393,6 +1406,7 @@ endef
+ .binman_stamp: $(INPUTS-y) FORCE
+ ifeq ($(CONFIG_BINMAN),y)
+ 	$(call if_changed,binman)
++	$(EGON_SIZE_CHECK)
+ endif
+ 	@touch $@
+ 
+diff --git a/arch/arm/mach-sunxi/Kconfig b/arch/arm/mach-sunxi/Kconfig
+index 370277f0ff..55873abc29 100644
+--- a/arch/arm/mach-sunxi/Kconfig
++++ b/arch/arm/mach-sunxi/Kconfig
+@@ -229,6 +229,15 @@ config SUNXI_SRAM_ADDRESS
+ 	Some newer SoCs map the boot ROM at address 0 instead and move the
+ 	SRAM to a different address.
+ 
++config EGON_MAX_SIZE
++	hex "Maximum size of the complete eGON image"
++	depends on BINMAN && SPL_IMAGE_TYPE_SUNXI_EGON
++	default 0x0
++	help
++	  Maximum eGON length, including SPL and its appended payload.
++	  The build rounds the binman output up to 512 bytes, matching the
++	  length later stored in the eGON header. Set to zero to disable.
++
+ config SUNXI_RVBAR_ADDRESS
+ 	hex
+ 	depends on ARM64

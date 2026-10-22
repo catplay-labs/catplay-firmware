@@ -1,0 +1,58 @@
+Subject: [PATCH] spi: sunxi: Configure CPOL/CPHA independently of clock divider
+
+Upstream-Status: Pending
+
+---
+diff --git a/drivers/spi/spi-sunxi.c b/drivers/spi/spi-sunxi.c
+--- a/drivers/spi/spi-sunxi.c
++++ b/drivers/spi/spi-sunxi.c
+@@ -227,7 +227,7 @@
+ 	return ret;
+ }
+ 
+-static void sun4i_spi_set_speed_mode(struct udevice *dev)
++static void sun4i_spi_set_clock_divider(struct udevice *dev)
+ {
+ 	struct sun4i_spi_priv *priv = dev_get_priv(dev);
+ 	unsigned int div, div_cdr2;
+@@ -277,17 +277,20 @@
+ 	}
+ 
+ 	writel(reg, SPI_REG(priv, SPI_CCR));
+-
+-	reg = readl(SPI_REG(priv, SPI_TCR));
+-	reg &= ~(SPI_BIT(priv, SPI_TCR_CPOL) | SPI_BIT(priv, SPI_TCR_CPHA));
++}
++
++static void sun4i_spi_set_mode_bits(struct sun4i_spi_priv *priv)
++{
++	u32 mask = SPI_BIT(priv, SPI_TCR_CPOL) |
++		   SPI_BIT(priv, SPI_TCR_CPHA);
++	u32 value = 0;
+ 
+ 	if (priv->mode & SPI_CPOL)
+-		reg |= SPI_BIT(priv, SPI_TCR_CPOL);
+-
++		value |= SPI_BIT(priv, SPI_TCR_CPOL);
+ 	if (priv->mode & SPI_CPHA)
+-		reg |= SPI_BIT(priv, SPI_TCR_CPHA);
+-
+-	writel(reg, SPI_REG(priv, SPI_TCR));
++		value |= SPI_BIT(priv, SPI_TCR_CPHA);
++
++	clrsetbits_le32(SPI_REG(priv, SPI_TCR), mask, value);
+ }
+ 
+ static int sun4i_spi_claim_bus(struct udevice *dev)
+@@ -309,8 +312,10 @@
+ 	setbits_le32(SPI_REG(priv, SPI_TCR), SPI_BIT(priv, SPI_TCR_CS_MANUAL) |
+ 		     SPI_BIT(priv, SPI_TCR_CS_ACTIVE_LOW));
+ 
++	sun4i_spi_set_mode_bits(priv);
++
+ 	if (priv->variant->has_clk_ctl) {
+-		sun4i_spi_set_speed_mode(dev->parent);
++		sun4i_spi_set_clock_divider(dev->parent);
+ 	} else {
+ 		/*
+ 		 * At this moment there is no ability to change input clock.

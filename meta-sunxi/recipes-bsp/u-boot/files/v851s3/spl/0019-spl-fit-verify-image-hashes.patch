@@ -1,0 +1,42 @@
+Subject: [PATCH] spl: fit: verify image hashes without enabling signatures
+Upstream-Status: Pending
+
+Allow the simple FIT loader to check the hash nodes of images it loads
+without pulling signature verification and its SPL DM dependencies into
+the build. fit_image_verify_with_data() already checks image hashes when
+FIT_IMAGE_ENABLE_VERIFY is false; that macro gates only the signature
+paths in image-fit.c.
+
+FIT images without hash nodes retain their existing behavior.
+
+---
+diff --git a/boot/Kconfig b/boot/Kconfig
+--- a/boot/Kconfig
++++ b/boot/Kconfig
+@@ -204,3 +204,13 @@
++config SPL_FIT_HASH_VERIFY
++	bool "Verify FIT image hashes in SPL without signature support"
++	depends on SPL_LOAD_FIT
++	help
++	  Verify any hash nodes of each image loaded by the simple FIT loader.
++	  A mismatch or unsupported hash algorithm stops loading the image.
++	  This option does not require FIT signature verification or change
++	  the behavior of images without hash nodes. Enable the hash algorithm
++	  used by the FIT, for example SPL_CRC32 for crc32.
++
+ config SPL_FIT_SIGNATURE
+ 	bool "Enable signature verification of FIT firmware within SPL"
+ 	depends on SPL_DM
+diff --git a/common/spl/spl_fit.c b/common/spl/spl_fit.c
+--- a/common/spl/spl_fit.c
++++ b/common/spl/spl_fit.c
+@@ -322,7 +322,8 @@ static int load_simple_fit(struct spl_load_info *info, ulong sector,
+ 		src = (void *)data;	/* cast away const */
+ 	}
+ 
+-	if (CONFIG_IS_ENABLED(FIT_SIGNATURE)) {
++	if (CONFIG_IS_ENABLED(FIT_SIGNATURE) ||
++	    IS_ENABLED(CONFIG_SPL_FIT_HASH_VERIFY)) {
+ 		printf("## Checking hash(es) for Image %s ... ",
+ 		       fit_get_name(fit, node, NULL));
+ 		if (!fit_image_verify_with_data(fit, node, gd_fdt_blob(), src,

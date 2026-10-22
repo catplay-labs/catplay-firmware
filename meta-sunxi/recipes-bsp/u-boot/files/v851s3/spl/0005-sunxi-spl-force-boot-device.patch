@@ -1,0 +1,182 @@
+Subject: [PATCH 05/16] sunxi: allow an explicit SPL boot-device override
+
+Upstream-Status: Pending
+
+Let SPL choose any ARM BOOT_DEVICE_* loader independently of the device
+reported by BootROM. This permits a FEL-loaded SPL to test an image already
+written to flash without flashing U-Boot. BOARD returns to FEL only when
+BootROM actually entered FEL and supplied a valid return stash. With the
+selector disabled, SPL retains BootROM media detection.
+
+---
+diff --git a/arch/arm/mach-sunxi/Kconfig b/arch/arm/mach-sunxi/Kconfig
+index 13598b5dc7..875410f9fd 100644
+--- a/arch/arm/mach-sunxi/Kconfig
++++ b/arch/arm/mach-sunxi/Kconfig
+@@ -575,6 +575,85 @@ config MACH_SUN55I_A523
+ 
+ endchoice
+ 
++config SPL_SUNXI_FORCE_BOOT_DEVICE
++	bool "Override the detected sunxi SPL boot device"
++	depends on SPL
++	help
++	  Select an SPL loader without using the original boot device reported
++	  by the BootROM. This is useful when SPL is loaded through FEL to test
++	  whether it can load and boot an image already written to flash,
++	  without first writing U-Boot itself to flash. The selected loader
++	  must be enabled in the SPL build. Leave this disabled for normal
++	  BootROM-directed boot.
++
++choice
++	prompt "Forced sunxi SPL boot device"
++	depends on SPL_SUNXI_FORCE_BOOT_DEVICE
++	default SPL_SUNXI_FORCE_BOOT_DEVICE_BOARD
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_BOARD
++	bool "BOARD (return to FEL)"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_RAM
++	bool "RAM"
++	depends on SPL_RAM_DEVICE
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_NAND
++	bool "NAND"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_SPI_NAND
++	bool "SPI NAND"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_MMC1
++	bool "MMC1"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_MMC2
++	bool "MMC2"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_MMC2_2
++	bool "MMC2_2"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_SPI
++	bool "SPI"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_UART
++	bool "UART"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_USB
++	bool "USB"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_NOR
++	bool "NOR"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_ONENAND
++	bool "OneNAND"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_SATA
++	bool "SATA"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_I2C
++	bool "I2C"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_DFU
++	bool "DFU"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_XIP
++	bool "XIP"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_BOOTROM
++	bool "BOOTROM"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_SMH
++	bool "SMH"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_UFS
++	bool "UFS"
++
++config SPL_SUNXI_FORCE_BOOT_DEVICE_NONE
++	bool "NONE"
++
++endchoice
++
+ # The sun8i SoCs share a lot, this helps to avoid a lot of "if A23 || A33"
+ config MACH_SUN8I
+ 	bool
+diff --git a/arch/arm/mach-sunxi/board.c b/arch/arm/mach-sunxi/board.c
+index 0c571fde0b..6b87368c40 100644
+--- a/arch/arm/mach-sunxi/board.c
++++ b/arch/arm/mach-sunxi/board.c
+@@ -28,6 +28,9 @@
+ #include <asm/arch/mmc.h>
+ 
+ #include <linux/compiler.h>
++#include <asm/global_data.h>
++
++DECLARE_GLOBAL_DATA_PTR;
+ 
+ struct fel_stash {
+ 	uint32_t sp;
+@@ -220,10 +223,16 @@ static int gpio_init(void)
+ static int spl_board_load_image(struct spl_image_info *spl_image,
+ 				struct spl_boot_device *bootdev)
+ {
++	/* The 0x28060 FEL image has a valid FEL return stash even if SRAM A1
++	 * still contains a NAND eGON header from the previous boot. */
++	if (sunxi_get_boot_device() != BOOT_DEVICE_BOARD &&
++	    !(IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_BOARD) &&
++	      CONFIG_SPL_TEXT_BASE == 0x28060))
++		return -ENODEV;
++
+ 	debug("Returning to FEL sp=%x, lr=%x\n", fel_stash.sp, fel_stash.lr);
+ 	return_to_fel(fel_stash.sp, fel_stash.lr);
+-
+-	return 0;
++	return -EIO;
+ }
+ SPL_LOAD_IMAGE_METHOD("FEL", 0, BOOT_DEVICE_BOARD, spl_board_load_image);
+ #endif /* CONFIG_XPL_BUILD */
+@@ -379,6 +388,47 @@ unsigned long board_spl_mmc_get_uboot_raw_sector(struct mmc *mmc,
+ 
+ u32 spl_boot_device(void)
+ {
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_BOARD))
++		return BOOT_DEVICE_BOARD;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_RAM))
++		return BOOT_DEVICE_RAM;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_NAND))
++		return BOOT_DEVICE_NAND;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_SPI_NAND))
++		return BOOT_DEVICE_SPI_NAND;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_MMC1))
++		return BOOT_DEVICE_MMC1;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_MMC2))
++		return BOOT_DEVICE_MMC2;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_MMC2_2))
++		return BOOT_DEVICE_MMC2_2;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_SPI))
++		return BOOT_DEVICE_SPI;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_UART))
++		return BOOT_DEVICE_UART;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_USB))
++		return BOOT_DEVICE_USB;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_NOR))
++		return BOOT_DEVICE_NOR;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_ONENAND))
++		return BOOT_DEVICE_ONENAND;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_SATA))
++		return BOOT_DEVICE_SATA;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_I2C))
++		return BOOT_DEVICE_I2C;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_DFU))
++		return BOOT_DEVICE_DFU;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_XIP))
++		return BOOT_DEVICE_XIP;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_BOOTROM))
++		return BOOT_DEVICE_BOOTROM;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_SMH))
++		return BOOT_DEVICE_SMH;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_UFS))
++		return BOOT_DEVICE_UFS;
++	if (IS_ENABLED(CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_NONE))
++		return BOOT_DEVICE_NONE;
++
+ 	return sunxi_get_boot_device();
+ }
+ 

@@ -1,0 +1,62 @@
+Subject: [PATCH 11/16] sunxi: start SPL watchdog and stop it before FEL
+
+Upstream-Status: Pending
+
+The SPL driver-model watchdog needs the same enabled hardware node as
+U-Boot proper. Keep it in the SPL device tree when bootph filtering runs.
+Stop it when SPL intentionally returns to BootROM FEL, which cannot service
+the timer during a large USB transfer.
+Use a phase-aware check for watchdog sysreset registration: the proper
+configuration enables it, but SPL does not link the sysreset provider.
+Only format the servicing string when sprintf is linked in this phase.
+
+---
+diff --git a/arch/arm/mach-sunxi/board.c b/arch/arm/mach-sunxi/board.c
+--- a/arch/arm/mach-sunxi/board.c
++++ b/arch/arm/mach-sunxi/board.c
+@@ -17,6 +17,7 @@
+ #include <serial.h>
+ #include <spl.h>
+ #include <sunxi_gpio.h>
++#include <wdt.h>
+ #include <asm/cache.h>
+ #include <asm/gpio.h>
+ #include <asm/io.h>
+@@ -233,4 +234,9 @@
+ 		return -ENODEV;
+ 
++#if CONFIG_IS_ENABLED(WDT)
++	/* BootROM FEL cannot keep a watchdog alive during USB transfers. */
++	if (wdt_stop_all())
++		return -EIO;
++#endif
+ 	debug("Returning to FEL sp=%x, lr=%x\n", fel_stash.sp, fel_stash.lr);
+ 	return_to_fel(fel_stash.sp, fel_stash.lr);
+ 	return -EIO;
+diff --git a/arch/arm/dts/sunxi-u-boot.dtsi b/arch/arm/dts/sunxi-u-boot.dtsi
+--- a/arch/arm/dts/sunxi-u-boot.dtsi
++++ b/arch/arm/dts/sunxi-u-boot.dtsi
+@@ -22,6 +22,7 @@
+ /* Let U-Boot be the firmware layer that controls the watchdog. */
+ #if defined(CONFIG_MACH_SUN8I_R528) || defined(CONFIG_MACH_SUN8I_V851S)
+ &wdt {
++	bootph-all;
+ 	status = "okay";
+ };
+ #endif
+diff --git a/drivers/watchdog/wdt-uclass.c b/drivers/watchdog/wdt-uclass.c
+--- a/drivers/watchdog/wdt-uclass.c
++++ b/drivers/watchdog/wdt-uclass.c
+@@ -74,6 +74,6 @@ static void init_watchdog_dev(struct udevice *dev)
+ 	priv = dev_get_uclass_priv(dev);
+ 
+-	if (IS_ENABLED(CONFIG_SYSRESET_WATCHDOG_AUTO)) {
++	if (CONFIG_IS_ENABLED(SYSRESET_WATCHDOG_AUTO)) {
+ 		ret = sysreset_register_wdt(dev);
+ 		if (ret)
+ 			printf("WDT:   Failed to register %s for sysreset\n",
+@@ -142,2 +142,3 @@ int wdt_start(struct udevice *dev, u64 timeout_ms, ulong flags)
+-			snprintf(str, 16, "every %ldms", priv->reset_period);
++			if (CONFIG_IS_ENABLED(SPRINTF))
++				snprintf(str, 16, "every %ldms", priv->reset_period);
+ 		}

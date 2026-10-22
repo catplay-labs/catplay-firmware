@@ -1,0 +1,110 @@
+Subject: [PATCH] sunxi: select V851S SoC and SPL layout
+Upstream-Status: Inappropriate [CatPlay V851S board port]
+
+---
+diff --git a/arch/arm/cpu/armv7/Kconfig b/arch/arm/cpu/armv7/Kconfig
+index 3a3c1784..623f1d41 100644
+--- a/arch/arm/cpu/armv7/Kconfig
++++ b/arch/arm/cpu/armv7/Kconfig
+@@ -62,9 +62,9 @@ config ARMV7_SECURE_MAX_SIZE
+ config ARM_GIC_BASE_ADDRESS
+ 	hex
+ 	depends on ARMV7_NONSEC
+-	depends on ARCH_EXYNOS5 || MACH_SUN8I_R528
++	depends on ARCH_EXYNOS5 || MACH_SUN8I_R528 || MACH_SUN8I_V851S
+ 	default 0x10480000 if ARCH_EXYNOS5
+-	default 0x03020000 if MACH_SUN8I_R528
++	default 0x03020000 if MACH_SUN8I_R528 || MACH_SUN8I_V851S
+ 	help
+ 	  Override the GIC base address if the Arm Cortex defined
+ 	  CBAR/PERIPHBASE system register holds the wrong value.
+diff --git a/arch/arm/include/asm/arch-sunxi/cpu_sunxi_ncat2.h b/arch/arm/include/asm/arch-sunxi/cpu_sunxi_ncat2.h
+index bcfdc0a4..679d93ef 100644
+--- a/arch/arm/include/asm/arch-sunxi/cpu_sunxi_ncat2.h
++++ b/arch/arm/include/asm/arch-sunxi/cpu_sunxi_ncat2.h
+@@ -25,6 +25,9 @@
+ #define SUNXI_DRAM_COM_BASE		0x03120000
+ #define SUNXI_DRAM_CTL0_BASE		0x03130000
+ #define SUNXI_DRAM_PHY0_BASE		0x03140000
++#elif CONFIG_MACH_SUN8I_V851S
++#define SUNXI_DRAM_COM_BASE		0x03102000
++#define SUNXI_DRAM_PHY_BASE		0x03103000
+ #endif
+ 
+ #define SUNXI_MMC0_BASE			0x04020000
+diff --git a/arch/arm/mach-sunxi/Kconfig b/arch/arm/mach-sunxi/Kconfig
+index ceba96b6..13598b5d 100644
+--- a/arch/arm/mach-sunxi/Kconfig
++++ b/arch/arm/mach-sunxi/Kconfig
+@@ -344,6 +344,7 @@ config MACH_SUNXI_H3_H5
+ # TODO: try out A80's 8GiB DRAM space
+ config SUNXI_DRAM_MAX_SIZE
+ 	hex
++	default 0x08000000 if MACH_SUN8I_V851S
+ 	default 0x100000000 if MACH_SUN50I_H616 || MACH_SUN50I_A133 || MACH_SUN55I_A523
+ 	default 0xC0000000 if MACH_SUN50I || MACH_SUN50I_H5 || MACH_SUN50I_H6
+ 	default 0x80000000
+@@ -496,6 +497,19 @@ config MACH_SUN8I_V3S
+ 	select ARMV7_BOOT_SEC_DEFAULT if OLD_SUNXI_KERNEL_COMPAT
+ 	imply OF_UPSTREAM
+ 
++config MACH_SUN8I_V851S
++	bool "sun8i (Allwinner V851S)"
++	select CPU_V7A
++	select CPU_V7_HAS_NONSEC
++	select CPU_V7_HAS_VIRT
++	select ARCH_SUPPORT_PSCI
++	select SPL_ARMV7_SET_CORTEX_SMPEN
++	select SUNXI_GEN_NCAT2
++	select SUNXI_NEW_PINCTRL
++	select MMC_SUNXI_HAS_NEW_MODE
++	select SUPPORT_SPL
++	select DRAM_SUN20I_D1
++
+ config MACH_SUN9I
+ 	bool "sun9i (Allwinner A80)"
+ 	select CPU_V7A
+@@ -860,6 +874,9 @@ config SYS_CLK_FREQ
+ 	default 816000000 if MACH_SUN50I || MACH_SUN50I_H5
+ 	default 888000000 if MACH_SUN50I_H6
+ 	default 912000000 if MACH_SUN7I
++	default 1008000000 if MACH_SUN50I_H616
++	default 1008000000 if MACH_SUN8I_R528
++	default 912000000 if MACH_SUN8I_V851S
+ 	default 1008000000
+ 
+ config SYS_CONFIG_NAME
+@@ -870,6 +887,7 @@ config SYS_CONFIG_NAME
+ 	default "sun7i" if MACH_SUN7I
+ 	default "sun8i" if MACH_SUN8I
+ 	default "sun8i" if MACH_SUN8I_R528
++	default "sun8i" if MACH_SUN8I_V851S
+ 	default "sun9i" if MACH_SUN9I
+ 	default "sun50i" if MACH_SUN50I
+ 	default "sun50i" if MACH_SUN50I_H6
+diff --git a/arch/arm/mach-sunxi/cpu_info.c b/arch/arm/mach-sunxi/cpu_info.c
+index c3a51d99..0dc324b5 100644
+--- a/arch/arm/mach-sunxi/cpu_info.c
++++ b/arch/arm/mach-sunxi/cpu_info.c
+@@ -94,6 +94,8 @@ int print_cpuinfo(void)
+ 	printf("CPU:   Allwinner V3s (SUN8I %04x)\n", sunxi_get_sram_id());
+ #elif defined CONFIG_MACH_SUN8I_R528
+ 	puts("CPU:   Allwinner R528 (SUN8I)\n");
++#elif defined CONFIG_MACH_SUN8I_V851S
++	puts("CPU:   Allwinner V851S (SUN8I)\n");
+ #elif defined CONFIG_MACH_SUN9I
+ 	puts("CPU:   Allwinner A80 (SUN9I)\n");
+ #elif defined CONFIG_MACH_SUN50I
+diff --git a/common/spl/Kconfig b/common/spl/Kconfig
+index 5fa94098..5080d4a0 100644
+--- a/common/spl/Kconfig
++++ b/common/spl/Kconfig
+@@ -424,7 +424,7 @@ config SPL_STACK
+ 	default 0x91ffb8 if ARCH_MX6 && !MX6_OCRAM_256KB
+ 	default 0x118000 if MACH_SUN50I_H6
+ 	default 0x52a00 if MACH_SUN50I_H616
+-	default 0x40000 if MACH_SUN8I_R528 || MACH_SUN50I_A133
++	default 0x40000 if MACH_SUN8I_R528 || MACH_SUN50I_A133 || MACH_SUN8I_V851S
+ 	default 0x44000 if MACH_SUN55I_A523
+ 	default 0x54000 if MACH_SUN50I || MACH_SUN50I_H5
+ 	default 0x18000 if MACH_SUN9I
