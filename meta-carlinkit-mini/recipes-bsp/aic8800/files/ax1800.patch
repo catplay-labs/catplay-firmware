@@ -90,7 +90,7 @@ diff --git a/aic8800_bsp/aicsdio.c b/aic8800_bsp/aicsdio.c
 diff --git a/aic8800_bsp/aic_bsp_driver.c b/aic8800_bsp/aic_bsp_driver.c
 --- a/aic8800_bsp/aic_bsp_driver.c
 +++ b/aic8800_bsp/aic_bsp_driver.c
-@@ -16,6 +16,11 @@
+@@ -16,6 +16,12 @@
  #include <linux/delay.h>
  #include <linux/vmalloc.h>
  #include <linux/firmware.h>
@@ -99,10 +99,11 @@ diff --git a/aic8800_bsp/aic_bsp_driver.c b/aic8800_bsp/aic_bsp_driver.c
 +#include <linux/mmc/host.h>
 +#include <linux/gpio.h>
 +#include <linux/of.h>
++#include <linux/pinctrl/pinconf-generic.h>
  
  #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 12, 0)
  #include <linux/hardirq.h>
-@@ -1692,6 +1697,43 @@
+@@ -1692,6 +1698,47 @@
  	struct aicbt_patch_table *p;
 -	int ret = 0, i;
 +	int ret = 0, i, gpio_ret, gpio_value;
@@ -121,6 +122,10 @@ diff --git a/aic8800_bsp/aic_bsp_driver.c b/aic8800_bsp/aic_bsp_driver.c
 +		if (!gpio_ret) {
 +			gpio_desc = gpio_to_desc(btmode_pin);
 +			gpio_ret = gpio_desc ? gpiod_direction_input(gpio_desc) : -EINVAL;
++			if (!gpio_ret && of_property_read_bool(np,
++						"c2a,btmode-bias-pull-down"))
++				gpio_ret = gpiod_set_config(gpio_desc,
++					pinconf_to_config_packed(PIN_CONFIG_BIAS_PULL_DOWN, 1));
 +			if (!gpio_ret) {
 +				gpio_value = gpiod_get_raw_value(gpio_desc);
 +				if (gpio_value >= 0) {
