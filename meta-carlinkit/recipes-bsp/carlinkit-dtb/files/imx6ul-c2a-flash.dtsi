@@ -48,8 +48,8 @@
 				reg = <C2A_KERNEL_OFFSET_HEX C2A_KERNEL_SIZE_HEX>;
 			};
 
-			rootfs@6 {
-				label = "rootfs";
+			persist@6 {
+				label = "persist";
 				reg = <C2A_ROOTFS_OFFSET_HEX C2A_ROOTFS_SIZE_HEX>;
 			};
         };
