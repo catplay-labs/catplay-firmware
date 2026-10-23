@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+#include "sun8i-v853.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	model = "CatPlay V851S3 AIC8800D80";
+	compatible = "catplay,v851s3-aic8800d80", "allwinner,v851s", "allwinner,sun8i-v853";
+	/delete-node/ thermal-zones;
+
+	reg_vcc_3v3: vcc-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc-3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	/* Vendor V851S DT identifies PE9 as chip_en. */
+	reg_vcc_wifi: regulator-vcc-wifi {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_wifi";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&pio 4 9 GPIO_ACTIVE_HIGH>; /* PE9: chip_en */
+		enable-active-high;
+	};
+
+	wifi_pwrseq: wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		reset-gpios = <&pio 0 11 GPIO_ACTIVE_LOW>; /* PA11: wlan_regon */
+		post-power-on-delay-ms = <100>;
+		power-off-delay-us = <5000000>;
+	};
+
+	aliases {
+		serial0 = &uart0;
+		i2c3 = &i2c3;
+	};
+
+	chosen {
+		bootargs = C2A_BOOTARGS;
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x40000000 0x08000000>;
+	};
+};
+
+&mbus {
+	status = "disabled";
+};
+
+&ve {
+	status = "okay";
+};
+
+&wdt {
+	status = "okay";
+};
+
+&usb_otg {
+	dr_mode = "peripheral";
+	usb-role-switch;
+	status = "okay";
+};
+
+&usbphy {
+	status = "okay";
+};
+
+&dcxo {
+	clock-frequency = <24000000>;
+};
+
+&pio {
+	vcc-pc-supply = <&reg_vcc_3v3>;
+
+	/* The vendor DT routes four-wire UART2 to PE10-PE13. */
+	uart2_pe10_pins: uart2-pe10-pins {
+		pins = "PE10", "PE11", "PE12", "PE13";
+		function = "uart2";
+		allwinner,pinmux = <6>;
+		bias-pull-up;
+	};
+};
+
+/* Vendor MFI wiring: PH13 SCL / PH14 SDA, using hardware TWI3 mux 5. */
+&i2c3_ph13_pins {
+	bias-pull-up;
+};
+
+&i2c3 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c3_ph13_pins>;
+	clock-frequency = <100000>;
+	status = "okay";
+};
+
+&uart2 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart2_pe10_pins>;
+	uart-has-rtscts;
+
+	bluetooth {
+		compatible = "aic,aic-bt";
+		/* TODO: 1.5M baudrate unstable - random command timeouts */
+		max-speed = <115200 /* 1500000 */>;
+		uart-has-rtscts;
+	};
+};
+
+/* SPI sampling mode 1 selects a half-cycle delay; 18 is the tuned delay tap. */
+&spi0 {
+	compatible = "allwinner,sun8i-v851-spi", "allwinner,sun50i-r329-spi";
+	allwinner,sample-mode = <1>;
+	allwinner,sample-delay = <18>;
+	pinctrl-0 = <&spi0_pins>;
+	pinctrl-names = "default";
+	status = "disabled";
+
+	flash@0 {
+		compatible = "spi-nand";
+		reg = <0>;
+		spi-max-frequency = <100000000>;
+		spi-rx-bus-width = <4>;
+		spi-tx-bus-width = <4>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "boot0";
+				reg = <0x00000000 0x00100000>;
+			};
+			partition@100000 {
+				label = "uboot";
+				reg = <0x00100000 0x00100000>;
+			};
+			partition@200000 {
+				label = "kernel";
+				reg = <0x00200000 0x00800000>;
+			};
+			partition@a00000 {
+				label = "rootfs";
+				reg = <0x00a00000 0x01000000>;
+			};
+			partition@1a00000 {
+				label = "persist";
+				reg = <0x01a00000 0x01000000>;
+			};
+		};
+	};
+};
+
+&spif {
+	allwinner,sample-mode = <0>;
+	allwinner,sample-delay = <25>;
+	status = "okay";
+
+	flash@0 {
+		compatible = "spi-nand";
+		reg = <0>;
+		spi-max-frequency = <100000000>;
+		spi-rx-bus-width = <4>;
+		spi-tx-bus-width = <4>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "boot0";
+				reg = <0x00000000 0x00100000>;
+			};
+			partition@100000 {
+				label = "uboot";
+				reg = <0x00100000 0x00100000>;
+			};
+			partition@200000 {
+				label = "kernel";
+				reg = <0x00200000 0x00800000>;
+			};
+			partition@a00000 {
+				label = "rootfs";
+				reg = <0x00a00000 0x01000000>;
+			};
+			partition@1a00000 {
+				label = "persist";
+				reg = <0x01a00000 0x01000000>;
+			};
+		};
+	};
+};
+
+&mmc1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&mmc1_pins>;
+	max-frequency = <50000000>;
+	bus-width = <4>;
+	non-removable;
+	cap-sdio-irq;
+	ignore-pm-notify;
+	keep-power-in-suspend;
+	no-mmc;
+	no-sd;
+	vmmc-supply = <&reg_vcc_wifi>;
+	mmc-pwrseq = <&wifi_pwrseq>;
+	c2a,btmode_pin = <10>; /* PA10: vendor wifi_antenna_select */
+	c2a,btmode-bias-pull-down; /* Vendor WLAN pinctrl: PA10 gpio_in, pull=2 */
+	/* TODO: 1.5M baudrate unstable - random command timeouts */
+	c2a,uart_baud = <115200 /* 1500000 */>;
+	c2a,uart_flowctrl = <1>;
+	status = "okay";
+};
