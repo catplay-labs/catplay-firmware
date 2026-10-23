@@ -3,6 +3,7 @@ use core::{fmt, mem, ptr, time::Duration};
 use crate::nostd::SmallFd;
 
 const SYSFS_PATH: &str = "/sys/bus/sdio/devices/mmc0:0001:1/device\0";
+const SYSFS_PATH_V851: &str = "/sys/bus/sdio/devices/mmc0:6721:1/device\0";
 const SYSFS_PATH_ULTRA: &str = "/sys/bus/sdio/devices/mmc1:390b:1/device\0";
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -191,7 +192,9 @@ impl fmt::Display for Radio {
 
 pub fn id_radio() -> Radio {
     let mut buf = [0u8; 32];
-    let fd = SmallFd::open_readonly(SYSFS_PATH).or_else(|_| SmallFd::open_readonly(SYSFS_PATH_ULTRA));
+    let fd = SmallFd::open_readonly(SYSFS_PATH)
+        .or_else(|_| SmallFd::open_readonly(SYSFS_PATH_V851))
+        .or_else(|_| SmallFd::open_readonly(SYSFS_PATH_ULTRA));
     let Ok(fd) = fd else {
         return Radio::Offline;
     };

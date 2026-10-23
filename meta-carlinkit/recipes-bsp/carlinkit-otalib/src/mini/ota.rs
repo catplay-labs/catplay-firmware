@@ -52,25 +52,34 @@ impl<'a> OtaImageSection<'a> {
     }
 }
 
-fn parse_ota<'a>(buf: &'a [u8], images: &mut [Option<OtaImageSection<'a>>], globals: &mut OtaImageGlobals<'a>) -> usize {
-    let text = match str::from_utf8(&buf[..HEADER_SIZE.min(buf.len())]) {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
+fn parse_ota<'a>(
+    buf: &'a [u8],
+    images: &mut [Option<OtaImageSection<'a>>],
+    globals: &mut OtaImageGlobals<'a>,
+) -> Result<usize, &'static str> {
+    if buf.len() < HEADER_SIZE {
+        return Err("OTA header is truncated");
+    }
+    let header = &buf[..HEADER_SIZE];
+    let header_end = header.iter().position(|&b| b == 0).unwrap_or(HEADER_SIZE);
+    let text = str::from_utf8(&header[..header_end]).map_err(|_| "OTA header is not UTF-8")?;
 
     let mut count = 0;
     let mut offset = HEADER_SIZE;
 
-    *globals = parse_globals(text);
+    *globals = parse_globals(text)?;
 
     for part in text.split("\n\n") {
-        if count >= images.len() {
-            break;
-        }
-        if part.contains("img_name") {
+        if part
+            .lines()
+            .any(|line| line.trim_start().starts_with("img_"))
+        {
+            if count >= images.len() {
+                return Err("too many OTA sections");
+            }
             let mut name = "";
-            let mut ty = "?";
-            let mut size = 0u32;
+            let mut ty = "";
+            let mut size = None;
             let mut md5 = "";
             let mut crc = 0u32;
 
@@ -82,20 +91,33 @@ fn parse_ota<'a>(buf: &'a [u8], images: &mut [Option<OtaImageSection<'a>>], glob
                     match k.trim() {
                         "img_name" => name = val,
                         "img_type" => ty = val,
-                        "img_size" => size = val.parse::<u32>().unwrap_or(0),
+                        "img_size" => {
+                            size = Some(val.parse::<u32>().map_err(|_| "invalid OTA section size")?)
+                        }
                         "img_md5" => md5 = val,
-                        "img_crc" => crc = val.parse::<u32>().unwrap_or(0),
+                        "img_crc" => {
+                            crc = val.parse::<u32>().map_err(|_| "invalid OTA section CRC")?
+                        }
                         _ => {}
                     }
                 }
             }
 
-            if offset + size as usize > buf.len() {
-                // debug!("OTA section: offset too big");
-                return count;
+            let size = size.ok_or("missing OTA section size")?;
+            if name.is_empty() || ty.is_empty() || size == 0 || parse_md5_hex(md5).is_none() {
+                return Err("incomplete OTA section");
+            }
+            if images[..count].iter().flatten().any(|image| image.ty == ty) {
+                return Err("duplicate OTA image type");
+            }
+            let end = offset
+                .checked_add(size as usize)
+                .ok_or("OTA section offset overflow")?;
+            if end > buf.len() {
+                return Err("OTA section exceeds packet");
             }
 
-            let data = &buf[offset..offset + size as usize];
+            let data = &buf[offset..end];
             let mut section = OtaImageSection {
                 ty,
                 name,
@@ -134,42 +156,55 @@ fn parse_ota<'a>(buf: &'a [u8], images: &mut [Option<OtaImageSection<'a>>], glob
             images[count].replace(section);
 
             count += 1;
-            offset += size as usize;
+            offset = end;
         }
     }
 
-    if let Some(packet_md5) = globals.packet_md5 {
-        let parsed_global_md5 = parse_md5_hex(packet_md5);
-        let global_md5 = md5_calc(&buf[HEADER_SIZE..offset]);
-
-        if parsed_global_md5 != Some(global_md5) {
-            // debug!("OTA Header: packet MD5 fail");
-            globals.packet_md5_fail = true;
-        }
+    if count == 0 || offset != buf.len() {
+        return Err("OTA payload does not match sections");
     }
 
-    count
+    let packet_md5 = globals.packet_md5.ok_or("missing OTA packet MD5")?;
+    let parsed_global_md5 = parse_md5_hex(packet_md5);
+    let global_md5 = md5_calc(&buf[HEADER_SIZE..offset]);
+
+    if parsed_global_md5 != Some(global_md5) {
+        globals.packet_md5_fail = true;
+    }
+
+    Ok(count)
 }
 
-fn parse_globals<'a>(text: &'a str) -> OtaImageGlobals<'a> {
+fn parse_globals<'a>(text: &'a str) -> Result<OtaImageGlobals<'a>, &'static str> {
     let mut bs_size = BLOCK_SIZE;
     let mut packet_md5 = None;
-    for line in text.lines().map(|l| l.trim()) {
-        if let Some((k, v)) = line.split_once('=') {
-            let v = v.trim();
-            match k.trim() {
-                "bs_size" => bs_size = v.parse().unwrap_or(bs_size),
-                "ota_img_packet_md5" => packet_md5 = Some(v),
-                _ => {}
+    for part in text.split("\n\n") {
+        if part
+            .lines()
+            .any(|line| line.trim_start().starts_with("img_"))
+        {
+            continue;
+        }
+        for line in part.lines().map(|l| l.trim()) {
+            if let Some((k, v)) = line.split_once('=') {
+                let v = v.trim();
+                match k.trim() {
+                    "bs_size" => bs_size = v.parse().map_err(|_| "invalid OTA block size")?,
+                    "ota_img_packet_md5" => packet_md5 = Some(v),
+                    _ => {}
+                }
             }
         }
     }
+    if bs_size == 0 || bs_size > HEADER_SIZE {
+        return Err("invalid OTA block size");
+    }
 
-    OtaImageGlobals {
+    Ok(OtaImageGlobals {
         bs_size,
         packet_md5,
         packet_md5_fail: false,
-    }
+    })
 }
 
 pub struct OtaExtractor<'a> {
@@ -177,6 +212,19 @@ pub struct OtaExtractor<'a> {
     sections: [Option<OtaImageSection<'a>>; MAX_IMAGES],
     globals: OtaImageGlobals<'a>,
     parsed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OtaParseOptions {
+    pub reject_checksum_failures: bool,
+}
+
+impl Default for OtaParseOptions {
+    fn default() -> Self {
+        Self {
+            reject_checksum_failures: true,
+        }
+    }
 }
 
 impl<'a> OtaExtractor<'a> {
@@ -190,27 +238,32 @@ impl<'a> OtaExtractor<'a> {
     }
 
     pub fn parse(&mut self) -> Result<(), &'static str> {
-        let n = parse_ota(self.buf, &mut self.sections, &mut self.globals);
-        if n == 0 {
-            return Err("file has 0 OTA sections");
-        }
+        self.parse_with_options(OtaParseOptions::default())
+    }
 
-        for i in 0..n {
-            let Some(image) = self.sections[i] else {
-                continue;
-            };
+    pub fn parse_with_options(&mut self, options: OtaParseOptions) -> Result<(), &'static str> {
+        self.sections = [None; MAX_IMAGES];
+        self.parsed = false;
+        let n = parse_ota(self.buf, &mut self.sections, &mut self.globals)?;
 
-            if image.crc_fail {
-                return Err("failed section crc check");
+        if options.reject_checksum_failures {
+            for i in 0..n {
+                let Some(image) = self.sections[i] else {
+                    continue;
+                };
+
+                if image.crc_fail {
+                    return Err("failed section crc check");
+                }
+
+                if image.md5_fail {
+                    return Err("failed section md5 check");
+                }
             }
 
-            if image.md5_fail {
-                return Err("failed section md5 check");
+            if self.globals.packet_md5_fail {
+                return Err("failed packet md5 check");
             }
-        }
-
-        if self.globals.packet_md5_fail {
-            return Err("failed packet md5 check");
         }
 
         self.parsed = true;
@@ -231,7 +284,74 @@ mod tests {
     use std::fs::{self};
 
     use super::*;
+    use crate::mini::ota_packer::OtaPacker;
     extern crate std;
+
+    #[test]
+    fn checksum_policy_rejects_each_corruption() {
+        let mut packer = OtaPacker::new();
+        packer.add("kernel", "fitImage", b"image data");
+        let mut valid = vec![0u8; packer.output_size()];
+        packer.pack(&mut valid);
+
+        for (field, check) in [("img_crc=", 0), ("img_md5=", 1), ("ota_img_packet_md5=", 2)] {
+            let mut corrupt = valid.clone();
+            let prefix = field.as_bytes();
+            let start = corrupt
+                .windows(prefix.len())
+                .position(|v| v == prefix)
+                .unwrap()
+                + prefix.len();
+            corrupt[start] = if corrupt[start] == b'0' { b'1' } else { b'0' };
+
+            let mut inspect = OtaExtractor::new(&corrupt);
+            inspect
+                .parse_with_options(OtaParseOptions {
+                    reject_checksum_failures: false,
+                })
+                .unwrap();
+            assert_eq!(inspect.sections()[0].unwrap().crc_fail, check == 0);
+            assert_eq!(inspect.sections()[0].unwrap().md5_fail, check == 1);
+            assert_eq!(inspect.globals().packet_md5_fail, check == 2);
+
+            let mut verified = OtaExtractor::new(&corrupt);
+            assert!(
+                verified
+                    .parse_with_options(OtaParseOptions {
+                        reject_checksum_failures: true
+                    })
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn parser_rejects_duplicate_truncated_and_zero_block_size_packets() {
+        let mut packer = OtaPacker::new();
+        packer.add("kernel", "fitImage", b"first");
+        packer.add("kernel", "fitImage2", b"second");
+        let mut duplicate = vec![0u8; packer.output_size()];
+        packer.pack(&mut duplicate);
+        assert!(OtaExtractor::new(&duplicate).parse().is_err());
+
+        let mut packer = OtaPacker::new();
+        packer.add("kernel", "fitImage", b"first");
+        let mut valid = vec![0u8; packer.output_size()];
+        packer.pack(&mut valid);
+        assert!(OtaExtractor::new(&valid).parse().is_ok());
+
+        let mut truncated = valid.clone();
+        truncated.pop();
+        assert!(OtaExtractor::new(&truncated).parse().is_err());
+
+        let needle = b"bs_size=131072";
+        let start = valid
+            .windows(needle.len())
+            .position(|v| v == needle)
+            .unwrap();
+        valid[start + 8..start + needle.len()].copy_from_slice(b"000000");
+        assert!(OtaExtractor::new(&valid).parse().is_err());
+    }
 
     #[test]
     fn test_parse() {

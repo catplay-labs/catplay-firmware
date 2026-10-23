@@ -12,6 +12,7 @@ pub enum BootPlatform {
     Imx,
     Ingenic,
     V821,
+    V851,
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -23,9 +24,10 @@ pub enum BootTarget {
 pub struct Boot<'a> {
     pub target: BootTarget,
     pub main_udc: &'a str,
+    // Optional g_iphone override; None preserves its legacy UDC mapping.
+    pub main_rs_name: Option<&'a str>,
+    pub main_role_switch: &'a str,
     pub extra_udc: Option<&'a str>,
-    pub persist_mtd: &'a str,
-    pub persist_fs: &'a str,
     pub readahead: Vec<String<READAHEAD_PATH_LEN>, READAHEAD_PATHS_MAX>,
     pub mfi_bus: &'a str,
     pub mfi_dev_addr: &'a str,
@@ -84,9 +86,9 @@ impl BootPlatform {
         Boot {
             target: read_boot_target_from_cmdline(),
             main_udc: "ci_hdrc.1",
+            main_rs_name: None,
+            main_role_switch: "ci_hdrc.1",
             extra_udc: Some("ci_hdrc.0"),
-            persist_mtd: "/dev/mtdblock6",
-            persist_fs: "jffs2",
             readahead: Vec::new(),
             mfi_bus: "1",
             mfi_dev_addr: "0x11",
@@ -145,9 +147,9 @@ impl BootPlatform {
         Boot {
             target: read_boot_target_from_cmdline(),
             main_udc: "13500000.usb",
+            main_rs_name: None,
+            main_role_switch: "13500000.usb",
             extra_udc: None,
-            persist_mtd: "/dev/mtdblock3",
-            persist_fs: "jffs2",
             readahead,
             mfi_bus: "0",
             mfi_dev_addr: "0x10",
@@ -211,9 +213,9 @@ impl BootPlatform {
         Boot {
             target: read_boot_target_from_cmdline(),
             main_udc: "musb-hdrc.1.auto",
+            main_rs_name: None,
+            main_role_switch: "44100000.usb",
             extra_udc: None,
-            persist_mtd: "/dev/mtdblock3",
-            persist_fs: "jffs2",
             readahead,
             mfi_bus: "1",
             mfi_dev_addr: "0x11",
@@ -242,17 +244,78 @@ impl BootPlatform {
         }
     }
 
+    pub fn boot_params_v851() -> Boot<'static> {
+        Boot {
+            target: read_boot_target_from_cmdline(),
+            main_udc: "musb-hdrc.2.auto",
+            main_rs_name: Some("4100000.usb"),
+            main_role_switch: "4100000.usb",
+            extra_udc: None,
+            readahead: Vec::new(),
+            mfi_bus: "3",
+            mfi_dev_addr: "0x10",
+            sysctls: &[
+                ("net.core.netdev_max_backlog", "512"),
+                ("net.ipv4.tcp_moderate_rcvbuf", "1"),
+                ("net.ipv4.tcp_low_latency", "1"),
+                ("net.ipv4.tcp_max_orphans", "256"),
+                ("net.ipv4.tcp_tw_reuse", "1"),
+                ("vm.watermark_boost_factor", "0"),
+                ("vm.watermark_scale_factor", "10"),
+                ("vm.min_free_kbytes", "2048"),
+                ("vm.swappiness", "10"),
+                ("vm.vfs_cache_pressure", "500"),
+                ("vm.page-cluster", "0"),
+                ("vm.dirty_expire_centisecs", "100"),
+                ("vm.dirty_writeback_centisecs", "100"),
+            ],
+            platform: BootPlatform::V851,
+            p2p_allow: false,
+            p2p_whitelist: &[Radio::AIC8800D80],
+            p2p_without_hostapd: true,
+            p2p_catplay: false,
+        }
+    }
+
+    pub fn is_v851() -> bool {
+        for path in [
+            "/proc/device-tree/compatible",
+            "/sys/firmware/devicetree/base/compatible",
+        ] {
+            let Ok(fd) = SmallFd::open_readonly(path) else {
+                continue;
+            };
+            let mut bytes = [0u8; 512];
+            let Ok(len) = fd.read(&mut bytes) else {
+                continue;
+            };
+            if bytes[..len].split(|byte| *byte == 0).any(|compat| {
+                compat == b"allwinner,sun8i-v853"
+                    || compat == b"catplay,v851s3-aic8800d80"
+                    || compat == b"catplay,v851s3-aic8800d80-recov"
+            }) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn params(&self) -> Boot<'static> {
         match self {
             BootPlatform::Imx => Self::boot_params_imx(),
             BootPlatform::Ingenic => Self::boot_params_ultra(),
-            BootPlatform::V821 => Self::boot_params_v821()
+            BootPlatform::V821 => Self::boot_params_v821(),
+            BootPlatform::V851 => Self::boot_params_v851(),
         }
     }
 
     pub fn detect() -> Self {
         #[cfg(target_arch = "riscv32")]
         return BootPlatform::V821;
+
+        if Self::is_v851() {
+            return BootPlatform::V851;
+        }
 
         match Flash::is_ultra() {
             true => BootPlatform::Ingenic,

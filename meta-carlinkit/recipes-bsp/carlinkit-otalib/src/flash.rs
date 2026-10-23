@@ -75,7 +75,8 @@ impl Flash {
     }
 
     pub fn is_ultra() -> bool {
-        SmallFd::open_readonly(ULTRA_TEST_PARTITION).is_ok()
+        !crate::boot::boot_platform::BootPlatform::is_v851()
+            && SmallFd::open_readonly(ULTRA_TEST_PARTITION).is_ok()
     }
 
     pub fn layout() -> FlashLayout {

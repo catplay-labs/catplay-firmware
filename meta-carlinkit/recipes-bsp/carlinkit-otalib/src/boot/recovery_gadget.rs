@@ -12,11 +12,11 @@ pub struct RecoveryGadget;
 impl RecoveryGadget {
     const GADGET_DIR: &str = "/sys/kernel/config/usb_gadget/ncm_gadget";
 
-    pub fn start(udc: &str) -> Result<(), &'static str> {
+    pub fn start(udc: &str, role_switch: &str) -> Result<(), &'static str> {
         dmesg!("[recovery-gadget] Starting recovery USB gadget");
 
         Self::prepare_modules().map_err(|_| "modprobe failed")?;
-        Self::prepare_cleanup(udc);
+        Self::prepare_cleanup(udc, role_switch);
         Self::create_ncm_gadget(udc)?;
         Self::configure_network()?;
         Self::start_udhcpd()?;
@@ -25,8 +25,8 @@ impl RecoveryGadget {
         Ok(())
     }
 
-    pub fn start_best_effort(udc: &str) {
-        if let Err(err) = Self::start(udc) {
+    pub fn start_best_effort(udc: &str, role_switch: &str) {
+        if let Err(err) = Self::start(udc, role_switch) {
             dmesg!("[recovery-gadget] Failed to start: {err}");
         }
     }
@@ -38,8 +38,8 @@ impl RecoveryGadget {
         Ok(())
     }
 
-    fn prepare_cleanup(udc: &str) {
-        let role_path = Self::usb_role_path(udc);
+    fn prepare_cleanup(udc: &str, role_switch: &str) {
+        let role_path = Self::usb_role_path(role_switch);
 
         // Stop service first, then hard-kill leftovers.
         let _ = SystemUtil::run_shell("/etc/init.d/catplay stop");
@@ -129,7 +129,7 @@ impl RecoveryGadget {
         Udhcpd::start(UdhcpdMode::Recovery("usb0"))
     }
 
-    fn usb_role_path(udc: &str) -> Result<String<128>, &'static str> {
-        format!(128; "/sys/class/usb_role/{}-role-switch/role", udc).map_err(|_| "udc too long")
+    fn usb_role_path(role_switch: &str) -> Result<String<128>, &'static str> {
+        format!(128; "/sys/class/usb_role/{}-role-switch/role", role_switch).map_err(|_| "udc too long")
     }
 }

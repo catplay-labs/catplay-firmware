@@ -3,7 +3,7 @@ use core::time::Duration;
 use crate::{
     Flash, SystemUtil,
     boot::{
-        boot_persist::{mount_persist, mount_persist_overlays},
+        boot_persist::{mount_persist_overlays, mount_persist_with_fallback},
         boot_platform::{BootPlatform, BootTarget},
         boot_radio::BootRadio,
         catplay::{CatPlay, CatplayConfig},
@@ -48,6 +48,15 @@ impl BootUltra {
                     dmesg!("[boot] Finished modprobing sunxi-mmc");
                 }
 
+                v.params()
+            }
+            v @ BootPlatform::V851 => {
+                dmesg!("[boot] Platform: V851S");
+                if let Some(_fork_guard) = SystemUtil::fork_guard() {
+                    dmesg!("[boot] Modprobing sunxi-mmc");
+                    let _ = ModprobeUtil::modprobe("sunxi-mmc");
+                    dmesg!("[boot] Finished modprobing sunxi-mmc");
+                }
                 v.params()
             }
         };
@@ -164,21 +173,22 @@ impl BootUltra {
 
         if target == BootTarget::CatPlay {
             dmesg!("[boot] Loading g_iphone");
-            let _ = SystemUtil::modprobe_with_params(
-                "g_iphone",
-                &format!(256; "udc_name={} device_name=default", boot.main_udc).expect("g_iphone args too long"),
-            );
+            let g_iphone_params = match boot.main_rs_name {
+                Some(rs_name) => format!(256; "udc_name={} device_name=default rs_name={}", boot.main_udc, rs_name),
+                None => format!(256; "udc_name={} device_name=default", boot.main_udc),
+            }.expect("g_iphone args too long");
+            let _ = SystemUtil::modprobe_with_params("g_iphone", &g_iphone_params);
             dmesg!("[boot] Loading g_iphone done");
         } else if target == BootTarget::Recovery {
             dmesg!("[boot] Starting USB recovery gadget");
-            RecoveryGadget::start_best_effort(boot.main_udc);
+            RecoveryGadget::start_best_effort(boot.main_udc, boot.main_role_switch);
             recovery_gadget_started = true;
         }
 
         if target != BootTarget::Recovery
-            && let Err(err) = mount_persist(boot.persist_mtd, boot.persist_fs)
+            && let Err(err) = mount_persist_with_fallback()
         {
-            dmesg!("[boot] Failed to mount /persist, falling back to tmpfs overlay: {err}");
+            dmesg!("[boot] Failed to mount /persist: {err}");
         }
 
         mount_persist_overlays();
@@ -272,7 +282,7 @@ impl BootUltra {
             false => {
                 dmesg!("[boot] Failed radio start; starting USB recovery gadget");
                 if !recovery_gadget_started {
-                    RecoveryGadget::start_best_effort(boot.main_udc);
+                    RecoveryGadget::start_best_effort(boot.main_udc, boot.main_role_switch);
                 }
             }
         }
@@ -289,7 +299,7 @@ impl BootUltra {
             });
             if test.is_err() {
                 dmesg!("[boot] Hostapd has crashed post-start! Starting recovery...");
-                RecoveryGadget::start_best_effort(boot.main_udc);
+                RecoveryGadget::start_best_effort(boot.main_udc, boot.main_role_switch);
             } else {
                 dmesg!("[boot] Hostapd seems stable, no need to start recovery")
             }

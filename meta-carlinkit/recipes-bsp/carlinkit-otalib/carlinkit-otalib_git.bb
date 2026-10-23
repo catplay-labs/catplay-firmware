@@ -20,6 +20,7 @@ SRC_URI += "\
     file://src/mini/mod.rs \
     file://src/mini/ota_packer.rs \
     file://src/mini/ota.rs \
+    file://src/mini/ota_nand_flasher.rs \
     \
     file://src/nostd/alloc.rs \
     file://src/nostd/args.rs \

@@ -8,7 +8,11 @@ use carlinkit_otalib::{
         recovery_gadget::RecoveryGadget,
     },
     dmesg,
-    mini::{ota::OtaExtractor, ota_packer::OtaPacker},
+    mini::{
+        ota::OtaExtractor,
+        ota_nand_flasher::{Boot0Platform, FlashOptions, flash_mapped_file},
+        ota_packer::OtaPacker,
+    },
     nostd::{SmallFd, argv_to_heapless, sanitize_filename},
     println, sign_wic, stdout,
     telnet::TelnetServer,
@@ -32,6 +36,7 @@ sign <image.bin> <hwid> - sign 16MB bin file using provided HWID
 flash <image.bin> - flash 16MB bin file and autosign using local HWID
 flash_nosign <image.bin> - flash 16MB bin file directly to flash
 flash_fit <fitImage> - flash fitImage firmware file
+ota <file.c2aota> [--staging] [--keep-persist] - flash OTA NAND sections
 var hwid/layout/radio - dump HWID, flash layout type or radio ID for bash scripting. exits with non-zero code if unreadable
 
 Carlinkit Mini Ultra commands:
@@ -95,7 +100,12 @@ pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
     if args.is_empty() {
         println!("Carlinkit OTA-lib\n\n");
-        println!("HWID: {}\nFlash layout: {:?}\nRadio: {:?}\n", hwid_str, Flash::layout(), radio);
+        println!(
+            "HWID: {}\nFlash layout: {:?}\nRadio: {:?}\n",
+            hwid_str,
+            Flash::layout(),
+            radio
+        );
         println!("{}", HELP);
         return 0;
     }
@@ -190,9 +200,41 @@ pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         }
         "flash_fit" => {
             let file = SmallFd::open_readonly(&args[1]).unwrap();
-            let mut file_mapped = file.mmap_priv(0, file.stat().unwrap().st_size as _).unwrap();
+            let mut file_mapped = file
+                .mmap_priv(0, file.stat().unwrap().st_size as _)
+                .unwrap();
             flash.flash_fitimage(file_mapped.mem()).unwrap();
             println!("flash fit completed!");
+        }
+        "ota" => {
+            if args.len() < 2 {
+                println!("{}", HELP);
+                return 1;
+            }
+            let mut options = FlashOptions {
+                boot0: Boot0Platform::detect(),
+                erase_tail: true,
+                ..FlashOptions::default()
+            };
+            for arg in &args[2..] {
+                match arg.as_str() {
+                    "--staging" => options.staging = true,
+                    "--keep-persist" => options.keep_persist = true,
+                    _ => {
+                        println!("Unknown OTA option: {arg}");
+                        return 1;
+                    }
+                }
+            }
+            match flash_mapped_file(&args[1], options) {
+                Ok(()) => {
+                    println!("OTA flash completed!");
+                }
+                Err(err) => {
+                    println!("OTA flash failed: {err:?}");
+                    return 1;
+                }
+            }
         }
         "var" => {
             if args.len() < 2 {
@@ -268,7 +310,9 @@ pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
             let outfolder = &args[2];
 
             let mut outfolder_path = CString::<1024>::new();
-            outfolder_path.extend_from_bytes(outfolder.as_bytes()).unwrap();
+            outfolder_path
+                .extend_from_bytes(outfolder.as_bytes())
+                .unwrap();
 
             let ret = unsafe { libc::mkdir(outfolder_path.as_ptr(), S_IRWXU) };
             if ret < 0 {
@@ -312,33 +356,30 @@ pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
             println!("Done");
         }
         "usboot" => {
-            if !Flash::is_ultra() {
-                panic!("Not Ingenic device");
-            }
-
-            {
-                // Legacy firmware
+            if Flash::is_ultra() {
+                // Legacy Ingenic firmware
                 println!("Trying legacy reset...");
-                let _ = SystemUtil::run_shell("devmem 0x100000cc 32 0x42575302; echo wdt > /proc/jz/reset/reset");
+                let _ = SystemUtil::run_shell(
+                    "devmem 0x100000cc 32 0x42575302; echo wdt > /proc/jz/reset/reset",
+                );
             }
 
-            {
-                println!("Trying modern reset...");
-                unsafe {
-                    libc::syscall(
-                        libc::SYS_reboot,
-                        libc::LINUX_REBOOT_MAGIC1,
-                        libc::LINUX_REBOOT_MAGIC2,
-                        libc::LINUX_REBOOT_CMD_RESTART2,
-                        c"usb".as_ptr(),
-                    );
-                }
+            println!("Trying reboot usb...");
+            unsafe {
+                libc::syscall(
+                    libc::SYS_reboot,
+                    libc::LINUX_REBOOT_MAGIC1,
+                    libc::LINUX_REBOOT_MAGIC2,
+                    libc::LINUX_REBOOT_CMD_RESTART2,
+                    c"usb".as_ptr(),
+                );
             }
 
             println!("Failed...should not reach here");
         }
         "gadget" => {
-            RecoveryGadget::start_best_effort(BootPlatform::detect().params().main_udc);
+            let boot = BootPlatform::detect().params();
+            RecoveryGadget::start_best_effort(boot.main_udc, boot.main_role_switch);
             println!("... recovery gadget was started if possible");
         }
         "ultraboot" => {

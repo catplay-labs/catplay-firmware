@@ -67,14 +67,18 @@ impl<'a> OtaPacker<'a> {
             header.push_str(img.img_name).unwrap();
 
             header.push_str("\nimg_size=").unwrap();
-            header.push_str(&format!(32; "{}", img.data.len()).unwrap()).unwrap();
+            header
+                .push_str(&format!(32; "{}", img.data.len()).unwrap())
+                .unwrap();
 
             header.push_str("\nimg_md5=").unwrap();
             for i in img.img_md5 {
                 header.push_str(&format!(2; "{:02x}", i).unwrap()).unwrap();
             }
             header.push_str("\nimg_crc=").unwrap();
-            header.push_str(&format!(32; "{}", img.img_crc).unwrap()).unwrap();
+            header
+                .push_str(&format!(32; "{}", img.img_crc).unwrap())
+                .unwrap();
             header.push_str("\n\n").unwrap();
 
             hasher.digest(&img.data);
@@ -82,7 +86,9 @@ impl<'a> OtaPacker<'a> {
 
         header.push_str("check_img=1\n").unwrap();
         header.push_str("bs_size=").unwrap();
-        header.push_str(&format!(32; "{}", BLOCK_SIZE).unwrap()).unwrap();
+        header
+            .push_str(&format!(32; "{}", BLOCK_SIZE).unwrap())
+            .unwrap();
 
         let ota_img_packet_md5: [u8; 16] = hasher.finish().into();
         header.push_str("\nota_img_packet_md5=").unwrap();
