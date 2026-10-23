@@ -5,7 +5,7 @@ LIC_FILES_CHKSUM = "file://${COREBASE}/meta/files/common-licenses/MIT;md5=0835ad
 inherit allarch deploy
 
 PACKAGE_ARCH = "${MACHINE_ARCH}"
-PR = "r3"
+PR = "r4"
 
 SRC_URI += " \
     file://flash.py \

@@ -16,9 +16,12 @@ def _positive_int(value: str) -> int:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run exploit sequence via uploader.py")
+    p = argparse.ArgumentParser(description="Upload and flash c2aflash or OTA firmware via SSH")
     p.add_argument("--host", required=True, help="Target device IP/hostname")
-    p.add_argument("--fw", default="fw.bin", help="Local firmware file to upload")
+    firmware = p.add_mutually_exclusive_group()
+    firmware.add_argument("--fw", default="fw.bin", help="Local c2aflash firmware to upload")
+    firmware.add_argument("--ota", nargs="?", const="../v851s3-aic8800d80.c2aota", metavar="FILE",
+                          help="Flash OTA instead (default: ../v851s3-aic8800d80.c2aota)")
     p.add_argument("--online-timeout", type=_positive_int, default=60,
                    help="Timeout in seconds waiting for SSH before flashing (default: 60)")
     p.add_argument(
@@ -58,20 +61,24 @@ def main(argv: list[str] | None = None) -> int:
     rc = wait_for_online(args.host, args.online_timeout)
     if rc != 0:
         return rc
-    timestamp = int(time.time())
-    args.backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_path = args.backup_dir / f"backup_{timestamp}.bin"
-
-    pre_steps: list[list[str]] = [
-        ["--host", args.host, "--exec-cmd", "rm -rf /tmp/backup.bin"],
-        ["--host", args.host, "--exec-cmd", "carlinkit_otalib backup /tmp/backup.bin"],
-        ["--host", args.host, "--download", str(backup_path), "/tmp/backup.bin"],
-        ["--host", args.host, "--exec-cmd", "rm -rf /tmp/backup.bin"],
-    ]
+    pre_steps: list[list[str]] = []
+    # The legacy whole-flash backup does not support the V851 NAND layout.
+    if args.ota is None:
+        timestamp = int(time.time())
+        args.backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = args.backup_dir / f"backup_{timestamp}.bin"
+        pre_steps = [
+            ["--host", args.host, "--exec-cmd", "rm -rf /tmp/backup.bin"],
+            ["--host", args.host, "--exec-cmd", "carlinkit_otalib backup /tmp/backup.bin"],
+            ["--host", args.host, "--download", str(backup_path), "/tmp/backup.bin"],
+            ["--host", args.host, "--exec-cmd", "rm -rf /tmp/backup.bin"],
+        ]
+    command = "ota" if args.ota is not None else "flash"
+    firmware_path = args.ota if args.ota is not None else args.fw
     post_steps: list[list[str]] = [
-        ["--host", args.host, "/tmp/fw.bin", args.fw],
+        ["--host", args.host, "/tmp/fw.bin", firmware_path],
         ["--host", args.host, "--exec-cmd", "mount -o remount,ro /persist || exit 0"],
-        ["--host", args.host, "--exec-cmd", "carlinkit_otalib flash /tmp/fw.bin && (sleep 2 && reboot &)"],
+        ["--host", args.host, "--exec-cmd", f"carlinkit_otalib {command} /tmp/fw.bin && (sleep 2 && reboot &)"],
     ]
 
     for step in pre_steps:

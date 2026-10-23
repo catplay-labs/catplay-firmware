@@ -1,31 +1,35 @@
 #!/usr/bin/env python3
 """
-V821 FEL boot helper.
+Allwinner FEL boot helper.
 
 Python dependencies: pyusb, pylibfdt (imported as libfdt).
 
 Flow:
-  1) upload and start FES to initialize DRAM
+  1) initialize DRAM (V821 FES or V851 U-Boot SPL)
   2) optionally patch the DTB in memory with bootargs and linux,initrd-start/end
   3) upload OpenSBI, Linux Image, optional EROFS initrd, DTB and simpleboot
   4) start simpleboot through FEL
   5) monitor USB for gadget, Apple reset, or FEL return
 """
 
-# TODO: this is V821 only; ARM variants will need a specific cache flush procedure
 from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import libfdt
+try:
+    import libfdt
+except ImportError:  # V851 does not patch a DTB and needs no libfdt dependency.
+    libfdt = None
 import usb.core
 import usb.util
 
@@ -53,6 +57,11 @@ DEFAULT_DTB_ADDR = 0x80F00000
 
 DEFAULT_FES_ADDR = 0x02008000
 DEFAULT_FES_ENTRY = 0x02008000
+
+V851_FEL_SPL_ADDR = 0x00028000
+V851_FEL_EGON_MAX_SIZE = 0x18000
+V851_KERNEL_ADDR = 0x41000000
+V851_UBOOT_ADDR = 0x46000000
 
 DEFAULT_SIMPLEBOOT_ADDR = 0x02000000
 DEFAULT_SIMPLEBOOT_ENTRY = 0x020003C8
@@ -320,6 +329,7 @@ def set_dtb_addr_cells(tree: libfdt.Fdt, node: str, prop: str, addr: int) -> Non
 def wait_fel(
     timeout_s: float = 30.0,
     require_v821: bool = False,
+    require_v851: bool = False,
     stable_required: int = 1,
     usb_timeout_ms: int = USB_TIMEOUT_MS,
 ) -> tuple[SunxiFel, str]:
@@ -332,10 +342,11 @@ def wait_fel(
         try:
             fel.open()
             version = fel.version()
-            if require_v821 and "soc=00001882" not in version:
+            expected_soc = "00001882" if require_v821 else "00001886" if require_v851 else None
+            if expected_soc and f"soc={expected_soc}" not in version:
                 fel.close()
                 raise FelBootError(
-                    f"Unexpected SoC; required V821 ID 0x1882, got: {version}"
+                    f"Unexpected SoC; required {expected_soc}, got: {version}"
                 )
             stable += 1
             last_version = version
@@ -385,17 +396,23 @@ def first_matching_pid(ids: list[str], prefix: str) -> Optional[str]:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Boot V821 through Allwinner FEL: FES DRAM init -> simpleboot -> OpenSBI -> Linux"
+        description="Boot V821 or V851 through Allwinner FEL"
     )
-    p.add_argument("--fes", type=Path, required=True)
+    p.add_argument("--platform", choices=("v821", "v851"), default="v821")
+    p.add_argument("--fes", type=Path)
     p.add_argument("--fes-addr", type=parse_int, default=DEFAULT_FES_ADDR)
     p.add_argument("--fes-entry", type=parse_int, default=DEFAULT_FES_ENTRY)
     p.add_argument("--fes-wait-seconds", type=float, default=15)
-    p.add_argument("--opensbi", type=Path, required=True)
-    p.add_argument("--simpleboot", type=Path, required=True)
-    p.add_argument("--kernel", type=Path, required=True)
+    p.add_argument("--opensbi", type=Path)
+    p.add_argument("--simpleboot", type=Path)
+    p.add_argument("--kernel", type=Path)
     p.add_argument("--kernel-addr", type=parse_int, default=DEFAULT_KERNEL_ADDR)
-    p.add_argument("--dtb", type=Path, required=True)
+    p.add_argument("--dtb", type=Path)
+    p.add_argument("--fel-spl", type=Path, help="V851 FEL eGON that initializes DRAM")
+    p.add_argument("--u-boot", type=Path, help="V851 U-Boot proper image")
+    p.add_argument("--staging-egon", type=Path, help="V851 SPL eGON forced to read the NAND kernel")
+    p.add_argument("--staging", action="store_true", help="V851 staged SPL reads the kernel from NAND")
+    p.add_argument("--staging-proper", action="store_true", help="V851 U-Boot proper reads the kernel from NAND")
     p.add_argument("--erofs-initrd", type=Path)
     p.add_argument("--erofs-initrd-addr", type=parse_int)
     p.add_argument("--erofs-window-start", type=parse_int, default=DEFAULT_EROFS_WINDOW_START)
@@ -404,7 +421,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--extra-bootargs")
     p.add_argument("--monitor-seconds", type=int)
     p.add_argument("--skip-load-fes", action="store_true")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.platform == "v851":
+        if args.staging and args.staging_proper:
+            p.error("--staging and --staging-proper are mutually exclusive")
+        required = ("staging_egon",) if args.staging else ("fel_spl", "u_boot")
+        for name in required:
+            if getattr(args, name) is None:
+                p.error(f"--{name.replace('_', '-')} is required for V851")
+        if not args.staging and not args.staging_proper and args.kernel is None:
+            p.error("--kernel is required for V851 RAM boot")
+        if (args.staging or args.staging_proper) and args.kernel is not None:
+            p.error("--kernel cannot be combined with V851 staging")
+    else:
+        for name in ("fes", "opensbi", "simpleboot", "kernel", "dtb"):
+            if getattr(args, name) is None:
+                p.error(f"--{name.replace('_', '-')} is required for V821")
+        if (args.staging or args.staging_proper or args.fel_spl or args.u_boot or
+                args.staging_egon):
+            p.error("V851 options require --platform v851")
+    return args
 
 
 def prepare_dtb(args: argparse.Namespace) -> tuple[bytes, BootLayout]:
@@ -421,6 +457,9 @@ def prepare_dtb(args: argparse.Namespace) -> tuple[bytes, BootLayout]:
             args.erofs_initrd,
         ]
     )
+
+    if libfdt is None and needs_dtb_patch:
+        return prepare_dtb_with_cli(args, boot_dtb)
 
     if needs_dtb_patch:
         try:
@@ -472,6 +511,94 @@ def prepare_dtb(args: argparse.Namespace) -> tuple[bytes, BootLayout]:
         boot_dtb = bytes(tree.as_bytearray())
         print(f"[+] Bootargs: {bootargs}")
 
+    return boot_dtb, BootLayout(
+        opensbi_addr=DEFAULT_OPENSBI_ADDR,
+        kernel_addr=args.kernel_addr,
+        dtb_addr=DEFAULT_DTB_ADDR,
+        simpleboot_addr=DEFAULT_SIMPLEBOOT_ADDR,
+        simpleboot_entry=DEFAULT_SIMPLEBOOT_ENTRY,
+        erofs_addr=erofs_addr,
+        erofs_end=erofs_end,
+    )
+
+
+def prepare_dtb_with_cli(
+    args: argparse.Namespace, boot_dtb: bytes,
+) -> tuple[bytes, BootLayout]:
+    """Patch a DTB with the target's native device-tree CLI tools.
+    """
+    fdtget = shutil.which("fdtget")
+    fdtput = shutil.which("fdtput")
+    if not fdtget or not fdtput:
+        raise FelBootError(
+            "V821 DTB patching needs pylibfdt or both fdtget and fdtput"
+        )
+
+    erofs_addr: Optional[int] = args.erofs_initrd_addr
+    erofs_end: Optional[int] = None
+    with tempfile.NamedTemporaryFile(prefix="v821-dtb-", suffix=".dtb") as temp:
+        temp.write(boot_dtb)
+        temp.flush()
+        dtb_path = temp.name
+
+        try:
+            result = subprocess.run(
+                [fdtget, "-t", "s", dtb_path, "/chosen", "bootargs"],
+                check=True, capture_output=True, text=True,
+            )
+            bootargs = result.stdout.rstrip("\n")
+        except subprocess.CalledProcessError as error:
+            raise FelBootError(f"Failed to read /chosen/bootargs: {error}") from error
+
+        bootargs = append_arg(bootargs, args.extra_bootargs)
+        if args.erofs_initrd:
+            size = args.erofs_initrd.stat().st_size
+            if size % 4096:
+                raise FelBootError(
+                    f"EROFS initrd size must be 4096-byte aligned, got {size} B: {args.erofs_initrd}"
+                )
+            if erofs_addr is None:
+                erofs_addr = ((args.erofs_window_end - size) // 4096) * 4096
+                if erofs_addr < args.erofs_window_start:
+                    raise FelBootError("EROFS initrd does not fit in the default FEL window")
+            if erofs_addr % 4096:
+                raise FelBootError(f"EROFS initrd address is not page aligned: 0x{erofs_addr:08x}")
+            erofs_end = erofs_addr + size
+            if erofs_addr < RAM_BASE or erofs_end > RAM_END_EXCL:
+                raise FelBootError(
+                    f"EROFS initrd outside RAM: 0x{erofs_addr:08x}..0x{erofs_end:08x}"
+                )
+            bootargs = append_arg(bootargs, args.erofs_bootargs)
+
+        def put_string(prop: str, value: str) -> None:
+            subprocess.run(
+                [fdtput, "-t", "s", dtb_path, "/chosen", prop, value],
+                check=True, capture_output=True, text=True,
+            )
+
+        def put_addr(prop: str, value: int) -> None:
+            subprocess.run(
+                [fdtput, "-t", "x", dtb_path, "/chosen", prop,
+                 f"0x{value >> 32:08x}", f"0x{value & 0xffffffff:08x}"],
+                check=True, capture_output=True, text=True,
+            )
+
+        try:
+            put_string("bootargs", bootargs)
+            if erofs_addr is not None and erofs_end is not None:
+                put_addr("linux,initrd-start", erofs_addr)
+                put_addr("linux,initrd-end", erofs_end)
+        except subprocess.CalledProcessError as error:
+            raise FelBootError(f"Failed to patch DTB with fdtput: {error}") from error
+        boot_dtb = Path(dtb_path).read_bytes()
+
+    if args.erofs_initrd and erofs_addr is not None and erofs_end is not None:
+        print(
+            f"[+] EROFS initrd: {args.erofs_initrd.name} "
+            f"@ 0x{erofs_addr:08x}..0x{erofs_end:08x} "
+            f"({args.erofs_initrd.stat().st_size} B)"
+        )
+    print(f"[+] Bootargs: {bootargs}")
     return boot_dtb, BootLayout(
         opensbi_addr=DEFAULT_OPENSBI_ADDR,
         kernel_addr=args.kernel_addr,
@@ -587,11 +714,103 @@ def monitor_usb(args: argparse.Namespace, started: float) -> int:
     return 1
 
 
+def v851_write_with_retry(
+    fel: SunxiFel, addr: int, path: Path, *, retries: int = 8,
+) -> SunxiFel:
+    data = path.read_bytes()
+    for attempt in range(1, retries + 1):
+        try:
+            print(f"[*] FEL write {path.name} -> 0x{addr:08x} ({len(data)} B), attempt {attempt}/{retries}")
+            fel.write(addr, data)
+            return fel
+        except (FelBootError, usb.core.USBError) as error:
+            fel.close()
+            if attempt == retries:
+                raise FelBootError(f"FEL write of {path.name} failed after {retries} attempts: {error}") from error
+            print(f"[!] FEL I/O error while sending {path.name}; waiting for FEL and retrying: {error}")
+            fel, version = wait_fel(timeout_s=20.0, require_v851=True)
+            print(version)
+            time.sleep(0.25)
+    raise AssertionError("unreachable")
+
+
+def boot_v851(args: argparse.Namespace) -> int:
+    if args.staging:
+        assert args.staging_egon is not None
+        require_file(args.staging_egon, "V851 NAND staging eGON")
+        image = args.staging_egon.read_bytes()
+        if (len(image) < 96 or image[:4] != b"\x16\x00\x00\xea" or
+                image[4:12] != b"eGON.BT0" or len(image) > V851_FEL_EGON_MAX_SIZE or
+                len(image) % 512 or struct.unpack_from("<I", image, 16)[0] != len(image)):
+            raise FelBootError("V851 staging SPL is not a valid-sized eGON")
+        print("[*] Waiting for V851 FEL...")
+        fel, version = wait_fel(timeout_s=30.0, require_v851=True)
+        print(version)
+        fel = v851_write_with_retry(fel, V851_FEL_SPL_ADDR, args.staging_egon)
+        print(f"[*] FEL exec staged NAND SPL in place @ 0x{V851_FEL_SPL_ADDR:08x}")
+        try:
+            fel.execute(V851_FEL_SPL_ADDR)
+        except (FelBootError, usb.core.USBError):
+            pass
+        finally:
+            fel.close()
+        return monitor_usb(args, time.monotonic())
+    else:
+        assert args.u_boot is not None
+        require_file(args.u_boot, "V851 U-Boot proper")
+        if not args.staging_proper:
+            assert args.kernel is not None
+            require_file(args.kernel, "V851 uImage")
+    assert args.fel_spl is not None
+    require_file(args.fel_spl, "V851 SPL")
+    spl = args.fel_spl.read_bytes()
+    if (len(spl) < 96 or spl[:4] != b"\x16\x00\x00\xea" or
+            spl[4:12] != b"eGON.BT0" or len(spl) > V851_FEL_EGON_MAX_SIZE or
+            len(spl) % 512 or struct.unpack_from("<I", spl, 16)[0] != len(spl)):
+        raise FelBootError("V851 FEL SPL is not a valid-sized eGON")
+
+    print("[*] Waiting for V851 FEL...")
+    fel, version = wait_fel(timeout_s=30.0, require_v851=True)
+    print(version)
+    fel = v851_write_with_retry(fel, V851_FEL_SPL_ADDR, args.fel_spl)
+    spl_entry = V851_FEL_SPL_ADDR
+    print(f"[*] FEL exec V851 SPL in place @ 0x{spl_entry:08x} (DRAM init, return to FEL)")
+    try:
+        fel.execute(spl_entry)
+    except (FelBootError, usb.core.USBError):
+        # SPL may briefly disconnect the FEL endpoint while returning to BootROM.
+        pass
+    finally:
+        fel.close()
+
+    print("[*] Waiting for FEL after V851 DRAM initialization...")
+    fel, version = wait_fel(timeout_s=20.0, require_v851=True, stable_required=2)
+    print(f"{version}\n[+] V851 DRAM initialized; FEL returned.")
+
+    assert args.u_boot is not None
+    if args.kernel is not None:
+        fel = v851_write_with_retry(fel, V851_KERNEL_ADDR, args.kernel)
+    fel = v851_write_with_retry(fel, V851_UBOOT_ADDR, args.u_boot)
+    print(f"[*] FEL exec U-Boot proper directly @ 0x{V851_UBOOT_ADDR:08x}")
+    try:
+        fel.execute(V851_UBOOT_ADDR)
+    except (FelBootError, usb.core.USBError):
+        # Jumping to U-Boot intentionally drops the FEL USB connection.
+        pass
+    finally:
+        fel.close()
+    started = time.monotonic()
+    return monitor_usb(args, started)
+
+
 def main() -> int:
     args = parse_args()
     fel: Optional[SunxiFel] = None
 
     try:
+        if args.platform == "v851":
+            return boot_v851(args)
+
         for name, path in [
             ("OpenSBI", args.opensbi),
             ("kernel", args.kernel),
