@@ -8,6 +8,7 @@ use crate::{
         boot_radio::BootRadio,
         catplay::{CatPlay, CatplayConfig},
         hostapd::{Hostapd, HostapdConfigParams, P2P_ULTRA, match_hostapd_template},
+        persist_config::PersistConfig,
         recovery_gadget::RecoveryGadget,
         sysctl::apply_sysctl,
     },
@@ -63,11 +64,20 @@ impl BootUltra {
 
         let target = boot.target;
 
-        let ssid = "C2A_AP";
-        let ssid_p2p = "C2A_P2P";
-        let pass = "lovec@ts";
-        let channel = if Flash::is_ultra() { "48" } else { "36" };
-        let name = "CatDongle";
+        let mut persist_config = PersistConfig::default();
+        if target != BootTarget::Recovery {
+            if let Err(err) = mount_persist_with_fallback() {
+                dmesg!("[boot] Failed to mount /persist: {err}");
+            }
+            persist_config = PersistConfig::load();
+        }
+
+        let ssid = persist_config.wifi_ssid("_AP");
+        let ssid_p2p = persist_config.wifi_ssid("_P2P");
+        let pass = persist_config.wifi_password();
+        let default_channel = if Flash::is_ultra() { "48" } else { "36" };
+        let channel = persist_config.wifi_channel(default_channel);
+        let name = persist_config.bluetooth_name();
         let wlan0 = "wlan0";
         let p2p0 = "p2p0";
         let hci0 = "hci0";
@@ -170,34 +180,54 @@ impl BootUltra {
         }
 
         let mut recovery_gadget_started = false;
+        let g_iphone_params = if target == BootTarget::CatPlay {
+            Some(match boot.main_rs_name {
+                Some(rs_name) => format!(256; "udc_name={} device_name=default rs_name={}", boot.main_udc, rs_name),
+                None => format!(256; "udc_name={} device_name=default", boot.main_udc),
+            }.expect("g_iphone args too long"))
+        } else {
+            None
+        };
 
         if target == BootTarget::CatPlay {
             dmesg!("[boot] Loading g_iphone");
-            let g_iphone_params = match boot.main_rs_name {
-                Some(rs_name) => format!(256; "udc_name={} device_name=default rs_name={}", boot.main_udc, rs_name),
-                None => format!(256; "udc_name={} device_name=default", boot.main_udc),
-            }.expect("g_iphone args too long");
-            let _ = SystemUtil::modprobe_with_params("g_iphone", &g_iphone_params);
-            dmesg!("[boot] Loading g_iphone done");
+            if persist_config.g_iphone_start_delay.is_none() {
+                if let Some(params) = g_iphone_params.as_ref() {
+                    let _ = SystemUtil::modprobe_with_params("g_iphone", params);
+                }
+                dmesg!("[boot] Loading g_iphone done");
+            } else if let Some(delay) = persist_config.g_iphone_start_delay {
+                dmesg!("[boot] g_iphone load and CatPlay start deferred by {delay}s");
+            }
         } else if target == BootTarget::Recovery {
             dmesg!("[boot] Starting USB recovery gadget");
             RecoveryGadget::start_best_effort(boot.main_udc, boot.main_role_switch);
             recovery_gadget_started = true;
         }
 
-        if target != BootTarget::Recovery
-            && let Err(err) = mount_persist_with_fallback()
-        {
-            dmesg!("[boot] Failed to mount /persist: {err}");
-        }
-
         mount_persist_overlays();
 
         if target == BootTarget::CatPlay {
+            if persist_config.log_persist {
+                if SystemUtil::run_shell("cat /proc/kmsg >> /persist/dmesg.log 2>&1 &").is_err() {
+                    dmesg!("[boot] Failed to start persistent kernel log capture");
+                }
+                if SystemUtil::unlink_if_exists("/var/log/catplay.log").is_err()
+                    || SystemUtil::ensure_symlink("/persist/catplay.log", "/var/log/catplay.log")
+                        .is_err()
+                {
+                    dmesg!("[boot] Failed to redirect CatPlay log to /persist");
+                }
+            }
+
             let cfg = CatplayConfig {
                 // Would be better to check radio chip against p2p whitelist first
                 // but for now CatPlay forks too early to do that
-                ssid: if boot.p2p_catplay { ssid_p2p } else { ssid },
+                ssid: if boot.p2p_catplay {
+                    ssid_p2p.as_str()
+                } else {
+                    ssid.as_str()
+                },
                 wpa_passphrase: pass,
                 wlan_dev: if boot.p2p_catplay { p2p0 } else { wlan0 },
                 hci_dev: hci0,
@@ -209,7 +239,27 @@ impl BootUltra {
                 disable_gadget: false,
                 channel: Some(channel),
             };
-            if let Err(err) = CatPlay::start(&cfg) {
+            if let Some(delay) = persist_config.g_iphone_start_delay {
+                if let Some(_fork_guard) = SystemUtil::fork_guard() {
+                    SystemUtil::sleep(Duration::from_secs(delay as u64));
+                    if let Some(params) = g_iphone_params.as_ref() {
+                        let _ = SystemUtil::modprobe_with_params("g_iphone", params);
+                    }
+                    dmesg!("[boot] Delayed g_iphone load finished");
+                    if let Err(err) = CatPlay::start(
+                        &cfg,
+                        persist_config.rust_log_level.as_deref(),
+                        persist_config.catplay_tracing,
+                    ) {
+                        dmesg!("Failed to boot catplay, continuing anyway: {err}");
+                    }
+                    return;
+                }
+            } else if let Err(err) = CatPlay::start(
+                &cfg,
+                persist_config.rust_log_level.as_deref(),
+                persist_config.catplay_tracing,
+            ) {
                 dmesg!("Failed to boot catplay, continuing anyway: {err}");
             }
         }
@@ -237,7 +287,7 @@ impl BootUltra {
                     match Hostapd::start_p2p(
                         P2P_ULTRA,
                         &HostapdConfigParams {
-                            ssid: ssid_p2p,
+                            ssid: ssid_p2p.as_str(),
                             wpa_passphrase: pass,
                             channel_override: Some(channel),
                         },
@@ -265,7 +315,7 @@ impl BootUltra {
             && let Err(err) = Hostapd::start(
                 match_hostapd_template(radio),
                 &HostapdConfigParams {
-                    ssid,
+                    ssid: ssid.as_str(),
                     wpa_passphrase: pass,
                     channel_override: Some(channel),
                 },

@@ -37,6 +37,7 @@ SRC_URI += "\
     file://src/radio.rs \
     \
     file://src/boot/boot_persist.rs \
+    file://src/boot/persist_config.rs \
     file://src/boot/catplay/catplay_boot.rs \
     file://src/boot/catplay/catplay_formatter.rs \
     file://src/boot/catplay/mod.rs \

@@ -109,6 +109,96 @@ impl SystemUtil {
         }
     }
 
+    pub fn run_shell_with_env(
+        command: &str,
+        extra_env: &[(&str, &str)],
+    ) -> Result<(), &'static str> {
+        let mut cmd_c = CString::<256>::new();
+        if cmd_c.extend_from_bytes(command.as_bytes()).is_err() {
+            return Err("command too long");
+        }
+
+        let mut env_strings = Vec::<CString<256>, 16>::new();
+        for (key, value) in extra_env {
+            let mut entry = heapless::String::<256>::new();
+            entry
+                .push_str(key)
+                .map_err(|_| "environment variable too long")?;
+            entry
+                .push('=')
+                .map_err(|_| "environment variable too long")?;
+            entry
+                .push_str(value)
+                .map_err(|_| "environment variable too long")?;
+            let mut c_entry = CString::<256>::new();
+            c_entry
+                .extend_from_bytes(entry.as_bytes())
+                .map_err(|_| "environment variable too long")?;
+            env_strings
+                .push(c_entry)
+                .map_err(|_| "too many environment variables")?;
+        }
+
+        let shell = c"/bin/sh";
+        let dash_c = c"-c";
+        let path = c"PATH=/usr/sbin:/usr/bin:/sbin:/bin";
+        let home = c"HOME=/";
+        let mut envp = Vec::<*const libc::c_char, 18>::new();
+        envp.push(path.as_ptr())
+            .map_err(|_| "too many environment variables")?;
+        envp.push(home.as_ptr())
+            .map_err(|_| "too many environment variables")?;
+        for value in &env_strings {
+            envp.push(value.as_ptr())
+                .map_err(|_| "too many environment variables")?;
+        }
+        envp.push(core::ptr::null())
+            .map_err(|_| "too many environment variables")?;
+
+        unsafe {
+            let pid = libc::fork();
+            if pid < 0 {
+                return Err("fork failed");
+            }
+
+            if pid == 0 {
+                let devnull = c"/dev/null";
+                let fd = libc::open(devnull.as_ptr(), libc::O_RDWR);
+                if fd >= 0 {
+                    libc::dup2(fd, 0);
+                    libc::dup2(fd, 1);
+                    libc::dup2(fd, 2);
+                    if fd > 2 {
+                        libc::close(fd);
+                    }
+                }
+
+                let argv = [
+                    shell.as_ptr(),
+                    dash_c.as_ptr(),
+                    cmd_c.as_ptr(),
+                    core::ptr::null(),
+                ];
+                libc::execve(
+                    shell.as_ptr() as *const _,
+                    argv.as_ptr() as *const _,
+                    envp.as_ptr() as *const _,
+                );
+                libc::_exit(127);
+            }
+
+            let mut status: libc::c_int = 0;
+            if libc::waitpid(pid, &mut status, 0) < 0 {
+                return Err("waitpid failed");
+            }
+            if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+                Ok(())
+            } else {
+                Err("command failed")
+            }
+        }
+    }
+
     pub fn exec(path: &str, args: &[&str]) -> Result<(), &'static str> {
         let path_c = Self::to_cstring::<256>(path)?;
         let mut args_c = Vec::<CString<256>, 16>::new();
