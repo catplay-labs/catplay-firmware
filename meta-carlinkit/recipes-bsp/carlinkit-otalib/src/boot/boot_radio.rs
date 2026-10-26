@@ -71,7 +71,7 @@ impl BootRadio {
         if allow_early_bt_patching {
             // This only works if hci_uart is compiled as a module
             dmesg!("[boot] Starting modprobe hci_uart");
-            ModprobeUtil::modprobe("hci_uart")?;
+            ModprobeUtil::modprobe_with_params("hci_uart", "async_probe=1")?;
             dmesg!("[boot] Finished modprobe hci_uart");
         }
 
@@ -108,7 +108,8 @@ impl BootRadio {
 
         if !allow_early_bt_patching {
             dmesg!("[boot] Starting modprobe hci_uart");
-            ModprobeUtil::modprobe("hci_uart")?;
+            // Realtek H5 driver does msleep(100) and msleep(500); during this time we could already work on starting hostapd
+            ModprobeUtil::modprobe_with_params("hci_uart", "async_probe=1")?;
             dmesg!("[boot] Finished modprobe hci_uart");
         }
 
