@@ -1,0 +1,125 @@
+Subject: [PATCH] ram: sunxi: follow V85x boot0 remapping and pad-hold policy
+Upstream-Status: Inappropriate [CatPlay V85x board port]
+
+Apply after CatPlay's 0002-v851s-dram-parameters.patch. Preserve the existing
+D1 path, including any local force-table experiment, as the legacy path;
+V85x dispatches to a separate implementation before that path is entered.
+
+The supplied V851S/V0.17 image (SHA256 ba90b84800540924...) and V553/V0.19
+image (SHA256 356144bc80a87455...) select standard/SiP DDR3 tables using
+TPR13[18]. TPR13[19] suppresses normal writes. Both finish normal
+programming with a REMAP0 | 1 write. Neither AC function reads SID. V0.19 adds a fixed
+TPR13[24] override that also runs when bit 19 is set.
+
+Also use TPR13[26], not [16], for PGCR2[13] on V85x. This policy is shared
+by both blobs; do not couple pad hold to the independent ZQ/VREF selector.
+Keep the former bit-16 policy for other SoCs.
+
+Do not change PLL, DTCR, ZQ, clocks or parameter defaults here. PLL and
+channel initialization are identical in the two supplied blobs apart
+from relocated call/literal addresses. A variant-specific PLL failure
+has not been demonstrated.
+
+Validated against instruction-replayed MMIO writes; not hardware-tested.
+---
+diff --git a/drivers/ram/sunxi/dram_sun20i_d1.c b/drivers/ram/sunxi/dram_sun20i_d1.c
+--- a/drivers/ram/sunxi/dram_sun20i_d1.c
++++ b/drivers/ram/sunxi/dram_sun20i_d1.c
+@@ -691,7 +691,7 @@
+  * It is unclear which lines are being remapped. It seems to pick
+  * table cfg7 for the Nezha board.
+  */
+-static void mctl_phy_ac_remapping(struct dram_para *para)
++static void mctl_phy_ac_remapping_legacy(struct dram_para *para)
+ {
+ 	struct sunxi_mctl_com_reg * const mctl_com =
+ 			(struct sunxi_mctl_com_reg *)SUNXI_DRAM_COM_BASE;
+@@ -752,6 +752,76 @@
+ 	writel(val, &mctl_com->remap3);
+ }
+ 
++/*
++ * V85x boot0 uses TPR13, not the D1 SID selector. The two tables occur in
++ * both DRAM V0.17 and V0.19. V0.19 additionally supports the bit-24 override.
++ */
++static void mctl_phy_ac_remapping(struct dram_para *para)
++{
++	static const uint8_t sun8iw21_ac_remapping_tables[][22] = {
++		/* V853 DDR3: boot0 offsets 0x8f6c / 0x921c. */
++		{
++			 5, 19,  4, 15, 12,  3, 13, 14,  1, 10, 22,
++			20, 17, 16,  6,  8,  7,  9, 21,  2, 11, 18,
++		},
++		/* SiP: boot0 offsets 0x8f82 / 0x9232. */
++		{
++			19,  4, 18,  2,  6,  3,  5,  7, 12,  8, 13,
++			10,  9,  0,  0,  0, 22,  1, 11, 17, 21, 20,
++		},
++	};
++	struct sunxi_mctl_com_reg * const mctl_com =
++			(struct sunxi_mctl_com_reg *)SUNXI_DRAM_COM_BASE;
++	const uint8_t *cfg;
++	u32 remap0, val;
++
++	if (!IS_ENABLED(CONFIG_MACH_SUN8I_V851S)) {
++		mctl_phy_ac_remapping_legacy(para);
++		return;
++	}
++
++	/* Vendor V85x only programs these mappings for DDR3. */
++	if (para->type != SUNXI_DRAM_TYPE_DDR3)
++		return;
++
++	/* Bit 19 leaves the existing register state untouched, not zeroed. */
++	if (!(para->tpr13 & BIT(19))) {
++		cfg = sun8iw21_ac_remapping_tables[!!(para->tpr13 & BIT(18))];
++
++		remap0 = (cfg[4] << 25) | (cfg[3] << 20) |
++			 (cfg[2] << 15) | (cfg[1] << 10) | (cfg[0] << 5);
++		writel(remap0, &mctl_com->remap0);
++
++		val = (cfg[10] << 25) | (cfg[9] << 20) | (cfg[8] << 15) |
++		      (cfg[7] << 10) | (cfg[6] << 5) | cfg[5];
++		writel(val, &mctl_com->remap1);
++
++		val = (cfg[15] << 20) | (cfg[14] << 15) | (cfg[13] << 10) |
++		      (cfg[12] << 5) | cfg[11];
++		writel(val, &mctl_com->remap2);
++
++		val = (cfg[21] << 25) | (cfg[20] << 20) | (cfg[19] << 15) |
++		      (cfg[18] << 10) | (cfg[17] << 5) | cfg[16];
++		writel(val, &mctl_com->remap3);
++
++		/* Enable only after all four registers have been programmed. */
++		writel(remap0 | BIT(0), &mctl_com->remap0);
++	}
++
++	/*
++	 * V0.19 fixed override, after the normal mapping, even with bit 19
++	 * set. Neither supplied boot0 parameter set enables this option.
++	 * Do not infer a DRAM manufacturer or an SID value from it.
++	 */
++	if (para->tpr13 & BIT(24)) {
++		writel(0x00668480, &mctl_com->remap0);
++		writel(0x00038043, &mctl_com->remap1);
++		writel(0x000025c0, &mctl_com->remap2);
++		writel(0x00000000, &mctl_com->remap3);
++		writel(0x00668481, &mctl_com->remap0);
++	}
++}
++
+ // Init the controller channel. The key part is placing commands in the main
+ // command register (PIR, 0x3103000) and checking command status (PGSR0, 0x3103010).
+ //
+@@ -1350,8 +1420,9 @@
+ 	if (para->tpr13 & BIT(8))
+ 		writel(readl(&mctl_phy->vtfcr) | 0x300, &mctl_phy->vtfcr);
+ 
+-	/* Set PAD Hold */
+-	if (para->tpr13 & BIT(16))
++	/* V85x boot0 uses TPR13[26] for PGCR2[13], independently of ZQ. */
++	rc = IS_ENABLED(CONFIG_MACH_SUN8I_V851S) ? BIT(26) : BIT(16);
++	if (para->tpr13 & rc)
+ 		clrbits_le32(&mctl_phy->pgcr2, BIT(13));
+ 	else
+ 		setbits_le32(&mctl_phy->pgcr2, BIT(13));

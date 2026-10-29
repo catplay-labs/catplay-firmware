@@ -21,6 +21,7 @@ SRC_URI:append:v851s = " \
     file://spi/0006-spi-sunxi-add-programmable-sampling.patch \
     file://spi/0007-spi-sunxi-add-sun20i-d1-variant.patch \
     file://dram/0002-v851s-dram-parameters.patch \
+    file://dram/0021-ram-sunxi-follow-V85x-boot0-remapping-and-pad-hold-policy.patch \
     file://nand/0003-v851s-gigadevice-clone.patch \
     file://fel/0004-sunxi-fel-preserve-r4.patch \
     file://spl/0004-sunxi-spinand-boot-device.patch \
