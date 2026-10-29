@@ -8,10 +8,10 @@ SPI memory request, then mask and drain interrupts and synchronize the IRQ
 before disabling the clocks. Briefly enable the clocks for sampling updates
 which access controller registers as well.
 ---
- drivers/spi/Kconfig          |   9 +
+ drivers/spi/Kconfig          |  10 +
  drivers/spi/Makefile         |   1 +
- drivers/spi/spi-sunxi-spif.c | 1015 +++++++++++++++++++++++++++++++++++
- 3 files changed, 1025 insertions(+)
+ drivers/spi/spi-sunxi-spif.c | 1022 +++++++++++++++++++++++++++++++++++
+ 3 files changed, 1033 insertions(+)
  create mode 100644 drivers/spi/spi-sunxi-spif.c
 
 diff --git a/drivers/spi/Kconfig b/drivers/spi/Kconfig
@@ -52,7 +52,7 @@ new file mode 100644
 index 000000000000..127efa738bb5
 --- /dev/null
 +++ b/drivers/spi/spi-sunxi-spif.c
-@@ -0,0 +1,1015 @@
+@@ -0,0 +1,1022 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Allwinner dedicated SPI flash controller
@@ -107,6 +107,8 @@ index 000000000000..127efa738bb5
 +
 +#define SPIF_GC_CFG_MODE		BIT(0)
 +#define SPIF_GC_NMODE_EN		BIT(2)
++#define SPIF_GC_CPHA			BIT(4)
++#define SPIF_GC_CPOL			BIT(5)
 +#define SPIF_GC_CS_POL			BIT(8)
 +#define SPIF_GC_DQS_RX_EN		BIT(10)
 +#define SPIF_GC_HOLD_EN			BIT(13)
@@ -559,6 +561,11 @@ index 000000000000..127efa738bb5
 +		val &= ~SPIF_TC_SCKOUT_SRC_SEL;
 +	writel(val, spif->base + SPIF_TC_REG);
 +	val = readl(spif->base + SPIF_GC_REG);
++	val &= ~SPIF_GC_MODE_MASK;
++	if (mem->spi->mode & SPI_CPHA)
++		val |= SPIF_GC_CPHA;
++	if (mem->spi->mode & SPI_CPOL)
++		val |= SPIF_GC_CPOL;
 +	/* NAND Quad DTR reads keep the command phase in SDR. */
 +	if (dtr)
 +		val |= SPIF_GC_DTR_EN;
@@ -1028,7 +1035,7 @@ index 000000000000..127efa738bb5
 +
 +	ctlr->mem_ops = &sunxi_spif_mem_ops;
 +	ctlr->mem_caps = &sunxi_spif_mem_caps;
-+	ctlr->mode_bits = SPI_RX_DUAL | SPI_RX_QUAD |
++	ctlr->mode_bits = SPI_CPOL | SPI_CPHA | SPI_RX_DUAL | SPI_RX_QUAD |
 +			  SPI_TX_DUAL | SPI_TX_QUAD;
 +	/* The SPIF hardware has a global DTR mode bit (GC[16]). */
 +	ctlr->dtr_caps = true;
