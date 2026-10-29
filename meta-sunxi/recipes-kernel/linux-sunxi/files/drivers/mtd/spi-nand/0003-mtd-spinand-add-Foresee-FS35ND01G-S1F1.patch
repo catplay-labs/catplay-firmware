@@ -1,0 +1,57 @@
+Subject: [PATCH] mtd: spinand: add Foresee FS35ND01G-S1F1 support
+
+Add the CD:B1 part with 128 MiB capacity, 2 KiB pages and 64-byte OOB.
+Support single/dual/quad SDR reads, Quad program load and random load,
+and the configuration register's Quad Enable bit.
+
+Use the part's three-bit ECC status field and four-bit correction
+strength per 512 bytes. Report the correction strength as an upper
+bound for nonzero correctable codes and reject invalid/error codes.
+Reuse the Foresee OOB layout reserving two bytes for bad-block markers.
+
+Link: https://github.com/rockchip-linux/kernel/blob/develop-4.19/drivers/rkflash/sfc_nand.c
+Link: https://github.com/lindenis-org/lindenis-v853-lichee-linux-4.9/blob/master/drivers/mtd/awnand/spinand/physic/id.c
+Link: https://github.com/lindenis-org/lindenis-v853-lichee-linux-4.9/blob/master/drivers/mtd/awnand/spinand/physic/ecc.c
+
+Upstream-Status: Pending
+
+--- a/drivers/mtd/nand/spi/foresee.c
++++ b/drivers/mtd/nand/spi/foresee.c
+@@ -94,7 +94,37 @@
+ 	return -EINVAL;
+ }
+ 
++/* FS35ND01G-S1F1 uses a three-bit ECC field, unlike F35SQA001G. */
++static int fs35nd01g_s1f1_ecc_get_status(struct spinand_device *spinand,
++				      u8 status)
++{
++	u8 ecc = (status >> 4) & 0x7;
++
++	if (!ecc)
++		return 0;
++
++	/*
++	 * Both vendor BSPs accept codes 1-4. Without a documented exact
++	 * bitflip count, report the correction strength as an upper bound.
++	 * Codes 5/6 are not accepted by either BSP; 7 is uncorrectable.
++	 */
++	if (ecc <= 4)
++		return nanddev_get_ecc_conf(spinand_to_nand(spinand))->strength;
++
++	return -EBADMSG;
++}
++
+ static const struct spinand_info foresee_spinand_table[] = {
++	SPINAND_INFO("FS35ND01G-S1F1",
++		     SPINAND_ID(SPINAND_READID_METHOD_OPCODE_DUMMY, 0xb1),
++		     NAND_MEMORG(1, 2048, 64, 64, 1024, 20, 1, 1, 1),
++		     NAND_ECCREQ(4, 512),
++		     SPINAND_INFO_OP_VARIANTS(&read_cache_variants,
++					      &write_cache_variants,
++					      &update_cache_variants),
++		     SPINAND_HAS_QE_BIT,
++		     SPINAND_ECCINFO(&f35sqa002g_ooblayout,
++				     fs35nd01g_s1f1_ecc_get_status)),
+ 	SPINAND_INFO("F35SQA002G",
+ 		     SPINAND_ID(SPINAND_READID_METHOD_OPCODE_DUMMY, 0x72, 0x72),
+ 		     NAND_MEMORG(1, 2048, 64, 64, 2048, 40, 1, 1, 1),
