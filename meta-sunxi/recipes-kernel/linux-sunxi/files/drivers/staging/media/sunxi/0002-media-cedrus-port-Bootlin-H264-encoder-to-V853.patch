@@ -57,7 +57,7 @@ diff --git a/drivers/staging/media/sunxi/cedrus/Makefile b/drivers/staging/media
 diff --git a/drivers/staging/media/sunxi/cedrus/cedrus.c b/drivers/staging/media/sunxi/cedrus/cedrus.c
 --- a/drivers/staging/media/sunxi/cedrus/cedrus.c
 +++ b/drivers/staging/media/sunxi/cedrus/cedrus.c
-@@ -1,334 +1,48 @@
+@@ -1,336 +1,48 @@
  // SPDX-License-Identifier: GPL-2.0
  /*
 - * Cedrus VPU driver
@@ -359,8 +359,10 @@ diff --git a/drivers/staging/media/sunxi/cedrus/cedrus.c b/drivers/staging/media
 -	ctrl_size = sizeof(ctrl) * CEDRUS_CONTROLS_COUNT + 1;
 -
 -	ctx->ctrls = kzalloc(ctrl_size, GFP_KERNEL);
--	if (!ctx->ctrls)
+-	if (!ctx->ctrls) {
+-		v4l2_ctrl_handler_free(hdl);
 -		return -ENOMEM;
+-	}
 -
 -	j = 0;
 -	for (i = 0; i < CEDRUS_CONTROLS_COUNT; i++) {
@@ -419,7 +421,7 @@ diff --git a/drivers/staging/media/sunxi/cedrus/cedrus.c b/drivers/staging/media
  			break;
  		}
  	}
-@@ -336,399 +50,592 @@
+@@ -338,399 +50,592 @@
  	if (!ctx)
  		return -ENOENT;
  
