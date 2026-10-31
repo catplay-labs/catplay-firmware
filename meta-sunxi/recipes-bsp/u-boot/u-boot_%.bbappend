@@ -35,7 +35,6 @@ SRC_URI:append:v851s = " \
     file://nand/0013-spinand-spl-nodm-poc.patch \
     file://spl/0014-sunxi-spinand-spl-loader.patch \
     file://spl/0015-v851s-fel-spinand-linux-stage.patch \
-    file://v851s/0016-v851s-spl-cpu-pll-888mhz.patch \
     file://spl/0017-spl-zlib-o3.patch \
     file://spl/0018-v851s-spl-dcache-poc.patch \
     file://spl/0019-spl-fit-verify-image-hashes.patch \
