@@ -71,6 +71,13 @@ DTC_BFLAGS ?= "-p ${DT_PADDING_SIZE} -@"
 DTC_OFLAGS ?= "-p 0 -@ -H epapr"
 
 python () {
+    # Register indirect dependencies before BitBake computes task signatures.
+    # Adding vardeps inside build_ppflags() is too late: the task is running.
+    vardeps = ["DTC_PPFLAGS", "C2A_DTC_STRINGS", "C2A_DTC_INTS"]
+    for var in ("C2A_DTC_STRINGS", "C2A_DTC_INTS"):
+        vardeps.extend((d.getVar(var) or "").split())
+    d.appendVarFlag("do_compile", "vardeps", " " + " ".join(vardeps))
+
     if d.getVar("KERNEL_INCLUDE"):
         # auto add dependency on kernel tree, but only if kernel include paths
         # are specified.
@@ -98,19 +105,14 @@ def devicetree_source_is_overlay(path):
 def build_ppflags(d):
     ppflags = (d.getVar("DTC_PPFLAGS") or "").split()
 
-    vardeps = []
     for k in (d.getVar("C2A_DTC_STRINGS") or "").split():
         val = d.getVar(k)
         if val:
             ppflags.append(f"-D{k}=\"{val}\" ")
-        vardeps.append(k)
     for k in (d.getVar("C2A_DTC_INTS") or "").split():
         val = d.getVar(k)
         if val:
             ppflags.append(f"-D{k}={val}")
-        vardeps.append(k)
-
-    d.appendVarFlag("do_compile", "vardeps", " DTC_PPFLAGS C2A_DTC_STRINGS C2A_DTC_INTS " + " ".join(vardeps))
     bb.warn(f"Using DTC_PPFLAGS: {ppflags}")
     return ppflags
 
