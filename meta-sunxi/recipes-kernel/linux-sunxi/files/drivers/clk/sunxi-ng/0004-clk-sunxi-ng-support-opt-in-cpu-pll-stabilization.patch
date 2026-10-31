@@ -1,0 +1,65 @@
+Subject: [PATCH] clk: sunxi-ng: support opt-in CPU PLL stabilization
+
+Upstream-Status: Pending
+
+Introduce the Allwinner CLK_CPU_CHANGE_STABLE clock flag and implement
+its vendor 4.9 semantics in the sunxi mux notifier: sleep for at least
+3 ms while the CPU remains on bypass, before restoring the parent.
+Expose the helper for drivers with combined PLL and CPU notifiers.
+Unflagged clocks retain their existing delay and parent sequence.
+Keep this sleep out of atomic enable callbacks and register locks.
+
+diff --git a/include/linux/clk-provider.h b/include/linux/clk-provider.h
+--- a/include/linux/clk-provider.h
++++ b/include/linux/clk-provider.h
+@@ -32,6 +32,8 @@
+ #define CLK_OPS_PARENT_ENABLE	BIT(12)
+ /* duty cycle call may be forwarded to the parent clock */
+ #define CLK_DUTY_CYCLE_PARENT	BIT(13)
++/* CPU requires PLL stabilization before returning from a rate-change bypass. */
++#define CLK_CPU_CHANGE_STABLE	BIT(22)
+ 
+ struct clk;
+ struct clk_hw;
+diff --git a/drivers/clk/sunxi-ng/ccu_mux.h b/drivers/clk/sunxi-ng/ccu_mux.h
+--- a/drivers/clk/sunxi-ng/ccu_mux.h
++++ b/drivers/clk/sunxi-ng/ccu_mux.h
+@@ -147,6 +147,8 @@
+ 			      struct ccu_mux_internal *cm,
+ 			      u8 index);
+ 
++void ccu_mux_helper_wait_for_stable(struct ccu_common *common);
++
+ struct ccu_mux_nb {
+ 	struct notifier_block	clk_nb;
+ 	struct ccu_common	*common;
+diff --git a/drivers/clk/sunxi-ng/ccu_mux.c b/drivers/clk/sunxi-ng/ccu_mux.c
+--- a/drivers/clk/sunxi-ng/ccu_mux.c
++++ b/drivers/clk/sunxi-ng/ccu_mux.c
+@@ -286,6 +286,18 @@
+ EXPORT_SYMBOL_NS_GPL(ccu_mux_ops, "SUNXI_CCU");
+ 
+ /*
++ * The CPU stays on its bypass while the new PLL output settles. Call only
++ * from sleepable rate-change notifiers, never from clock enable callbacks
++ * or while holding the CCU register spinlock.
++ */
++void ccu_mux_helper_wait_for_stable(struct ccu_common *common)
++{
++	if (clk_hw_get_flags(&common->hw) & CLK_CPU_CHANGE_STABLE)
++		msleep(3);
++}
++EXPORT_SYMBOL_NS_GPL(ccu_mux_helper_wait_for_stable, "SUNXI_CCU");
++
++/*
+  * This clock notifier is called when the frequency of the of the parent
+  * PLL clock is to be changed. The idea is to switch the parent to a
+  * stable clock, such as the main oscillator, while the PLL frequency
+@@ -303,6 +315,7 @@
+ 		ret = ccu_mux_helper_set_parent(mux->common, mux->cm,
+ 						mux->bypass_index);
+ 	} else if (event == POST_RATE_CHANGE) {
++		ccu_mux_helper_wait_for_stable(mux->common);
+ 		ret = ccu_mux_helper_set_parent(mux->common, mux->cm,
+ 						mux->original_index);
+ 	}

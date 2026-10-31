@@ -2,12 +2,15 @@ Date: Wed, 12 Aug 2026 10:10:02 +0200
 Subject: [PATCH] clk: sunxi-ng: backport vendor ccu_nm PLL extensions
 
 Upstream-Status: Pending
+
+Preserve the atomic CCF enable path for legacy PLLs without a separate
+output gate. Keep the V821 LDO and consecutive stable-LOCK sequence.
 ---
  drivers/clk/sunxi-ng/ccu_gate.c |  12 ++++
  drivers/clk/sunxi-ng/ccu_gate.h |   2 +
- drivers/clk/sunxi-ng/ccu_nm.c   | 115 ++++++++++++++++++++++++++++----
+ drivers/clk/sunxi-ng/ccu_nm.c   | 119 ++++++++++++++++++++++++++++----
  drivers/clk/sunxi-ng/ccu_nm.h   |   4 ++
- 4 files changed, 119 insertions(+), 14 deletions(-)
+ 4 files changed, 123 insertions(+), 14 deletions(-)
 
 diff --git a/drivers/clk/sunxi-ng/ccu_gate.c b/drivers/clk/sunxi-ng/ccu_gate.c
 index 30673fe4e3c2..36f6f1714e4b 100644
@@ -119,7 +122,7 @@ index df01ed3b37a6..f0665109779a 100644
  
  			if (ccu_is_better_rate(common, rate, tmp_rate, best_rate)) {
  				best_rate = tmp_rate;
-@@ -57,14 +99,32 @@ static void ccu_nm_disable(struct clk_hw *hw)
+@@ -57,14 +99,36 @@ static void ccu_nm_disable(struct clk_hw *hw)
  {
  	struct ccu_nm *nm = hw_to_ccu_nm(hw);
  
@@ -134,6 +137,10 @@ index df01ed3b37a6..f0665109779a 100644
  {
  	struct ccu_nm *nm = hw_to_ccu_nm(hw);
 +	u32 reg;
++
++	/* Legacy PLLs have no separate output gate; keep enable atomic. */
++	if (!nm->output)
++		return ccu_gate_helper_enable(&nm->common, nm->enable);
 +
 +	if (nm->output && nm->ldo_en) {
 +		reg = readl(nm->common.base + nm->common.reg);
@@ -154,7 +161,7 @@ index df01ed3b37a6..f0665109779a 100644
  }
  
  static int ccu_nm_is_enabled(struct clk_hw *hw)
-@@ -78,15 +138,18 @@ static unsigned long ccu_nm_recalc_rate(struct clk_hw *hw,
+@@ -78,15 +142,18 @@ static unsigned long ccu_nm_recalc_rate(struct clk_hw *hw,
  					unsigned long parent_rate)
  {
  	struct ccu_nm *nm = hw_to_ccu_nm(hw);
@@ -175,7 +182,7 @@ index df01ed3b37a6..f0665109779a 100644
  
  		return rate;
  	}
-@@ -110,8 +173,11 @@ static unsigned long ccu_nm_recalc_rate(struct clk_hw *hw,
+@@ -110,8 +177,11 @@ static unsigned long ccu_nm_recalc_rate(struct clk_hw *hw,
  	else
  		rate = ccu_nm_calc_rate(parent_rate, n, m);
  
@@ -188,7 +195,7 @@ index df01ed3b37a6..f0665109779a 100644
  
  	return rate;
  }
-@@ -124,11 +190,15 @@ static int ccu_nm_determine_rate(struct clk_hw *hw,
+@@ -124,11 +194,15 @@ static int ccu_nm_determine_rate(struct clk_hw *hw,
  
  	if (nm->common.features & CCU_FEATURE_FIXED_POSTDIV)
  		req->rate *= nm->fixed_post_div;
@@ -204,7 +211,7 @@ index df01ed3b37a6..f0665109779a 100644
  		return 0;
  	}
  
-@@ -136,18 +206,24 @@ static int ccu_nm_determine_rate(struct clk_hw *hw,
+@@ -136,18 +210,24 @@ static int ccu_nm_determine_rate(struct clk_hw *hw,
  		req->rate = nm->max_rate;
  		if (nm->common.features & CCU_FEATURE_FIXED_POSTDIV)
  			req->rate /= nm->fixed_post_div;
@@ -229,7 +236,7 @@ index df01ed3b37a6..f0665109779a 100644
  		return 0;
  	}
  
-@@ -161,6 +237,8 @@ static int ccu_nm_determine_rate(struct clk_hw *hw,
+@@ -161,6 +241,8 @@ static int ccu_nm_determine_rate(struct clk_hw *hw,
  
  	if (nm->common.features & CCU_FEATURE_FIXED_POSTDIV)
  		req->rate /= nm->fixed_post_div;
@@ -238,7 +245,7 @@ index df01ed3b37a6..f0665109779a 100644
  
  	return 0;
  }
-@@ -176,6 +254,8 @@ static int ccu_nm_set_rate(struct clk_hw *hw, unsigned long rate,
+@@ -176,6 +258,8 @@ static int ccu_nm_set_rate(struct clk_hw *hw, unsigned long rate,
  	/* Adjust target rate according to post-dividers */
  	if (nm->common.features & CCU_FEATURE_FIXED_POSTDIV)
  		rate = rate * nm->fixed_post_div;
@@ -247,7 +254,7 @@ index df01ed3b37a6..f0665109779a 100644
  
  	if (ccu_frac_helper_has_rate(&nm->common, &nm->frac, rate)) {
  		spin_lock_irqsave(nm->common.lock, flags);
-@@ -211,19 +291,26 @@ static int ccu_nm_set_rate(struct clk_hw *hw, unsigned long rate,
+@@ -211,19 +295,26 @@ static int ccu_nm_set_rate(struct clk_hw *hw, unsigned long rate,
  		ccu_nm_find_best(&nm->common, parent_rate, rate, &_nm);
  	}
  

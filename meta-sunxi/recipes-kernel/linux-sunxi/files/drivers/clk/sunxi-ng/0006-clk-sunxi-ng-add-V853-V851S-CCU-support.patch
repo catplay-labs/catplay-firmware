@@ -1,5 +1,11 @@
-Subject: [PATCH] ARM: sunxi: add V851S/V853 clk support
+Subject: [PATCH] clk: sunxi-ng: add V851S/V853 CCU support
 Upstream-Status: Pending
+
+Register the V851S/V853 clocks and CPU transition notifier. Pin the
+peripheral bypass while programming PLL_CPU, reset its output, wait
+for LOCK, honor CLK_CPU_CHANGE_STABLE before restoring the CPU parent,
+and recheck LOCK. Preserve abort handling and leave CPU on bypass if
+the PLL cannot be safely restored.
 
 diff -ruN a/drivers/clk/sunxi-ng/Kconfig b/drivers/clk/sunxi-ng/Kconfig
 --- a/drivers/clk/sunxi-ng/Kconfig	2026-10-06 22:28:21
@@ -184,10 +190,11 @@ diff -ruN a/drivers/clk/sunxi-ng/ccu-sun8i-v853-r.h b/drivers/clk/sunxi-ng/ccu-s
 +#define CLK_NUMBER		(CLK_BUS_R_CPUCFG + 1)
 +
 +#endif
-diff -ruN a/drivers/clk/sunxi-ng/ccu-sun8i-v853.c b/drivers/clk/sunxi-ng/ccu-sun8i-v853.c
---- a/drivers/clk/sunxi-ng/ccu-sun8i-v853.c	1969-12-31 19:00:00
-+++ b/drivers/clk/sunxi-ng/ccu-sun8i-v853.c	2026-10-06 22:28:21
-@@ -0,0 +1,1146 @@
+diff --git a/drivers/clk/sunxi-ng/ccu-sun8i-v853.c b/drivers/clk/sunxi-ng/ccu-sun8i-v853.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/clk/sunxi-ng/ccu-sun8i-v853.c
+@@ -0,0 +1,1296 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Copyright (C) 2025 Andras Szemzo <szemzo.andras@gmail.com>
@@ -195,8 +202,11 @@ diff -ruN a/drivers/clk/sunxi-ng/ccu-sun8i-v853.c b/drivers/clk/sunxi-ng/ccu-sun
 + * Based on ccu-sun20i-d1.c by Samuel Holland.
 + */
 +
++#include <linux/clk.h>
 +#include <linux/clk-provider.h>
++#include <linux/delay.h>
 +#include <linux/io.h>
++#include <linux/iopoll.h>
 +#include <linux/module.h>
 +#include <linux/platform_device.h>
 +
@@ -234,7 +244,7 @@ diff -ruN a/drivers/clk/sunxi-ng/ccu-sun8i-v853.c b/drivers/clk/sunxi-ng/ccu-sun
 +		.reg		= 0x000,
 +		.hw.init	= CLK_HW_INIT_PARENTS_DATA("pll-cpu", osc24M,
 +							   &ccu_mult_ops,
-+							   CLK_SET_RATE_GATE),
++							   CLK_SET_RATE_UNGATE),
 +	},
 +};
 +
@@ -421,8 +431,18 @@ diff -ruN a/drivers/clk/sunxi-ng/ccu-sun8i-v853.c b/drivers/clk/sunxi-ng/ccu-sun
 + * There is a P factor (PLL_OUT_EXT_DIVP[17:16]) in this register, but it is not modeled.
 + * The manual states that it should be used only, when the output clock is less than 288 MHz.
 + */
-+static SUNXI_CCU_MUX_DATA(cpu_clk, "cpu", cpu_parents,
-+			  0x500, 24, 3, CLK_SET_RATE_PARENT | CLK_IS_CRITICAL);
++static const struct clk_ops sun8i_v853_cpu_mux_ops;
++
++static struct ccu_mux cpu_clk = {
++	.mux = { .shift = 24, .width = 3 },
++	.common = {
++		.reg = 0x500,
++		.hw.init = CLK_HW_INIT_PARENTS_DATA("cpu", cpu_parents,
++						  &sun8i_v853_cpu_mux_ops,
++						  CLK_SET_RATE_PARENT | CLK_IS_CRITICAL |
++						  CLK_CPU_CHANGE_STABLE),
++	},
++};
 +
 +static const struct clk_hw *cpu_hws[] = { &cpu_clk.common.hw };
 +
@@ -1272,6 +1292,133 @@ diff -ruN a/drivers/clk/sunxi-ng/ccu-sun8i-v853.c b/drivers/clk/sunxi-ng/ccu-sun
 +	SUN8I_V853_PLL_NPU_REG,
 +};
 +
++struct sun8i_v853_cpu_pll_transition {
++	struct notifier_block nb;
++	struct clk *bypass;
++	u8 original_parent;
++	bool bypassed;
++	bool failed;
++};
++
++static struct sun8i_v853_cpu_pll_transition cpu_pll_transition;
++
++static u8 sun8i_v853_cpu_get_parent(struct clk_hw *hw)
++{
++	return ccu_mux_helper_get_parent(&cpu_clk.common, &cpu_clk.mux);
++}
++
++static int sun8i_v853_cpu_set_parent(struct clk_hw *hw, u8 index)
++{
++	/* CCF may still visit the CPU clock after a failed POST notification. */
++	if (cpu_pll_transition.failed && index != 4)
++		return -EIO;
++
++	return ccu_mux_helper_set_parent(&cpu_clk.common, &cpu_clk.mux, index);
++}
++
++static int sun8i_v853_cpu_determine_rate(struct clk_hw *hw,
++				       struct clk_rate_request *req)
++{
++	return clk_mux_determine_rate_flags(hw, req, 0);
++}
++
++static const struct clk_ops sun8i_v853_cpu_mux_ops = {
++	.get_parent = sun8i_v853_cpu_get_parent,
++	.set_parent = sun8i_v853_cpu_set_parent,
++	.determine_rate = sun8i_v853_cpu_determine_rate,
++};
++
++/*
++ * Keep the CPU on the peripheral PLL while changing PLL_CPU.  The vendor
++ * sequence resets its output gate after the rate change, waits for LOCK,
++ * and only then restores the CPU mux.  Keep the bypass prepared throughout
++ * the transition, including after a failed lock, rather than returning the
++ * CPU to a PLL whose output is not known to be stable.
++ *
++ * Rate notifiers run under the CCF prepare mutex, so waiting here may sleep.
++ * The separate clock enable callbacks must remain atomic.
++ */
++static int sun8i_v853_cpu_pll_notifier(struct notifier_block *nb,
++				     unsigned long event, void *data)
++{
++	struct sun8i_v853_cpu_pll_transition *transition =
++		container_of(nb, struct sun8i_v853_cpu_pll_transition, nb);
++	struct ccu_common *pll = &pll_cpu_clk.common;
++	u32 val;
++	int ret;
++
++	switch (event) {
++	case PRE_RATE_CHANGE:
++		if (transition->bypassed)
++			return NOTIFY_BAD;
++
++		ret = clk_prepare_enable(transition->bypass);
++		if (ret)
++			return notifier_from_errno(ret);
++
++		transition->original_parent =
++			ccu_mux_helper_get_parent(&cpu_clk.common, &cpu_clk.mux);
++		/* Parent 4 is pll-periph-600M, as in the vendor CPU bypass. */
++		ret = ccu_mux_helper_set_parent(&cpu_clk.common, &cpu_clk.mux, 4);
++		if (ret) {
++			clk_disable_unprepare(transition->bypass);
++			return notifier_from_errno(ret);
++		}
++		udelay(1);
++		transition->bypassed = true;
++		return NOTIFY_OK;
++
++	case POST_RATE_CHANGE:
++		if (!transition->bypassed)
++			return NOTIFY_DONE;
++
++		/* Toggle the output gate, not the master PLL enable at bit 31. */
++		ccu_gate_helper_disable(pll, BIT(27));
++		ret = ccu_gate_helper_enable(pll, BIT(27));
++		if (ret)
++			goto failed;
++		ret = readl_relaxed_poll_timeout(pll->base + pll->reg, val,
++					 val & BIT(28), 100, 70000);
++		if (ret)
++			goto failed;
++
++		ccu_mux_helper_wait_for_stable(&cpu_clk.common);
++		/* LOCK must still be asserted after the optional settling delay. */
++		ret = readl_relaxed_poll_timeout(pll->base + pll->reg, val,
++					 val & BIT(28), 100, 70000);
++		if (ret)
++			goto failed;
++		fallthrough;
++	case ABORT_RATE_CHANGE:
++		if (!transition->bypassed)
++			return NOTIFY_DONE;
++		if (transition->failed)
++			return NOTIFY_BAD;
++
++		ret = ccu_mux_helper_set_parent(&cpu_clk.common, &cpu_clk.mux,
++					       transition->original_parent);
++		if (ret)
++			goto failed;
++		udelay(1);
++		transition->bypassed = false;
++		clk_disable_unprepare(transition->bypass);
++		return NOTIFY_OK;
++	default:
++		return NOTIFY_DONE;
++	}
++
++failed:
++	transition->failed = true;
++	pr_err_ratelimited("V853 CPU PLL transition failed (%d); CPU kept on bypass\n",
++			   ret);
++	return notifier_from_errno(ret);
++}
++
++static void sun8i_v853_cpu_pll_notifier_unregister(void *clk)
++{
++	clk_notifier_unregister(clk, &cpu_pll_transition.nb);
++}
++
 +static int sun8i_v853_ccu_probe(struct platform_device *pdev)
 +{
 +	void __iomem *reg;
@@ -1313,7 +1460,17 @@ diff -ruN a/drivers/clk/sunxi-ng/ccu-sun8i-v853.c b/drivers/clk/sunxi-ng/ccu-sun
 +	if (ret)
 +		return ret;
 +
-+	return 0;
++	cpu_pll_transition.bypass = pll_periph_600M_clk.hw.clk;
++	cpu_pll_transition.nb.notifier_call = sun8i_v853_cpu_pll_notifier;
++	ret = clk_notifier_register(pll_cpu_clk.common.hw.clk,
++				    &cpu_pll_transition.nb);
++	if (ret)
++		return dev_err_probe(&pdev->dev, ret,
++				     "Failed to register CPU PLL bypass notifier\n");
++
++	return devm_add_action_or_reset(&pdev->dev,
++				      sun8i_v853_cpu_pll_notifier_unregister,
++				      pll_cpu_clk.common.hw.clk);
 +}
 +
 +static const struct of_device_id sun8i_v853_ccu_ids[] = {
