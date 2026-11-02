@@ -1,0 +1,563 @@
+name: Firmware
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      machine-clk-mini-ultra-nor:
+        description: Build clk-mini-ultra-nor and recovery
+        type: boolean
+        default: false
+      machine-v821b-rtl8733bs:
+        description: Build v821b-rtl8733bs and recovery
+        type: boolean
+        default: true
+      machine-v851s3-aic8800d80:
+        description: Build v851s3-aic8800d80 and recovery
+        type: boolean
+        default: true
+      github-release-prerelease:
+        description: GitHub release is prerelease
+        type: boolean
+        default: false
+      release-tag-prerelease:
+        description: Release tag is prerelease (-preN suffix)
+        type: boolean
+        default: false
+      catplay-ref:
+        description: CatPlay source branch, tag or commit
+        required: true
+        default: master
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  STUN_SERVER: stun.l.google.com:19302
+
+# Stable per-machine Docker volumes can be reused on persistent runners.
+concurrency:
+  group: firmware-build
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: Prepare sources and release metadata
+    runs-on: ubuntu-24.04
+    environment: Release
+    env:
+      CATPLAY_REPOSITORY: ${{ vars.CATPLAY_REPOSITORY || secrets.CATPLAY_REPOSITORY }}
+      RELEASE_REPOSITORY: ${{ vars.RELEASE_REPOSITORY || secrets.RELEASE_REPOSITORY }}
+      GITHUB_RELEASE_PRERELEASE: ${{ inputs.github-release-prerelease || false }}
+      TAG_PRERELEASE: ${{ inputs.release-tag-prerelease || false }}
+      RELEASE_TAGGER_USERNAME: ${{ vars.RELEASE_TAGGER_USERNAME || secrets.RELEASE_TAGGER_USERNAME }}
+      RELEASE_TAGGER_EMAIL: ${{ vars.RELEASE_TAGGER_EMAIL || secrets.RELEASE_TAGGER_EMAIL }}
+      CATPLAY_ACCESS_TOKEN: ${{ secrets.CATPLAY_ACCESS_TOKEN }}
+      RELEASE_ACCESS_TOKEN: ${{ secrets.RELEASE_ACCESS_TOKEN }}
+      CATPLAY_REF: ${{ inputs.catplay-ref || 'master' }}
+    outputs:
+      machines: ${{ steps.matrix.outputs.machines }}
+      max-parallel-builds: ${{ steps.build-limit.outputs.parallelism }}
+    steps:
+      - name: Initial disk usage
+        run: df -h
+      - name: Configure build parallelism
+        id: build-limit
+        env:
+          FIRMWARE_MAX_PARALLEL_BUILDS: ${{ vars.FIRMWARE_MAX_PARALLEL_BUILDS }}
+        run: |
+          limit=${FIRMWARE_MAX_PARALLEL_BUILDS:-10}
+          if [[ ! "$limit" =~ ^[1-9][0-9]*$ ]]; then
+            echo '::error::FIRMWARE_MAX_PARALLEL_BUILDS must be a positive integer'
+            exit 1
+          fi
+          printf 'parallelism=%s\n' "$limit" >> "$GITHUB_OUTPUT"
+      - name: Prepare machine matrix
+        id: matrix
+        env:
+          MACHINE_SELECTION: >-
+            {
+              "clk-mini-ultra-nor": ${{ github.event_name != 'workflow_dispatch' || inputs.machine-clk-mini-ultra-nor }},
+              "v821b-rtl8733bs": ${{ github.event_name != 'workflow_dispatch' || inputs.machine-v821b-rtl8733bs }},
+              "v851s3-aic8800d80": ${{ github.event_name != 'workflow_dispatch' || inputs.machine-v851s3-aic8800d80 }}
+            }
+        run: |
+          machines=$(jq -ce '
+            [to_entries[] | select(.value == true) | .key]
+            | sort
+            | map([. + "-recov", .]) | add // []
+            | if length > 0 then . else error("Select at least one firmware machine") end
+          ' <<< "$MACHINE_SELECTION")
+          printf 'machines=%s\n' "$machines" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare pinned checkouts, version and release notes
+        shell: bash
+        run: |
+          for name in CATPLAY_REPOSITORY RELEASE_REPOSITORY RELEASE_TAGGER_USERNAME RELEASE_TAGGER_EMAIL RELEASE_ACCESS_TOKEN; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing $name in the Release environment"
+              exit 1
+            fi
+          done
+          for name in CATPLAY_REPOSITORY RELEASE_REPOSITORY; do
+            value="${!name}"
+            value="${value#https://github.com/}"
+            value="${value%/}"
+            value="${value%.git}"
+            if [[ ! "$value" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+              echo "::error::$name must be a GitHub OWNER/REPO"
+              exit 1
+            fi
+            printf -v "$name" '%s' "$value"
+          done
+          for name in TAG_PRERELEASE GITHUB_RELEASE_PRERELEASE; do
+            value="${!name}"
+            case "${value,,}" in
+              true|false) printf -v "$name" '%s' "${value,,}" ;;
+              *) echo "::error::$name must be true or false"; exit 1 ;;
+            esac
+          done
+          umask 077
+          credentials=$(mktemp -d)
+          trap 'rm -rf "$credentials"' EXIT
+          token_args=()
+          if [[ -n "$CATPLAY_ACCESS_TOKEN" ]]; then
+            printf '%s' "$CATPLAY_ACCESS_TOKEN" > "$credentials/catplay-token"
+            token_args+=(--catplay-token-file "$credentials/catplay-token")
+          fi
+          tag_args=()
+          if [[ "$TAG_PRERELEASE" == true ]]; then
+            tag_args+=(--tag-prerelease)
+          fi
+          metadata="$RUNNER_TEMP/release-metadata"
+          mkdir -p "$metadata"
+          python3 .ci/nightly.py checkout \
+            --catplay-repo "$CATPLAY_REPOSITORY" \
+            --catplay-revision "$CATPLAY_REF" \
+            --catplay-branch "$CATPLAY_REF" \
+            --catplay-checkout "$GITHUB_WORKSPACE/catplay-source" \
+            --firmware-repo "$GITHUB_REPOSITORY" \
+            --firmware-revision "$GITHUB_SHA" \
+            --firmware-branch "$GITHUB_REF_NAME" \
+            --firmware-checkout "$GITHUB_WORKSPACE" \
+            --firmware-use-existing-checkout \
+            --release-notes "$metadata/release-notes.md" \
+            --tag-file "$metadata/release_tag.txt" \
+            "${token_args[@]}" "${tag_args[@]}"
+          catplay_sha=$(git -C "$GITHUB_WORKSPACE/catplay-source" rev-parse HEAD)
+          firmware_sha=$(git rev-parse HEAD)
+          [[ "$firmware_sha" == "$GITHUB_SHA" ]]
+          jq -n \
+            --arg tag "$(cat "$metadata/release_tag.txt")" \
+            --arg catplay_repo "$CATPLAY_REPOSITORY" --arg catplay_sha "$catplay_sha" \
+            --arg firmware_repo "$GITHUB_REPOSITORY" --arg firmware_sha "$firmware_sha" \
+            --arg release_repo "$RELEASE_REPOSITORY" \
+            --arg tagger_name "$RELEASE_TAGGER_USERNAME" --arg tagger_email "$RELEASE_TAGGER_EMAIL" \
+            --argjson tag_prerelease "$TAG_PRERELEASE" \
+            --argjson github_release_prerelease "$GITHUB_RELEASE_PRERELEASE" \
+            '{tag: $tag, tag_prerelease: $tag_prerelease,
+              github_release_prerelease: $github_release_prerelease, release_repository: $release_repo,
+              tagger_name: $tagger_name, tagger_email: $tagger_email,
+              catplay: {repository: $catplay_repo, revision: $catplay_sha},
+              firmware: {repository: $firmware_repo, revision: $firmware_sha}}' \
+            > "$metadata/revisions.json"
+      - name: Create source bundles once for all machines
+        run: bash meta-catplay/scripts/create-src-bundle.sh "$GITHUB_WORKSPACE/catplay-source"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: catplay-source
+          path: |
+            meta-catplay/recipes-apps/files/catplay.tar.gz
+            meta-catplay/recipes-apps/files/catplay-g-iphone.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-metadata
+          path: ${{ runner.temp }}/release-metadata/
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    name: Build shared BitBake image
+    runs-on: ubuntu-24.04
+    environment: Release
+    outputs:
+      image-id: ${{ steps.publish-image.outputs.image-id }}
+      manifest-digest: ${{ steps.publish-image.outputs.manifest-digest }}
+      archive-sha256: ${{ steps.publish-image.outputs.archive-sha256 }}
+    env:
+      S3_UPLOAD_ENDPOINT: ${{ vars.S3_UPLOAD_ENDPOINT || secrets.S3_UPLOAD_ENDPOINT }}
+      S3_UPLOAD_BUCKET: ${{ vars.S3_UPLOAD_BUCKET || secrets.S3_UPLOAD_BUCKET }}
+      S3_UPLOAD_REGION: ${{ vars.S3_UPLOAD_REGION || secrets.S3_UPLOAD_REGION }}
+      S3_UPLOAD_PREFIX: ${{ vars.S3_UPLOAD_PREFIX || secrets.S3_UPLOAD_PREFIX }}
+      S3_UPLOAD_STORAGE_CLASS: ${{ vars.S3_UPLOAD_STORAGE_CLASS || secrets.S3_UPLOAD_STORAGE_CLASS }}
+      S3_UPLOAD_ACCESS_KEY_ID: ${{ secrets.S3_UPLOAD_ACCESS_KEY_ID }}
+      S3_UPLOAD_SECRET_ACCESS_KEY: ${{ secrets.S3_UPLOAD_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Initial disk usage
+        run: df -h
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check out BitBake image sources
+        run: git submodule update --init bitbake
+      - name: Configure S3 image cache
+        id: image-cache
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          for name in ('S3_UPLOAD_ENDPOINT', 'S3_UPLOAD_BUCKET', 'S3_UPLOAD_REGION',
+                       'S3_UPLOAD_ACCESS_KEY_ID', 'S3_UPLOAD_SECRET_ACCESS_KEY'):
+              if not os.environ.get(name, '').strip():
+                  raise SystemExit(f'Missing {name}')
+          prefix = '/'.join(filter(None, (
+              os.environ.get('S3_UPLOAD_PREFIX', '').strip('/'),
+              'buildkit', os.environ['GITHUB_REPOSITORY']))) + '/'
+          fields = {
+              'type': 's3', 'endpoint_url': os.environ['S3_UPLOAD_ENDPOINT'].rstrip('/'),
+              'bucket': os.environ['S3_UPLOAD_BUCKET'], 'region': os.environ['S3_UPLOAD_REGION'],
+              'prefix': prefix, 'name': 'bitbake-image', 'use_path_style': 'true',
+          }
+          if any(any(char in value for char in ',\r\n') for value in fields.values()):
+              raise SystemExit('S3 cache settings must not contain commas or newlines')
+          cache = ','.join(f'{key}={value}' for key, value in fields.items())
+          with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
+              output.write(f'cache-from={cache}\n')
+              output.write(f'cache-to={cache},mode=max,touch_refresh=24h\n')
+          PY
+      - uses: docker/setup-buildx-action@v4
+        id: buildx
+        with:
+          driver: docker-container
+      - name: Install S3 credentials in BuildKit
+        env:
+          BUILDER_NAME: ${{ steps.buildx.outputs.name }}
+        run: |
+          # The SDK reads credentials inside buildkitd, not in the buildx client.
+          # Stream over stdin: no credentials in cache options, argv or artifacts.
+          printf '[default]\naws_access_key_id = %s\naws_secret_access_key = %s\n' \
+            "$S3_UPLOAD_ACCESS_KEY_ID" "$S3_UPLOAD_SECRET_ACCESS_KEY" |
+            docker exec --user 0 -i "buildx_buildkit_${BUILDER_NAME}0" sh -ec \
+              'umask 077; mkdir -p /root/.aws; cat > /root/.aws/credentials'
+      - name: Build image and publish build cache
+        id: bitbake-image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: .ci/Dockerfile
+          tags: catplay-bitbake:ci
+          outputs: type=docker,dest=${{ runner.temp }}/bitbake-image.tar
+          # Native BuildKit S3 cache has no storage-class option.
+          cache-from: ${{ steps.image-cache.outputs.cache-from }}
+          cache-to: ${{ steps.image-cache.outputs.cache-to }}
+      - name: Compress image for this workflow
+        run: gzip -1 "$RUNNER_TEMP/bitbake-image.tar"
+      - name: Install S3 image transfer tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-venv
+          python3 -m venv "$RUNNER_TEMP/ci-image-python"
+          "$RUNNER_TEMP/ci-image-python/bin/pip" install 'boto3>=1.35,<2'
+      - name: Publish shared BitBake image to S3
+        id: publish-image
+        env:
+          # Preserve both identities: Docker image stores differ in inspect .Id.
+          IMAGE_ID: ${{ fromJSON(steps.bitbake-image.outputs.metadata)['containerimage.config.digest'] }}
+          IMAGE_MANIFEST_DIGEST: ${{ fromJSON(steps.bitbake-image.outputs.metadata)['containerimage.digest'] }}
+        run: |
+          "$RUNNER_TEMP/ci-image-python/bin/python" .ci/ci_image.py publish \
+            --archive "$RUNNER_TEMP/bitbake-image.tar.gz" --image-id "$IMAGE_ID" \
+            --manifest-digest "$IMAGE_MANIFEST_DIGEST"
+
+  hashserv:
+    name: Hash equivalence server
+    needs: [source, image]
+    environment: Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    permissions:
+      contents: read
+      actions: read
+    env:
+      FIRMWARE_MACHINES: ${{ needs.source.outputs.machines }}
+      GH_TOKEN: ${{ github.token }}
+      S3_UPLOAD_ENDPOINT: ${{ vars.S3_UPLOAD_ENDPOINT || secrets.S3_UPLOAD_ENDPOINT }}
+      S3_UPLOAD_BUCKET: ${{ vars.S3_UPLOAD_BUCKET || secrets.S3_UPLOAD_BUCKET }}
+      S3_UPLOAD_REGION: ${{ vars.S3_UPLOAD_REGION || secrets.S3_UPLOAD_REGION }}
+      S3_UPLOAD_PREFIX: ${{ vars.S3_UPLOAD_PREFIX || secrets.S3_UPLOAD_PREFIX }}
+      S3_UPLOAD_STORAGE_CLASS: ${{ vars.S3_UPLOAD_STORAGE_CLASS || secrets.S3_UPLOAD_STORAGE_CLASS }}
+      S3_UPLOAD_ACCESS_KEY_ID: ${{ secrets.S3_UPLOAD_ACCESS_KEY_ID }}
+      S3_UPLOAD_SECRET_ACCESS_KEY: ${{ secrets.S3_UPLOAD_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Initial disk usage
+        run: df -h
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install CI network tools
+        run: bash .ci/setup-ci-network.sh
+      - name: Load shared BitBake image from S3
+        env:
+          IMAGE_ID: ${{ needs.image.outputs.image-id }}
+          IMAGE_SHA256: ${{ needs.image.outputs.archive-sha256 }}
+          IMAGE_MANIFEST_DIGEST: ${{ needs.image.outputs.manifest-digest }}
+        run: |
+          python3 .ci/ci_image.py load --image-id "$IMAGE_ID" --sha256 "$IMAGE_SHA256" \
+            --manifest-digest "$IMAGE_MANIFEST_DIGEST"
+      - name: Serve shared hash equivalence and snapshot to S3
+        run: python3 .ci/ci_hashserv.py server
+
+  build:
+    name: Build ${{ matrix.machine }}
+    needs: [source, image]
+    environment: Release
+    runs-on: ${{ vars.FIRMWARE_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 315
+    strategy:
+      fail-fast: false
+      # Must not exceed available runners minus one: hashserv needs its own slot.
+      max-parallel: ${{ fromJSON(needs.source.outputs.max-parallel-builds) }}
+      matrix:
+        machine: ${{ fromJSON(needs.source.outputs.machines) }}
+    env:
+      FIRMWARE_MACHINES: ${{ needs.source.outputs.machines }}
+      NO_COLOR: '1'
+      S3_UPLOAD_ENDPOINT: ${{ vars.S3_UPLOAD_ENDPOINT || secrets.S3_UPLOAD_ENDPOINT }}
+      S3_UPLOAD_BUCKET: ${{ vars.S3_UPLOAD_BUCKET || secrets.S3_UPLOAD_BUCKET }}
+      S3_UPLOAD_REGION: ${{ vars.S3_UPLOAD_REGION || secrets.S3_UPLOAD_REGION }}
+      S3_UPLOAD_PREFIX: ${{ vars.S3_UPLOAD_PREFIX || secrets.S3_UPLOAD_PREFIX }}
+      S3_UPLOAD_STORAGE_CLASS: ${{ vars.S3_UPLOAD_STORAGE_CLASS || secrets.S3_UPLOAD_STORAGE_CLASS }}
+      S3_UPLOAD_ACCESS_KEY_ID: ${{ secrets.S3_UPLOAD_ACCESS_KEY_ID }}
+      S3_UPLOAD_SECRET_ACCESS_KEY: ${{ secrets.S3_UPLOAD_SECRET_ACCESS_KEY }}
+      MACHINE: ${{ matrix.machine }}
+    steps:
+      - name: Initial disk usage
+        run: df -h
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Free disk space on hosted runner
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: ./.github/actions/cleanup
+        with:
+          remove-browsers: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: catplay-source
+          path: meta-catplay/recipes-apps/files
+      - name: Validate S3 environment
+        shell: bash
+        run: |
+          for name in S3_UPLOAD_ENDPOINT S3_UPLOAD_BUCKET S3_UPLOAD_REGION S3_UPLOAD_ACCESS_KEY_ID S3_UPLOAD_SECRET_ACCESS_KEY; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing $name"
+              exit 1
+            fi
+          done
+      - name: Install CI network tools
+        run: bash .ci/setup-ci-network.sh
+      - name: Load shared BitBake image from S3
+        env:
+          IMAGE_ID: ${{ needs.image.outputs.image-id }}
+          IMAGE_SHA256: ${{ needs.image.outputs.archive-sha256 }}
+          IMAGE_MANIFEST_DIGEST: ${{ needs.image.outputs.manifest-digest }}
+        run: |
+          python3 .ci/ci_image.py load --image-id "$IMAGE_ID" --sha256 "$IMAGE_SHA256" \
+            --manifest-digest "$IMAGE_MANIFEST_DIGEST"
+      - name: Build firmware and synchronize S3 caches
+        run: |
+          python3 .ci/disk_usage.py run --output "$RUNNER_TEMP/disk-metrics" -- \
+            python3 .ci/ci_hashserv.py builder --machine "$MACHINE" -- \
+            python3 .ci/build-fw.py \
+            --firmware-dir "$GITHUB_WORKSPACE" \
+            --alias "ci-$MACHINE" \
+            --cached-image catplay-bitbake:ci \
+            --machine "$MACHINE" \
+            --state-s3 --s3-upload --no-keep-container \
+            --artifacts-output "$RUNNER_TEMP/firmware-artifacts"
+      - name: Capture final cache sizes
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          python3 .ci/disk_usage.py report --output "$RUNNER_TEMP/disk-metrics" \
+            --container "catplay-bitbake-ci-$MACHINE-run"
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: disk-${{ matrix.machine }}
+          path: ${{ runner.temp }}/disk-metrics/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Preserve artifact permissions and symlinks
+        run: |
+          tar -C "$RUNNER_TEMP/firmware-artifacts" -cf "$RUNNER_TEMP/$MACHINE.tar" tmp-c2a
+      - uses: actions/upload-artifact@v7
+        with:
+          name: firmware-${{ matrix.machine }}
+          path: ${{ runner.temp }}/${{ matrix.machine }}.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  pack:
+    name: Pack and publish firmware release
+    needs: [source, build, hashserv]
+    runs-on: ubuntu-24.04
+    environment: Release
+    permissions:
+      contents: write
+    steps:
+      - name: Initial disk usage
+        run: df -h
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: firmware-*
+          path: ${{ runner.temp }}/firmware-parts
+          merge-multiple: true
+      - name: Join recovery and regular variants
+        shell: bash
+        env:
+          MACHINES_JSON: ${{ needs.source.outputs.machines }}
+        run: |
+          mkdir -p artifacts
+          # Match the sequential build: recovery contributes tools and images,
+          # then the regular machine overlays shared files in the same bundle.
+          while IFS= read -r machine; do
+            tar -C artifacts -xf "$RUNNER_TEMP/firmware-parts/$machine.tar"
+          done < <(jq -r '.[]' <<< "$MACHINES_JSON")
+      - name: Install archive tool
+        run: sudo apt-get update && sudo apt-get install -y 7zip
+      - name: Pack local artifacts without Docker or BitBake
+        run: python3 .ci/build-fw.py --pack-artifacts --artifacts-output artifacts
+      - uses: actions/upload-artifact@v7
+        with:
+          name: c2a-bundles
+          path: artifacts/c2a/
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-metadata
+          path: ${{ runner.temp }}/release-metadata
+      - name: Push source tags and publish GitHub release
+        shell: bash
+        env:
+          CATPLAY_ACCESS_TOKEN: ${{ secrets.CATPLAY_ACCESS_TOKEN }}
+          RELEASE_ACCESS_TOKEN: ${{ secrets.RELEASE_ACCESS_TOKEN }}
+          FIRMWARE_ACCESS_TOKEN: ${{ github.token }}
+        run: |
+          if [[ -z "$RELEASE_ACCESS_TOKEN" ]]; then
+            echo '::error::Missing RELEASE_ACCESS_TOKEN in the Release environment'
+            exit 1
+          fi
+          metadata="$RUNNER_TEMP/release-metadata"
+          tag=$(jq -er '.tag' "$metadata/revisions.json")
+          [[ "$tag" == "$(cat "$metadata/release_tag.txt")" ]]
+          catplay_repo=$(jq -er '.catplay.repository' "$metadata/revisions.json")
+          catplay_sha=$(jq -er '.catplay.revision' "$metadata/revisions.json")
+          firmware_repo=$(jq -er '.firmware.repository' "$metadata/revisions.json")
+          firmware_sha=$(jq -er '.firmware.revision' "$metadata/revisions.json")
+          release_repo=$(jq -er '.release_repository' "$metadata/revisions.json")
+          tagger_name=$(jq -er '.tagger_name' "$metadata/revisions.json")
+          tagger_email=$(jq -er '.tagger_email' "$metadata/revisions.json")
+          umask 077
+          credentials=$(mktemp -d)
+          trap 'rm -rf "$credentials"' EXIT
+          printf '%s' "$RELEASE_ACCESS_TOKEN" > "$credentials/release-token"
+          printf '%s' "$FIRMWARE_ACCESS_TOKEN" > "$credentials/firmware-token"
+          token_args=(--firmware-token-file "$credentials/firmware-token")
+          if [[ -n "$CATPLAY_ACCESS_TOKEN" ]]; then
+            printf '%s' "$CATPLAY_ACCESS_TOKEN" > "$credentials/catplay-token"
+            token_args+=(--catplay-token-file "$credentials/catplay-token")
+          else
+            echo 'CATPLAY_ACCESS_TOKEN is empty; skipping the source-tag push to CatPlay'
+            token_args+=(--skip-catplay-tag)
+          fi
+          python3 .ci/nightly.py push-tags \
+            --catplay-repo "$catplay_repo" --catplay-revision "$catplay_sha" \
+            --firmware-repo "$firmware_repo" --firmware-revision "$firmware_sha" \
+            --firmware-checkout "$GITHUB_WORKSPACE" \
+            --tag "$tag" --tagger-name "$tagger_name" --tagger-email "$tagger_email" \
+            "${token_args[@]}"
+          release_args=()
+          if jq -e '.github_release_prerelease == true' "$metadata/revisions.json" > /dev/null; then
+            release_args+=(--prerelease)
+          fi
+          if [[ "${release_repo,,}" == "${catplay_repo,,}" ]]; then
+            release_args+=(--target-commitish "$catplay_sha")
+          elif [[ "${release_repo,,}" == "${firmware_repo,,}" ]]; then
+            release_args+=(--target-commitish "$firmware_sha")
+          fi
+          python3 .ci/github_release.py \
+            --repo "$release_repo" --tag "$tag" \
+            --release-notes "$metadata/release-notes.md" \
+            --artifacts-dir "$GITHUB_WORKSPACE/artifacts/c2a" \
+            --token-file "$credentials/release-token" \
+            "${release_args[@]}"
+
+  cleanup:
+    name: Remove intermediate workflow artifacts
+    needs: [source, image, hashserv, build, pack]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    environment: Release
+    permissions:
+      actions: write
+      contents: read
+    env:
+      S3_UPLOAD_ENDPOINT: ${{ vars.S3_UPLOAD_ENDPOINT || secrets.S3_UPLOAD_ENDPOINT }}
+      S3_UPLOAD_BUCKET: ${{ vars.S3_UPLOAD_BUCKET || secrets.S3_UPLOAD_BUCKET }}
+      S3_UPLOAD_REGION: ${{ vars.S3_UPLOAD_REGION || secrets.S3_UPLOAD_REGION }}
+      S3_UPLOAD_PREFIX: ${{ vars.S3_UPLOAD_PREFIX || secrets.S3_UPLOAD_PREFIX }}
+      S3_UPLOAD_ACCESS_KEY_ID: ${{ secrets.S3_UPLOAD_ACCESS_KEY_ID }}
+      S3_UPLOAD_SECRET_ACCESS_KEY: ${{ secrets.S3_UPLOAD_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Initial disk usage
+        run: df -h
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Remove temporary S3 image archives
+        if: ${{ always() }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-venv
+          python3 -m venv "$RUNNER_TEMP/ci-image-python"
+          "$RUNNER_TEMP/ci-image-python/bin/pip" install 'boto3>=1.35,<2'
+          "$RUNNER_TEMP/ci-image-python/bin/python" .ci/ci_image.py cleanup
+      - name: Delete all artifacts except final bundles
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # List every page before deleting, so pagination cannot skip entries.
+          gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(
+              .name != "c2a-bundles"
+              # Uncomment to retain disk metrics:
+              # and (.name | startswith("disk-") | not)
+            ) | [.id, .name] | @tsv' > "$RUNNER_TEMP/artifacts-to-delete.tsv"
+          status=0
+          while IFS=$'\t' read -r artifact_id artifact_name; do
+            echo "Deleting artifact: $artifact_name ($artifact_id)"
+            if ! gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"; then
+              status=1
+            fi
+          done < "$RUNNER_TEMP/artifacts-to-delete.tsv"
+          exit "$status"
