@@ -2,7 +2,7 @@ name: Firmware
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
     inputs:
       machine-clk-mini-ultra-nor:
