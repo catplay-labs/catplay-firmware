@@ -194,41 +194,51 @@ def patch_fit_bootargs(fit: bytes, extra: str = FIT_APPEND_ARGS) -> tuple[bytes,
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    bundle_dir = Path(__file__).resolve().parent.parent
+    default_machine = (
+        "v553-aic8800d80" if (bundle_dir / "v553-aic8800d80-recov.fitImage").is_file()
+        else "v851s3-aic8800d80"
+    )
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--preset", help="Device preset passed to cpbox2fel.py")
     p.add_argument("--fw", default="../v821b-rtl8733bs.c2aflash", help="Local c2aflash firmware (default: ../v821b-rtl8733bs.c2aflash)")
-    p.add_argument("--ota", nargs="?", const="../v851s3-aic8800d80.c2aota", metavar="FILE",
-                   help="Flash OTA instead of --fw (default file: ../v851s3-aic8800d80.c2aota; implied by --v851)")
+    p.add_argument("--ota", nargs="?", const="", metavar="FILE",
+                   help="Flash OTA instead of --fw (default: <v851-machine>.c2aota in bundle; implied by --v851)")
     p.add_argument("--already-fel", action="store_true", help="Skip entering FEL")
     p.add_argument("--already-recov", action="store_true", help="Skip entering FEL and booting recovery")
     p.add_argument("--refresh", action="store_true", help="Enter FEL via USB vendor request")
     p.add_argument("--no-flash", action="store_true", help="Only boot recovery")
     p.add_argument("--v851", action="store_true", help="Use the V851S FEL/U-Boot boot flow")
+    p.add_argument("--v851-machine", default=default_machine,
+                   choices=("v851s3-aic8800d80", "v553-aic8800d80"),
+                   help="Machine used for default V851 artifact paths (default: %(default)s)")
     v851_stage = p.add_mutually_exclusive_group()
     v851_stage.add_argument("--staging", action="store_true", help="Boot the staged SPL that reads the kernel FIT from NAND")
     v851_stage.add_argument("--staging-proper", action="store_true", help="Boot the FEL SPL, then U-Boot proper reading the kernel FIT from NAND")
-    p.add_argument("--v851-spl", default="../v851s3-u-boot-fel.egon.bin")
-    p.add_argument("--v851-kernel", help="V851 recovery FIT/uImage (default: detect in bundle)")
-    p.add_argument("--v851-uboot", default="../v851s3-u-boot-proper.bin")
-    p.add_argument("--v851-staging-egon", default="../v851s3-u-boot-staging.egon.bin")
-    p.add_argument("--v851-staging-proper", default="../v851s3-u-boot-staging-proper.bin")
+    p.add_argument("--v851-spl", help="FEL SPL (default: <v851-machine>-u-boot-fel.egon.bin in bundle)")
+    p.add_argument("--v851-kernel", help="Recovery FIT (default: <v851-machine>-recov.fitImage in bundle)")
+    p.add_argument("--v851-uboot", help="U-Boot proper (default: <v851-machine>-u-boot-proper.bin in bundle)")
+    p.add_argument("--v851-staging-egon", help="Staging SPL (default: <v851-machine>-u-boot-staging.egon.bin in bundle)")
+    p.add_argument("--v851-staging-proper", help="Staging U-Boot (default: <v851-machine>-u-boot-staging-proper.bin in bundle)")
     p.add_argument("--v851-extra-bootargs", help="Append additional kernel arguments to the V851 FIT bootargs")
     args = p.parse_args(argv)
-    if args.v851_kernel is None:
-        bundle_dir = Path(__file__).resolve().parent.parent
-        candidates = ("v851s3-aic8800d80-recov.fitImage", "v851s-recovery.fitImage", "v851s-recovery.uImage")
-        args.v851_kernel = str(next(
-            (bundle_dir / name for name in candidates if (bundle_dir / name).is_file()),
-            bundle_dir / candidates[0],
-        ))
+    for field, suffix in (
+        ("v851_spl", "-u-boot-fel.egon.bin"),
+        ("v851_kernel", "-recov.fitImage"),
+        ("v851_uboot", "-u-boot-proper.bin"),
+        ("v851_staging_egon", "-u-boot-staging.egon.bin"),
+        ("v851_staging_proper", "-u-boot-staging-proper.bin"),
+    ):
+        if getattr(args, field) is None:
+            setattr(args, field, str(bundle_dir / (args.v851_machine + suffix)))
     if (args.staging or args.staging_proper) and not args.v851:
         p.error("V851 staging options require --v851")
     if not args.v851 and not args.already_recov and not args.already_fel and not args.refresh and not args.preset:
         p.error("--preset is required unless --already-recov, --already-fel or --refresh is used")
     if args.v851 and args.preset:
         p.error("V851 does not use a device preset; power-cycle it into FEL first")
-    if args.v851 and args.ota is None:
-        args.ota = "../v851s3-aic8800d80.c2aota"
+    if args.ota == "" or (args.v851 and args.ota is None):
+        args.ota = str(bundle_dir / (args.v851_machine + ".c2aota"))
     return args
 
 

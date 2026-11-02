@@ -17,6 +17,10 @@ on:
         description: Build v851s3-aic8800d80 and recovery
         type: boolean
         default: true
+      machine-v553-aic8800d80:
+        description: Build v553-aic8800d80 and recovery
+        type: boolean
+        default: true
       github-release-prerelease:
         description: GitHub release is prerelease
         type: boolean
@@ -81,7 +85,8 @@ jobs:
             {
               "clk-mini-ultra-nor": ${{ github.event_name != 'workflow_dispatch' || inputs.machine-clk-mini-ultra-nor }},
               "v821b-rtl8733bs": ${{ github.event_name != 'workflow_dispatch' || inputs.machine-v821b-rtl8733bs }},
-              "v851s3-aic8800d80": ${{ github.event_name != 'workflow_dispatch' || inputs.machine-v851s3-aic8800d80 }}
+              "v851s3-aic8800d80": ${{ github.event_name != 'workflow_dispatch' || inputs.machine-v851s3-aic8800d80 }},
+              "v553-aic8800d80": ${{ github.event_name != 'workflow_dispatch' || inputs.machine-v553-aic8800d80 }}
             }
         run: |
           machines=$(jq -ce '

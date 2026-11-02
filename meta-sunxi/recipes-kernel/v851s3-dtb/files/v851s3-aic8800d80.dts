@@ -4,7 +4,7 @@
 #include <dt-bindings/gpio/gpio.h>
 
 / {
-	model = "CatPlay V851S3 AIC8800D80";
+	model = "CatPlay V851S3 AIC8800D80 (Wooboobox T2)";
 	compatible = "catplay,v851s3-aic8800d80", "allwinner,v851s", "allwinner,sun8i-v853";
 	/delete-node/ thermal-zones;
 

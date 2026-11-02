@@ -45,6 +45,20 @@ SRC_URI:append:v851s = " \
     file://v851s_defconfig_staging_proper \
 "
 
+SRC_URI:append:v553 = " file://v553_overlay"
+
+V851_UBOOT_SOC_OVERLAY = ""
+V851_UBOOT_SOC_OVERLAY:v553 = "${UNPACKDIR}/v553_overlay"
+
+# Apply the SoC fragment last, after each artifact's boot-flow fragments.
+v851_apply_soc_overlay() {
+    if [ -n "${V851_UBOOT_SOC_OVERLAY}" ]; then
+        "${S}/scripts/kconfig/merge_config.sh" -m -O "$1" \
+            "$1/.config" "${V851_UBOOT_SOC_OVERLAY}"
+        oe_runmake -C "${S}" O="$1" CROSS_COMPILE="${TARGET_PREFIX}" olddefconfig
+    fi
+}
+
 UBOOT_MACHINE:v851s = "v851s_defconfig"
 UBOOT_ARCH:v851s = "arm"
 
@@ -72,6 +86,7 @@ do_compile:v851s() {
     mkdir -p "${B}/v851-main" "${B}/v851-fel" "${B}/v851-staging" \
         "${B}/v851-staging-proper"
     oe_runmake -C "${S}" O="${B}/v851-main" CROSS_COMPILE="${TARGET_PREFIX}" v851s_defconfig
+    v851_apply_soc_overlay "${B}/v851-main"
     grep -q '^# CONFIG_SPL_RAM_DEVICE is not set$' "${B}/v851-main/.config"
     grep -q '^# CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE is not set$' "${B}/v851-main/.config"
     grep -q '^CONFIG_SPL_SUNXI_SPI_NAND=y$' "${B}/v851-main/.config"
@@ -81,23 +96,25 @@ do_compile:v851s() {
         KCFLAGS=-Oz NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=8 -no-pie" -j"$jobs" u-boot.bin
     oe_runmake -C "${S}" O="${B}/v851-main" CROSS_COMPILE="${TARGET_PREFIX}" \
         KCFLAGS=-O3 NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=8 -no-pie" -j"$jobs" spl/sunxi-spl.bin
-    install -Dm0644 "${B}/v851-main/spl/sunxi-spl.bin" "${B}/v851s3-u-boot-spl.egon.bin"
+    install -Dm0644 "${B}/v851-main/spl/sunxi-spl.bin" "${B}/${MACHINE}-u-boot-spl.egon.bin"
     oe_runmake -C "${S}" O="${B}/v851-fel" CROSS_COMPILE="${TARGET_PREFIX}" v851s_defconfig
     "${S}/scripts/kconfig/merge_config.sh" -m -O "${B}/v851-fel" \
         "${B}/v851-fel/.config" "${UNPACKDIR}/v851s_defconfig_fel"
     oe_runmake -C "${S}" O="${B}/v851-fel" CROSS_COMPILE="${TARGET_PREFIX}" olddefconfig
+    v851_apply_soc_overlay "${B}/v851-fel"
     grep -q '^CONFIG_SPL_TEXT_BASE=0x28060$' "${B}/v851-fel/.config"
     grep -q '^CONFIG_EGON_MAX_SIZE=0x18000$' "${B}/v851-fel/.config"
     grep -q '^CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE=y$' "${B}/v851-fel/.config"
     grep -q '^CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_BOARD=y$' "${B}/v851-fel/.config"
     oe_runmake -C "${S}" O="${B}/v851-fel" CROSS_COMPILE="${TARGET_PREFIX}" \
         KCFLAGS=-O3 NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=8 -no-pie" -j"$jobs" spl/sunxi-spl.bin
-    install -Dm0644 "${B}/v851-fel/spl/sunxi-spl.bin" "${B}/v851s3-u-boot-fel.egon.bin"
+    install -Dm0644 "${B}/v851-fel/spl/sunxi-spl.bin" "${B}/${MACHINE}-u-boot-fel.egon.bin"
     oe_runmake -C "${S}" O="${B}/v851-staging" CROSS_COMPILE="${TARGET_PREFIX}" v851s_defconfig
     "${S}/scripts/kconfig/merge_config.sh" -m -O "${B}/v851-staging" \
         "${B}/v851-staging/.config" "${UNPACKDIR}/v851s_defconfig_fel" \
         "${UNPACKDIR}/v851s_defconfig_staging"
     oe_runmake -C "${S}" O="${B}/v851-staging" CROSS_COMPILE="${TARGET_PREFIX}" olddefconfig
+    v851_apply_soc_overlay "${B}/v851-staging"
     grep -q '^CONFIG_SPL_TEXT_BASE=0x28060$' "${B}/v851-staging/.config"
     grep -q '^CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE=y$' "${B}/v851-staging/.config"
     grep -q '^CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_SPI_NAND=y$' "${B}/v851-staging/.config"
@@ -105,7 +122,7 @@ do_compile:v851s() {
     grep -q '^# CONFIG_SUNXI_FEL_RECOVERY is not set$' "${B}/v851-staging/.config"
     oe_runmake -C "${S}" O="${B}/v851-staging" CROSS_COMPILE="${TARGET_PREFIX}" \
         KCFLAGS=-O3 NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=8 -no-pie" -j"$jobs" spl/sunxi-spl.bin
-    install -Dm0644 "${B}/v851-staging/spl/sunxi-spl.bin" "${B}/v851s3-u-boot-staging.egon.bin"
+    install -Dm0644 "${B}/v851-staging/spl/sunxi-spl.bin" "${B}/${MACHINE}-u-boot-staging.egon.bin"
 
     oe_runmake -C "${S}" O="${B}/v851-staging-proper" \
         CROSS_COMPILE="${TARGET_PREFIX}" v851s_defconfig
@@ -114,17 +131,18 @@ do_compile:v851s() {
         "${UNPACKDIR}/v851s_defconfig_staging_proper"
     oe_runmake -C "${S}" O="${B}/v851-staging-proper" \
         CROSS_COMPILE="${TARGET_PREFIX}" olddefconfig
+    v851_apply_soc_overlay "${B}/v851-staging-proper"
     grep -Fq 'CONFIG_BOOTCOMMAND="mtd read kernel 0x41000000 0 0x800000; bootm 0x41000000"' \
         "${B}/v851-staging-proper/.config"
     grep -q '^CONFIG_BOOTDELAY=-2$' "${B}/v851-staging-proper/.config"
     oe_runmake -C "${S}" O="${B}/v851-staging-proper" \
         CROSS_COMPILE="${TARGET_PREFIX}" KCFLAGS=-Oz NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=8 -no-pie" -j"$jobs" u-boot.bin
     install -Dm0644 "${B}/v851-staging-proper/u-boot.bin" \
-        "${B}/v851s3-u-boot-staging-proper.bin"
+        "${B}/${MACHINE}-u-boot-staging-proper.bin"
 
-    python3 - "${B}/v851-main/.config" "${B}/v851s3-u-boot-spl.egon.bin" \
-        "${B}/v851-fel/.config" "${B}/v851s3-u-boot-fel.egon.bin" \
-        "${B}/v851-staging/.config" "${B}/v851s3-u-boot-staging.egon.bin" <<'PY'
+    python3 - "${B}/v851-main/.config" "${B}/${MACHINE}-u-boot-spl.egon.bin" \
+        "${B}/v851-fel/.config" "${B}/${MACHINE}-u-boot-fel.egon.bin" \
+        "${B}/v851-staging/.config" "${B}/${MACHINE}-u-boot-staging.egon.bin" <<'PY'
 import pathlib, struct, sys
 for config_name, name in zip(sys.argv[1::2], sys.argv[2::2]):
     config = pathlib.Path(config_name).read_text()
@@ -147,25 +165,25 @@ PY
 }
 
 do_deploy:v851s() {
-    install -Dm0644 "${B}/v851s3-u-boot-spl.egon.bin" "${DEPLOYDIR}/v851s3-u-boot-spl.egon.bin"
-    install -Dm0644 "${B}/v851s3-u-boot-fel.egon.bin" "${DEPLOYDIR}/v851s3-u-boot-fel.egon.bin"
-    install -Dm0644 "${B}/v851s3-u-boot-staging.egon.bin" "${DEPLOYDIR}/v851s3-u-boot-staging.egon.bin"
-    install -Dm0644 "${B}/v851-main/u-boot.bin" "${DEPLOYDIR}/v851s3-u-boot-proper.bin"
-    install -Dm0644 "${B}/v851s3-u-boot-staging-proper.bin" \
-        "${DEPLOYDIR}/v851s3-u-boot-staging-proper.bin"
+    install -Dm0644 "${B}/${MACHINE}-u-boot-spl.egon.bin" "${DEPLOYDIR}/${MACHINE}-u-boot-spl.egon.bin"
+    install -Dm0644 "${B}/${MACHINE}-u-boot-fel.egon.bin" "${DEPLOYDIR}/${MACHINE}-u-boot-fel.egon.bin"
+    install -Dm0644 "${B}/${MACHINE}-u-boot-staging.egon.bin" "${DEPLOYDIR}/${MACHINE}-u-boot-staging.egon.bin"
+    install -Dm0644 "${B}/v851-main/u-boot.bin" "${DEPLOYDIR}/${MACHINE}-u-boot-proper.bin"
+    install -Dm0644 "${B}/${MACHINE}-u-boot-staging-proper.bin" \
+        "${DEPLOYDIR}/${MACHINE}-u-boot-staging-proper.bin"
 }
 
 do_install:v851s() {
     install -d "${D}${libdir}/u-boot-v851s3"
-    for image in v851s3-u-boot-spl.egon.bin \
-                 v851s3-u-boot-fel.egon.bin \
-                 v851s3-u-boot-staging.egon.bin; do
+    for image in ${MACHINE}-u-boot-spl.egon.bin \
+                 ${MACHINE}-u-boot-fel.egon.bin \
+                 ${MACHINE}-u-boot-staging.egon.bin; do
         install -m0644 "${B}/$image" "${D}${libdir}/u-boot-v851s3/$image"
     done
     install -m0644 "${B}/v851-main/u-boot.bin" \
-        "${D}${libdir}/u-boot-v851s3/v851s3-u-boot-proper.bin"
-    install -m0644 "${B}/v851s3-u-boot-staging-proper.bin" \
-        "${D}${libdir}/u-boot-v851s3/v851s3-u-boot-staging-proper.bin"
+        "${D}${libdir}/u-boot-v851s3/${MACHINE}-u-boot-proper.bin"
+    install -m0644 "${B}/${MACHINE}-u-boot-staging-proper.bin" \
+        "${D}${libdir}/u-boot-v851s3/${MACHINE}-u-boot-staging-proper.bin"
 }
 
 COMPATIBLE_MACHINE:append = "|v851s"
