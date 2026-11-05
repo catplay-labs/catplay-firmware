@@ -44,3 +44,8 @@ inherit c2a-rust-app
 
 require catplay-svc.inc
 require ffmpeg-hack.inc
+
+export RUSTC_BOOTSTRAP = "1"
+CARGO_BUILD_FLAGS:append = " -Z build-std=std,panic_abort"
+RUSTLIB_DEP = ""
+RUSTLIB = ""
