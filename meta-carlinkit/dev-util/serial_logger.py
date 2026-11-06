@@ -1,4 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S pipx run
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "pyserial>=3.5",
+# ]
+# ///
 # python serial_logger.py -p /dev/ttyUSB0 -b 115200
 # Performs boot time benchmark with timestamps
 import serial
