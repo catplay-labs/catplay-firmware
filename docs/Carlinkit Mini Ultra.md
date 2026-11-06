@@ -15,9 +15,13 @@ For the original firmware path below, the device should broadcast a `VehiConn_*`
 
 ### Install dependencies
 
+The scripts declare their own Python dependencies ([PEP 723](https://peps.python.org/pep-0723/)), so there is no virtual environment to set up. Install [pipx](https://pipx.pypa.io/stable/installation/) (`sudo apt install pipx` on Debian and Ubuntu) and run them with `pipx run`, which fetches the dependencies on first use:
+
 ```console
-$ python3 -m pip install pyusb paramiko cryptography
+$ pipx run wizard.py --help
 ```
+
+On Linux and macOS the scripts are executable and can also be started as `./wizard.py`.
 
 On Debian or Ubuntu, install the USB library as well:
 
@@ -30,7 +34,7 @@ On Windows, install the Ingenic USB boot driver before uploading recovery:
 1. Download and extract Creality's [Ingenic driver package](https://github.com/CrealityOfficial/K1_Series_Annex/releases/download/V1.0.0/cloner-2.5.18-windows_alpha.zip). The driver is in the `cloner-win32-driver` directory; you do not need to run the included flashing tool.
 2. Connect the dongle with a USB cable that carries data and put it in X1600 USB boot mode. If the first wizard run brought it into that mode but stopped because the driver was missing, leave it connected.
 3. In Windows Device Manager, find `Ingenic USB BOOT DEVICE` (it may have a warning icon). Right-click it, choose **Update driver** → **Browse my computer for drivers**, select the extracted `cloner-win32-driver` directory, and complete the installation.
-4. If the dongle is still in USB boot mode, resume with `python wizard.py --already-fel` from the bundle's `tools` directory.
+4. If the dongle is still in USB boot mode, resume with `pipx run wizard.py --already-fel` from the bundle's `tools` directory.
 
 If the device does not appear in Device Manager, check that the USB cable supports data transfer.
 
@@ -45,7 +49,7 @@ $ cd tools/
 #### Flash a device already running CatPlay (refresh)
 
 ```console
-$ python3 wizard.py --refresh
+$ pipx run wizard.py --refresh
 ```
 
 This enters USB boot mode through a USB vendor request; no preset or connection to the original firmware hotspot is needed.
@@ -53,7 +57,7 @@ This enters USB boot mode through a USB vendor request; no preset or connection 
 #### Flash a device already in USB boot mode
 
 ```console
-$ python3 wizard.py --already-fel
+$ pipx run wizard.py --already-fel
 ```
 
 Use this when the device is already visible to the host in X1600 USB boot mode. The option is named `--already-fel` to match the V821 wizard.
@@ -61,7 +65,7 @@ Use this when the device is already visible to the host in X1600 USB boot mode. 
 #### Flash a device already running CatPlay recovery
 
 ```console
-$ python3 wizard.py --already-recov
+$ pipx run wizard.py --already-recov
 ```
 
 This skips entry into USB boot mode and recovery startup, then flashes the image over the recovery USB network.
@@ -76,7 +80,7 @@ Connect the computer to the device's `VehiConn_*` hotspot (password `88888888` o
 | `carlinkit` | `192.168.50.100` |
 
 ```console
-$ python3 wizard.py --preset wooboobox
+$ pipx run wizard.py --preset wooboobox
 ```
 
 The wizard enters USB boot mode, starts CatPlay recovery and flashes `../clk-mini-ultra-nor.c2aflash`. Recovery is reached at `192.168.51.2` over USB. On Unix, the wizard uses `sudo` for the USB stages when needed; on Windows it runs those stages without `sudo`.

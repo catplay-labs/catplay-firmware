@@ -1,4 +1,14 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S pipx run
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "pyusb>=1.2",
+#     "paramiko>=3.0",
+#     "cryptography>=41",
+# ]
+# ///
+# The steps run as subprocesses of this interpreter, so the dependencies of all
+# of them are listed here.
 """Enter X1600 USB boot mode, boot recovery, and flash CLK Mini Ultra NOR."""
 
 from __future__ import annotations
