@@ -1,11 +1,14 @@
-Subject: [PATCH] usb: core: set USB_PORT_QUIRK_OLD_SCHEME and USB_PORT_QUIRK_FAST_ENUM quirks on dwc2 root hub
+Subject: [PATCH] usb: core: use old enumeration on downstream hubs and fast enumeration on dwc2 root hub
 Upstream-Status: Pending
 
+Set USB_PORT_QUIRK_OLD_SCHEME on non-root hub ports.  Keep
+USB_PORT_QUIRK_FAST_ENUM limited to DWC2 root-hub ports, where both quirks
+remain enabled.
 
 ---
  drivers/usb/core/hub.c  |  9 +++++++--
- drivers/usb/core/port.c | 12 ++++++++++++
- 2 files changed, 19 insertions(+), 2 deletions(-)
+ drivers/usb/core/port.c | 14 ++++++++++++++
+ 2 files changed, 21 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
 index 256fe8c86..26a57f280 100644
@@ -63,13 +66,15 @@ index a47df5d32..6585f3f36 100644
  static ssize_t early_stop_show(struct device *dev,
  			    struct device_attribute *attr, char *buf)
  {
-@@ -751,6 +760,9 @@ int usb_hub_create_port_device(struct usb_hub *hub, int port1)
+@@ -751,6 +760,11 @@ int usb_hub_create_port_device(struct usb_hub *hub, int port1)
  	}
  
  	port_dev->connect_type = usb_of_get_connect_type(hdev, port1);
 +	if (usb_port_is_dwc2_root_hub(hdev))
 +		port_dev->quirks |= USB_PORT_QUIRK_OLD_SCHEME |
 +				    USB_PORT_QUIRK_FAST_ENUM;
++	else if (hdev->parent)
++		port_dev->quirks |= USB_PORT_QUIRK_OLD_SCHEME;
  	hub->ports[port1 - 1] = port_dev;
  	port_dev->portnum = port1;
  	set_bit(port1, hub->power_bits);
