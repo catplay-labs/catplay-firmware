@@ -1,4 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S pipx run
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "pyusb>=1.2",
+# ]
+# ///
 """Prepare a cached CPBox OTA, upload it, and wait for BootROM FEL."""
 
 from __future__ import annotations

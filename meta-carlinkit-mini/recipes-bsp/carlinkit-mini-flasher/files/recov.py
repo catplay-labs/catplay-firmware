@@ -1,4 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S pipx run
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "pyusb>=1.2",
+# ]
+# ///
 """
 Minimal USB Boot loader for Ingenic X1600.
 
