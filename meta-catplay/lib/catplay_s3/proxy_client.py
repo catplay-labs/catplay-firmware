@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import os
 from pathlib import Path
+import random
 import socket
 import stat
 import subprocess
@@ -15,6 +16,7 @@ from . import proxy
 
 _children = {}
 _revision = hashlib.sha256(Path(proxy.__file__).read_bytes()).hexdigest()
+BUSY_RETRY_TIMEOUT = proxy.IO_TIMEOUT
 
 
 def runtime_directory(d):
@@ -47,7 +49,7 @@ def connect(filename, timeout=proxy.IO_TIMEOUT):
 
 
 def control(filename, operation='PING'):
-    with connect(filename, timeout=1) as stream:
+    with connect(proxy.control_path(filename), timeout=1) as stream:
         proxy.send_message(stream, {'protocol': proxy.PROTOCOL, 'operation': operation})
         response = proxy.receive_message(stream)
         if not response.get('ok') or response.get('protocol') != proxy.PROTOCOL:
@@ -71,11 +73,12 @@ def ensure_server(directory):
             return filename
         except (FileNotFoundError, ConnectionRefusedError):
             pass
-        if filename.exists():
-            info = filename.lstat()
-            if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid():
-                raise proxy.ProxyError('UnsafeSocketPath')
-            filename.unlink()
+        for path in (filename, proxy.control_path(filename)):
+            if path.exists():
+                info = path.lstat()
+                if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid():
+                    raise proxy.ProxyError('UnsafeSocketPath')
+                path.unlink()
         # Credentials arrive in the current RPC, never the daemon's environment.
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(('S3_UPLOAD_', 'AWS_'))}
@@ -139,7 +142,24 @@ class Client:
 
     def request(self, operation, arguments):
         filename = ensure_server(self.directory)
-        stream = connect(filename)
+        deadline = time.monotonic() + BUSY_RETRY_TIMEOUT
+        delay = .05
+        while True:
+            try:
+                return self._request(filename, operation, arguments,
+                                     max(.001, deadline - time.monotonic()))
+            except proxy.ProxyError as error:
+                if error.response['Error']['Code'] != 'ProxyBusy':
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                # Jitter prevents waiting BitBake tasks from retrying in lockstep.
+                time.sleep(min(remaining, random.uniform(delay / 2, delay)))
+                delay = min(1, delay * 2)
+
+    def _request(self, filename, operation, arguments, timeout):
+        stream = connect(filename, timeout=timeout)
         try:
             proxy.send_message(stream, {'protocol': proxy.PROTOCOL, 'operation': operation,
                                        'config': self.config, 'arguments': arguments})

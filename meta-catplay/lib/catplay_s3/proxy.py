@@ -192,6 +192,31 @@ class Handler(socketserver.BaseRequestHandler):
                     pass
 
 
+class ControlHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        # A separate socket/thread keeps health checks out of the transfer queue.
+        self.request.settimeout(1)
+        try:
+            check_peer(self.request)
+            message = receive_message(self.request)
+            if message.get("protocol") != PROTOCOL:
+                raise ProxyError("ProtocolMismatch")
+            if message.get("operation") not in ("PING", "SHUTDOWN"):
+                raise ProxyError("UnsupportedOperation")
+            send_message(self.request, {"ok": True, "protocol": PROTOCOL, "pid": os.getpid()})
+            if message["operation"] == "SHUTDOWN":
+                self.server.stopping.set()
+        except Exception as error:
+            try:
+                send_message(self.request, {"ok": False, "code": error_code(error)})
+            except OSError:
+                pass
+
+
+def control_path(filename):
+    return Path(filename).with_suffix('.control.sock')
+
+
 class Server(socketserver.UnixStreamServer):
     request_queue_size = WORKERS * 4
 
@@ -243,10 +268,21 @@ def serve(filename, idle_timeout=IDLE_TIMEOUT):
     private_directory(filename.parent)
     previous_umask = os.umask(0o077)
     try:
-        server = Server(str(filename))
-        os.chmod(filename, 0o600)
+        control = socketserver.UnixStreamServer(str(control_path(filename)), ControlHandler)
+        try:
+            server = Server(str(filename))
+        except BaseException:
+            control.server_close()
+            control_path(filename).unlink(missing_ok=True)
+            raise
+        for path in (filename, control_path(filename)):
+            os.chmod(path, 0o600)
     finally:
         os.umask(previous_umask)
+    control.stopping = server.stopping
+    control_thread = threading.Thread(target=control.serve_forever,
+                                      kwargs={"poll_interval": .1}, name="s3-proxy-control", daemon=True)
+    control_thread.start()
     inode = filename.stat().st_ino
     try:
         signal.signal(signal.SIGTERM, lambda *_: server.stopping.set())
@@ -254,6 +290,10 @@ def serve(filename, idle_timeout=IDLE_TIMEOUT):
         while not server.stopping.is_set() and not server.idle(idle_timeout):
             server.handle_request()
     finally:
+        control.shutdown()
+        control_thread.join()
+        control.server_close()
+        control_path(filename).unlink(missing_ok=True)
         server.server_close()
         if filename.exists() and filename.stat().st_ino == inode:
             filename.unlink()
