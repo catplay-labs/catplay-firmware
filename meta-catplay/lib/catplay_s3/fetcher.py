@@ -116,7 +116,13 @@ def _client(d, bucket):
 
 def _failure(operation, error, url):
     # SDK exceptions may contain request details: expose only their code/type.
-    code = getattr(error, "response", {}).get("Error", {}).get("Code", type(error).__name__)
+    from .proxy import error_code
+    code = error_code(error)
+    source = urlsplit(url)
+    # BitBake hides mirror FetchErrors at DEBUG before reporting a misleading
+    # file:// failure. Log here, without URL credentials, query or SDK text.
+    bb.warn("boto3 S3 %s failed (%s): s3://%s%s" %
+            (operation, code, source.hostname or "", source.path))
     raise FetchError("boto3 S3 %s failed (%s)" % (operation, code), url) from None
 
 
