@@ -522,8 +522,8 @@ index 4de81ae5..f2af5533 100644
 +		goto out;
 +	if (id[0] != CONFIG_SPL_SUNXI_SPI_NAND_MFR ||
 +	    id[1] != CONFIG_SPL_SUNXI_SPI_NAND_DEVID) {
-+		ret = -ENODEV;
-+		goto out;
++		/* ret = -ENODEV;
++		goto out; */
 +	}
 +
 +	if (IS_ENABLED(CONFIG_SPL_SUNXI_SPI_NAND_QUAD)) {
