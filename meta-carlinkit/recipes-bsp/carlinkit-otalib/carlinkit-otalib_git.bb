@@ -35,7 +35,9 @@ SRC_URI += "\
     file://src/modprobe_util.rs \
     file://src/system_util.rs \
     file://src/radio.rs \
+    file://src/watchdog.rs \
     \
+    file://src/boot/boot_params.rs \
     file://src/boot/boot_persist.rs \
     file://src/boot/persist_config.rs \
     file://src/boot/catplay/catplay_boot.rs \

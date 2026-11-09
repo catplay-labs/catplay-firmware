@@ -3,6 +3,7 @@ use core::time::Duration;
 use crate::{
     Flash, SystemUtil,
     boot::{
+        boot_params::BootParams,
         boot_persist::{mount_persist_overlays, mount_persist_with_fallback},
         boot_platform::{BootPlatform, BootTarget},
         boot_radio::BootRadio,
@@ -16,6 +17,7 @@ use crate::{
     imx::boot::ImxBootUtil,
     modprobe_util::ModprobeUtil,
     telnet::TelnetServer,
+    watchdog::Watchdog,
 };
 use heapless::format;
 
@@ -23,6 +25,8 @@ pub struct BootUltra(());
 
 impl BootUltra {
     pub fn boot_early() {
+        Watchdog::start_best_effort();
+
         let boot = match BootPlatform::detect() {
             v @ BootPlatform::Imx => {
                 dmesg!("[boot] Platform: IMX6");
@@ -71,6 +75,9 @@ impl BootUltra {
             }
             persist_config = PersistConfig::load();
         }
+
+        let g_iphone_start_delay = u64::from(persist_config.g_iphone_start_delay.unwrap_or(0))
+            + u64::from(BootParams::load().boot_delay);
 
         let ssid = persist_config.wifi_ssid("_AP");
         let ssid_p2p = persist_config.wifi_ssid("_P2P");
@@ -191,13 +198,15 @@ impl BootUltra {
 
         if target == BootTarget::CatPlay {
             dmesg!("[boot] Loading g_iphone");
-            if persist_config.g_iphone_start_delay.is_none() {
+            if g_iphone_start_delay == 0 {
                 if let Some(params) = g_iphone_params.as_ref() {
                     let _ = SystemUtil::modprobe_with_params("g_iphone", params);
                 }
                 dmesg!("[boot] Loading g_iphone done");
-            } else if let Some(delay) = persist_config.g_iphone_start_delay {
-                dmesg!("[boot] g_iphone load and CatPlay start deferred by {delay}s");
+            } else {
+                dmesg!(
+                    "[boot] g_iphone load and CatPlay start deferred by {g_iphone_start_delay}s"
+                );
             }
         } else if target == BootTarget::Recovery {
             dmesg!("[boot] Starting USB recovery gadget");
@@ -239,9 +248,9 @@ impl BootUltra {
                 disable_gadget: false,
                 channel: Some(channel),
             };
-            if let Some(delay) = persist_config.g_iphone_start_delay {
+            if g_iphone_start_delay != 0 {
                 if let Some(_fork_guard) = SystemUtil::fork_guard() {
-                    SystemUtil::sleep(Duration::from_secs(delay as u64));
+                    SystemUtil::sleep(Duration::from_secs(g_iphone_start_delay));
                     if let Some(params) = g_iphone_params.as_ref() {
                         let _ = SystemUtil::modprobe_with_params("g_iphone", params);
                     }

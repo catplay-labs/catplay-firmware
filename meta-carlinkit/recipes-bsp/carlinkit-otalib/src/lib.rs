@@ -10,6 +10,7 @@ pub mod nostd;
 mod radio;
 mod system_util;
 pub mod telnet;
+pub mod watchdog;
 pub mod web;
 
 pub use flash::*;
