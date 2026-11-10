@@ -22,7 +22,7 @@ BUSY_RETRY_TIMEOUT = proxy.IO_TIMEOUT
 def runtime_directory(d):
     # Fixed short path: per-recipe TMPDIR values and Unix path limits must not
     # split one TOPDIR into separate servers. A code revision gets a fresh server.
-    base = proxy.private_directory(Path('/tmp') / ('catplay-s3-' + str(os.geteuid())))
+    base = proxy.private_directory(Path('/tmp') / ('catplay-s3-' + str(proxy.effective_uid())))
     scope = os.path.realpath(d.getVar('TOPDIR') or os.getcwd())
     name = hashlib.sha256((scope + _revision).encode()).hexdigest()[:24]
     return base / name
@@ -76,12 +76,16 @@ def ensure_server(directory):
         for path in (filename, proxy.control_path(filename)):
             if path.exists():
                 info = path.lstat()
-                if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid():
+                if not stat.S_ISSOCK(info.st_mode) or info.st_uid != proxy.effective_uid():
                     raise proxy.ProxyError('UnsafeSocketPath')
                 path.unlink()
         # Credentials arrive in the current RPC, never the daemon's environment.
+        # A server started by a fakeroot task must use the same kernel identity
+        # and filesystem view as one started by the BitBake cooker.
         environment = {key: value for key, value in os.environ.items()
-                       if not key.startswith(('S3_UPLOAD_', 'AWS_'))}
+                       if key != 'LD_PRELOAD' and not key.startswith(('S3_UPLOAD_', 'AWS_', 'PSEUDO_'))}
+        environment['PSEUDO_DISABLED'] = '1'
+        environment['PSEUDO_UNLOAD'] = '1'
         environment['PYTHONDONTWRITEBYTECODE'] = '1'
         process = subprocess.Popen([sys.executable, proxy.__file__, '--socket', str(filename)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -161,6 +165,11 @@ class Client:
     def _request(self, filename, operation, arguments, timeout):
         stream = connect(filename, timeout=timeout)
         try:
+            admission = proxy.receive_message(stream)
+            if not admission.get('ok'):
+                raise proxy.ProxyError(admission.get('code', 'ProxyError'))
+            if admission.get('protocol') != proxy.PROTOCOL:
+                raise proxy.ProxyError('ProtocolMismatch')
             proxy.send_message(stream, {'protocol': proxy.PROTOCOL, 'operation': operation,
                                        'config': self.config, 'arguments': arguments})
             message = proxy.receive_message(stream)

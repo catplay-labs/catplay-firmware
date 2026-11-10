@@ -16,7 +16,7 @@ import struct
 import threading
 import time
 
-PROTOCOL = 1
+PROTOCOL = 2
 WORKERS = 32
 POOL_CONNECTIONS = 64
 MAX_BACKENDS = 16
@@ -57,9 +57,21 @@ def receive_message(stream):
     return json.loads(receive_exact(stream, size))
 
 
+def effective_uid():
+    # pseudo interposes geteuid(), but SO_PEERCRED reports the kernel identity.
+    # /tmp is outside PSEUDO_INCLUDE_PATHS, so its ownership uses this UID too.
+    left, right = socket.socketpair()
+    try:
+        _, uid, _ = struct.unpack("3i", left.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        return uid
+    finally:
+        left.close()
+        right.close()
+
+
 def check_peer(stream):
     _, uid, _ = struct.unpack("3i", stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-    if uid != os.geteuid():
+    if uid != effective_uid():
         raise ProxyError("PeerDenied")
 
 
@@ -72,7 +84,7 @@ def private_directory(directory):
     directory = Path(directory)
     directory.mkdir(mode=0o700, exist_ok=True)
     info = directory.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != effective_uid() or info.st_mode & 0o077:
         raise ProxyError("UnsafeSocketDirectory")
     return directory
 
@@ -129,6 +141,9 @@ class Handler(socketserver.BaseRequestHandler):
         streaming = False
         try:
             check_peer(stream)
+            # Admit before reading the request. A saturated server rejects on
+            # accept; clients must not race that close while sending credentials.
+            send_message(stream, {"ok": True, "protocol": PROTOCOL})
             request = receive_message(stream)
             if request.get("protocol") != PROTOCOL:
                 raise ProxyError("ProtocolMismatch")

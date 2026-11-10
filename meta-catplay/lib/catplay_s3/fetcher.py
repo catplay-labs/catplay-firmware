@@ -11,6 +11,7 @@ The completed index is also published locally for exec'ed BitBake workers.
 import os
 import json
 import hashlib
+import random
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -29,6 +30,13 @@ _indexes = {}
 _index_lock = threading.Lock()
 INDEX_WORKERS = 8
 INDEX_HEX_GROUPS = 8
+DOWNLOAD_ATTEMPTS = 3
+RETRYABLE_DOWNLOAD_ERRORS = frozenset({
+    "BrokenPipeError", "ConnectionResetError", "ConnectionAbortedError",
+    "ConnectionRefusedError", "TimeoutError", "IncompleteResponse",
+    "ReadTimeoutError", "ConnectTimeoutError", "EndpointConnectionError",
+    "ConnectionClosedError", "ResponseStreamingError", "IncompleteReadError",
+})
 
 
 class _BucketIndex:
@@ -114,15 +122,20 @@ def _client(d, bucket):
     return _clients.entries[scope][1]
 
 
-def _failure(operation, error, url):
+def _warn_failure(operation, error, url, suffix=""):
     # SDK exceptions may contain request details: expose only their code/type.
     from .proxy import error_code
     code = error_code(error)
     source = urlsplit(url)
     # BitBake hides mirror FetchErrors at DEBUG before reporting a misleading
     # file:// failure. Log here, without URL credentials, query or SDK text.
-    bb.warn("boto3 S3 %s failed (%s): s3://%s%s" %
-            (operation, code, source.hostname or "", source.path))
+    bb.warn("boto3 S3 %s failed (%s): s3://%s%s%s" %
+            (operation, code, source.hostname or "", source.path, suffix))
+    return code
+
+
+def _failure(operation, error, url):
+    code = _warn_failure(operation, error, url)
     raise FetchError("boto3 S3 %s failed (%s)" % (operation, code), url) from None
 
 
@@ -413,8 +426,20 @@ class S3(FetchMethod):
         return True
 
     def download(self, ud, d):
-        started = time.monotonic()
         self._access(ud, d, "GET")
+        from .proxy import error_code
+        for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+            try:
+                return self._download_once(ud, d)
+            except Exception as error:
+                if attempt == DOWNLOAD_ATTEMPTS or error_code(error) not in RETRYABLE_DOWNLOAD_ERRORS:
+                    _failure("GET", error, ud.url)
+                _warn_failure("GET", error, ud.url,
+                              "; retrying whole download (attempt %d/%d)" % (attempt + 1, DOWNLOAD_ATTEMPTS))
+                time.sleep(random.uniform(.1, .3) * 2 ** (attempt - 1))
+
+    def _download_once(self, ud, d):
+        started = time.monotonic()
         temporary = None
         try:
             client = _fetch_client(d, ud.host)
@@ -452,8 +477,6 @@ class S3(FetchMethod):
                 })
             finally:
                 body.close()
-        except Exception as error:
-            _failure("GET", error, ud.url)
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
