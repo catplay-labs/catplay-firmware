@@ -1,0 +1,27 @@
+Subject: [PATCH] MIPS: ingenic: x1600: use the TCU watchdog clock
+
+The watchdog driver requests the lowest available clock rate to fit its
+timeout into the 16-bit counter. Passing the fixed 32768 Hz RTC clock
+directly bypasses the TCU prescaler and limits max_timeout to one second.
+This leaves no margin for a userspace feeder running once per second.
+
+Use the TCU watchdog clock so clk_set_rate() programs the hardware
+prescaler and the driver calculates the timeout from the divided rate.
+
+Upstream-Status: Pending
+---
+ arch/mips/boot/dts/ingenic/x1600.dtsi | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/mips/boot/dts/ingenic/x1600.dtsi b/arch/mips/boot/dts/ingenic/x1600.dtsi
+--- a/arch/mips/boot/dts/ingenic/x1600.dtsi
++++ b/arch/mips/boot/dts/ingenic/x1600.dtsi
+@@ -158,7 +158,7 @@
+ 				compatible = "ingenic,x1600-watchdog", "ingenic,jz4780-watchdog";
+ 				reg = <0 0x10>;
+ 
+-				clocks = <&cgu X1600_CLK_RTCLK>;
++				clocks = <&tcu TCU_CLK_WDT>;
+ 				clock-names = "wdt";
+ 
+ 			// data sheet mentiones a "half interrupt"

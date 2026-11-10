@@ -56,6 +56,9 @@ SRC_URI:append = " \
     file://0042-usb-hub-run-the-hub-workqueue-at-high-priority.patch \
     file://0043-crypto-ingenic-chain-prepared-CTR-DMA-from-IRQ.patch \
     file://0044-crypto-af_alg-add-skcipher-keystream-only-operation.patch \
+    file://0045-mips-x1600-use-prescaled-TCU-clock-for-watchdog.patch \
+    file://0046-watchdog-jz4740-use-counter-clear-strobe-on-X1600.patch \
+    file://0047-clk-ingenic-model-X1600-watchdog-RTC-mux-parent.patch \
 "
 
 # PV is defined in the base in linux-imx.inc file and uses the LINUX_VERSION definition

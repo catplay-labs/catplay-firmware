@@ -1,0 +1,69 @@
+Subject: [PATCH] clk: ingenic: model the X1600 watchdog RTC mux parent
+
+The X1600 watchdog RTC input comes from the CGU RTC mux, which can select
+the external 32768 Hz source or EXT/512. Using the raw rtc clock as its
+parent reports 32 Hz after /1024 even when hardware counts at 45.776 Hz
+from 24 MHz /512 /1024, shortening the nominal five-second timeout.
+
+Use rtc_ercs as the X1600 watchdog parent. Keep all other TCU clocks and
+SoCs unchanged. The CGU RTC mux has no gate definition; remove its gate
+flag rather than letting a zero-initialized gate descriptor touch CPCCR.
+
+Upstream-Status: Pending
+---
+--- a/drivers/clk/ingenic/tcu.c
++++ b/drivers/clk/ingenic/tcu.c
+@@ -54,6 +54,7 @@
+ 	bool has_prescale;
+ 	bool jz4740_regs;
+ 	const struct ingenic_tcu_clk_info *clk_info;
++	const char *wdt_rtc_parent;
+ 	enum tcu_clk_parent parent_rtc;
+ 	enum tcu_clk_parent parent_ext;
+ };
+@@ -348,14 +349,25 @@
+ 			const struct ingenic_tcu_clk_info *info,
+ 			struct clk_hw_onecell_data *clocks)
+ {
++	struct clk_init_data init = info->init_data;
++	const char *wdt_parents[] = {
++		[TCU_PARENT_PCLK] = "pclk",
++		[TCU_PARENT_RTC] = tcu->soc_info->wdt_rtc_parent,
++		[TCU_PARENT_EXT] = "ext",
++	};
+ 	struct ingenic_tcu_clk *tcu_clk;
+ 	int err;
++
++	if (idx == TCU_CLK_WDT && tcu->soc_info->wdt_rtc_parent) {
++		init.parent_names = wdt_parents;
++		init.num_parents = ARRAY_SIZE(wdt_parents);
++	}
+ 
+ 	tcu_clk = kzalloc(sizeof(*tcu_clk), GFP_KERNEL);
+ 	if (!tcu_clk)
+ 		return -ENOMEM;
+ 
+-	tcu_clk->hw.init = &info->init_data;
++	tcu_clk->hw.init = &init;
+ 	tcu_clk->idx = idx;
+ 	tcu_clk->info = info;
+ 	tcu_clk->tcu = tcu;
+@@ -444,6 +456,7 @@
+ };
+ 
+ static const struct ingenic_soc_info x1600_soc_info = {
++	.wdt_rtc_parent = "rtc_ercs",
+ 	.num_channels = 8,
+ 	.has_ost = false, /* X1600 has OST, but it does not belong to TCU */
+ 	.has_tcu_clk = true,
+--- a/drivers/clk/ingenic/x1600-cgu.c
++++ b/drivers/clk/ingenic/x1600-cgu.c
+@@ -355,7 +355,7 @@
+ 	},
+ 
+ 	[X1600_CLK_RTC] = {
+-		"rtc_ercs", CGU_CLK_MUX | CGU_CLK_GATE,
++		"rtc_ercs", CGU_CLK_MUX,
+ 		.parents = { X1600_CLK_EXCLK_DIV512, X1600_CLK_RTCLK },
+ 		.mux = { CGU_REG_OPCR, 2, 1},
+ 	},
