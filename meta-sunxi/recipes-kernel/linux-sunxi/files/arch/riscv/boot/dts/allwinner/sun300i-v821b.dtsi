@@ -220,12 +220,42 @@
 		};
 
 		spi0: spi@44025000 {
-			compatible = "allwinner,sun300i-v821-spi";
+			compatible = "allwinner,sun50i-r329-spi";
 			reg = <0x0 0x44025000 0x0 0x1000>;
 			interrupts-extended = <&plic0 16 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&ccu CLK_BUS_SPI>, <&ccu CLK_SPI>;
 			clock-names = "ahb", "mod";
 			resets = <&ccu RST_BUS_SPI>;
+			dmas = <&dma 22>, <&dma 22>;
+			dma-names = "rx", "tx";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		spi1: spi@44026000 {
+			compatible = "allwinner,sun50i-r329-spi";
+			reg = <0x0 0x44026000 0x0 0x1000>;
+			interrupts-extended = <&plic0 17 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&ccu CLK_BUS_SPI1>, <&ccu CLK_SPI1>;
+			clock-names = "ahb", "mod";
+			resets = <&ccu RST_BUS_SPI1>;
+			dmas = <&dma 23>, <&dma 23>;
+			dma-names = "rx", "tx";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		spi2: spi@44027000 {
+			compatible = "allwinner,sun50i-r329-spi";
+			reg = <0x0 0x44027000 0x0 0x1000>;
+			interrupts-extended = <&plic0 18 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&ccu CLK_BUS_SPI2>, <&ccu CLK_SPI2>;
+			clock-names = "ahb", "mod";
+			resets = <&ccu RST_BUS_SPI2>;
+			dmas = <&dma 24>, <&dma 24>;
+			dma-names = "rx", "tx";
 			#address-cells = <1>;
 			#size-cells = <0>;
 			status = "disabled";

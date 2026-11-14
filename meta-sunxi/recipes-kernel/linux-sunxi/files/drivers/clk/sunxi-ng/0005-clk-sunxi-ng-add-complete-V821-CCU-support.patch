@@ -7,13 +7,13 @@ Upstream-Status: Pending
  drivers/clk/sunxi-ng/Makefile                 |   4 +
  drivers/clk/sunxi-ng/ccu-sun300i-v821-r.c     | 330 ++++++++++++++++
  drivers/clk/sunxi-ng/ccu-sun300i-v821-r.h     |  10 +
- drivers/clk/sunxi-ng/ccu-sun300i-v821.c       | 243 ++++++++++
+ drivers/clk/sunxi-ng/ccu-sun300i-v821.c       | 268 ++++++++++++
  drivers/clk/sunxi-ng/ccu-sun300i-v821.h       |  11 +
  include/dt-bindings/clock/sun300i-v821-ccu.h  | 113 ++++++
  .../dt-bindings/clock/sun300i-v821-r-ccu.h    |  42 ++
  include/dt-bindings/reset/sun300i-v821-ccu.h  |  64 +++
  .../dt-bindings/reset/sun300i-v821-r-ccu.h    |   7 +
- 10 files changed, 834 insertions(+)
+ 10 files changed, 859 insertions(+)
  create mode 100644 drivers/clk/sunxi-ng/ccu-sun300i-v821-r.c
  create mode 100644 drivers/clk/sunxi-ng/ccu-sun300i-v821-r.h
  create mode 100644 drivers/clk/sunxi-ng/ccu-sun300i-v821.c
@@ -420,10 +420,10 @@ index 000000000000..0ff56799b5ff
 +#endif
 diff --git a/drivers/clk/sunxi-ng/ccu-sun300i-v821.c b/drivers/clk/sunxi-ng/ccu-sun300i-v821.c
 new file mode 100644
-index 000000000000..5e8e36337698
+index 000000000000..843989f897ff
 --- /dev/null
 +++ b/drivers/clk/sunxi-ng/ccu-sun300i-v821.c
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,268 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CCU support for Allwinner sun300i-v821.
@@ -507,8 +507,23 @@ index 000000000000..5e8e36337698
 +						  0, 5, 16, 5, 24, 3,
 +						  BIT(31), 0);
 +
-+static SUNXI_CCU_GATE(spi_clk, "spi", "dcxo",
-+		      0x001c, BIT(31), 0);
++static const char * const spi_parents[] = {
++	"dcxo", "pll-peri-cko-307m", "pll-peri-cko-236m", "",
++	"pll-peri-cko-48m", ""
++};
++static SUNXI_CCU_MP_WITH_MUX_GATE(spi_clk, "spi", spi_parents,
++				  0x001c, 0, 4, 16, 2, 24, 3,
++				  BIT(31), 0);
++static SUNXI_CCU_MP_WITH_MUX_GATE(spi1_clk, "spi1", spi_parents,
++				  0x0064, 0, 4, 16, 2, 24, 3,
++				  BIT(31), 0);
++static SUNXI_CCU_MP_WITH_MUX_GATE(spi2_clk, "spi2", spi_parents,
++				  0x0030, 0, 4, 16, 2, 24, 3,
++				  BIT(31), 0);
++static SUNXI_CCU_GATE(spi1_bus_clk, "spi1-hbus", "dcxo",
++		      0x0084, BIT(19), 0);
++static SUNXI_CCU_GATE(spi2_bus_clk, "spi2-bus", "dcxo",
++		      0x0084, BIT(23), 0);
 +static const char * const spif_parents[] = {
 +	"dcxo", "pll-peri-cko-512m", "pll-peri-cko-384m",
 +	"pll-peri-cko-307m"
@@ -561,6 +576,10 @@ index 000000000000..5e8e36337698
 +	&ss_clk.common,
 +	&hstimer_clk.common,
 +	&spi_clk.common,
++	&spi1_clk.common,
++	&spi2_clk.common,
++	&spi1_bus_clk.common,
++	&spi2_bus_clk.common,
 +	&spif_clk.common,
 +	&spi_bus_clk.common,
 +	&spif_bus_clk.common,
@@ -598,6 +617,10 @@ index 000000000000..5e8e36337698
 +		[CLK_SS]	= &ss_clk.common.hw,
 +		[CLK_HSTIMER]	= &hstimer_clk.common.hw,
 +		[CLK_SPI]	= &spi_clk.common.hw,
++		[CLK_SPI1]	= &spi1_clk.common.hw,
++		[CLK_SPI2]	= &spi2_clk.common.hw,
++		[CLK_BUS_SPI1]	= &spi1_bus_clk.common.hw,
++		[CLK_BUS_SPI2]	= &spi2_bus_clk.common.hw,
 +		[CLK_SPIF]	= &spif_clk.common.hw,
 +		[CLK_BUS_SPI]	= &spi_bus_clk.common.hw,
 +		[CLK_BUS_SPIF]	= &spif_bus_clk.common.hw,
@@ -617,6 +640,8 @@ index 000000000000..5e8e36337698
 +};
 +
 +static const struct ccu_reset_map sun300i_v821_ccu_resets[] = {
++	[RST_BUS_SPI1]		= { 0x0094, BIT(19) },
++	[RST_BUS_SPI2]		= { 0x0094, BIT(23) },
 +	[RST_BUS_USBPHY]	= { 0x0090, BIT(23) },
 +	[RST_BUS_USBOHCI]	= { 0x0090, BIT(22) },
 +	[RST_BUS_USBEHCI]	= { 0x0090, BIT(21) },
