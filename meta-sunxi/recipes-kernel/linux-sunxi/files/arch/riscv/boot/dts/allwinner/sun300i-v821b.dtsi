@@ -140,7 +140,7 @@
 				compatible = "syscon-reboot-mode";
 				offset = <0x208>;
 				mask = <0xffffffff>;
-				mode-normal = <0x00000000>;
+				mode-normal = <0x00000001>; /* Force non-zero value to disarm FEL */
 				mode-usb = <0x5aa5a55a>;
 			};
 		};
