@@ -1,4 +1,4 @@
-FILESEXTRAPATHS:prepend := "${THISDIR}/files/v851s3:"
+FILESEXTRAPATHS:prepend := "${THISDIR}/files/v851s3:${THISDIR}/files:"
 
 SRC_URI:remove:v851s = "git://source.denx.de/u-boot/u-boot.git;protocol=https;branch=master;tag=v${PV} file://CVE-2026-33243.patch"
 SRC_URI:prepend:v851s = "git://github.com/u-boot/u-boot.git;protocol=https;branch=master "
@@ -6,39 +6,39 @@ SRCREV:v851s = "ece349ade2973e220f524ce59e59711cc919263f"
 PV:v851s = "2026.07"
 
 SRC_URI:append:v851s = " \
-    file://v851s/0001-v851s-soc-selection.patch \
-    file://v851s/0002-v851s-clocks.patch \
-    file://v851s/0003-v851s-pinmux.patch \
-    file://v851s/0004-v851s-soc-dts.patch \
-    file://board/0005-v851s-board-dts.patch \
+    file://v851s/0015-v851s-soc-selection.patch \
+    file://v851s/0016-v851s-clocks.patch \
+    file://v851s/0017-v851s-pinmux.patch \
+    file://v851s/0018-v851s-soc-dts.patch \
+    file://board/0019-v851s-board-dts.patch \
     file://board/sun8i-v851s-wooboobox-t2.dts \
-    file://watchdog/0006-v851s-enable-wdt-dt.patch \
-    file://spi/0001-spi-sunxi-configure-mode-independently.patch \
-    file://spi/0002-spi-sunxi-keep-bootrom-module-clock.patch \
-    file://spi/0003-spi-sunxi-use-hardware-rx-only.patch \
-    file://spi/0004-spi-sunxi-release-cs-on-fifo-timeout.patch \
-    file://spi/0005-spi-sunxi-add-single-lane-spi-mem.patch \
-    file://spi/0006-spi-sunxi-add-programmable-sampling.patch \
-    file://spi/0007-spi-sunxi-add-sun20i-d1-variant.patch \
-    file://dram/0002-v851s-dram-parameters.patch \
-    file://dram/0021-ram-sunxi-follow-V85x-boot0-remapping-and-pad-hold-policy.patch \
-    file://nand/0003-v851s-gigadevice-clone.patch \
-    file://fel/0004-sunxi-fel-preserve-r4.patch \
-    file://spl/0004-sunxi-spinand-boot-device.patch \
-    file://spl/0005-sunxi-spl-force-boot-device.patch \
-    file://dram/0007-v851s-mbus-enable-ce-master.patch \
-    file://hooks/0008-uboot-boot-failure-hooks.patch \
-    file://fel/0009-sunxi-arm-fel-api-poc.patch \
-    file://fel/0010-v851s-fel-recovery-flow.patch \
-    file://watchdog/0011-sunxi-spl-watchdog-dt.patch \
-    file://egon/0012-sunxi-egon-max-size.patch \
-    file://nand/0013-spinand-spl-nodm-poc.patch \
-    file://spl/0014-sunxi-spinand-spl-loader.patch \
-    file://spl/0015-v851s-fel-spinand-linux-stage.patch \
-    file://spl/0017-spl-zlib-o3.patch \
-    file://spl/0018-v851s-spl-dcache-poc.patch \
-    file://spl/0019-spl-fit-verify-image-hashes.patch \
-    file://spl/0020-spl-crc32-slicing4.patch \
+    file://watchdog/0020-v851s-enable-wdt-dt.patch \
+    file://spi/0021-spi-sunxi-configure-mode-independently.patch \
+    file://spi/0022-spi-sunxi-keep-bootrom-module-clock.patch \
+    file://spi/0023-spi-sunxi-use-hardware-rx-only.patch \
+    file://spi/0024-spi-sunxi-release-cs-on-fifo-timeout.patch \
+    file://spi/0025-spi-sunxi-add-single-lane-spi-mem.patch \
+    file://spi/0026-spi-sunxi-add-programmable-sampling.patch \
+    file://spi/0027-spi-sunxi-add-sun20i-d1-variant.patch \
+    file://dram/0028-v851s-dram-parameters.patch \
+    file://dram/0029-ram-sunxi-follow-V85x-boot0-remapping-and-pad-hold-policy.patch \
+    file://shared/nand/0030-v851s-gigadevice-clone.patch \
+    file://fel/0031-sunxi-fel-preserve-r4.patch \
+    file://spl/0032-sunxi-spinand-boot-device.patch \
+    file://spl/0033-sunxi-spl-force-boot-device.patch \
+    file://dram/0034-v851s-mbus-enable-ce-master.patch \
+    file://shared/0003-uboot-boot-failure-hooks.patch \
+    file://fel/0035-sunxi-arm-fel-api-poc.patch \
+    file://fel/0036-v851s-fel-recovery-flow.patch \
+    file://watchdog/0037-sunxi-spl-watchdog-dt.patch \
+    file://shared/0001-sunxi-egon-max-size.patch \
+    file://shared/nand/0038-spinand-spl-nodm-poc.patch \
+    file://spl/0039-sunxi-spinand-spl-loader.patch \
+    file://spl/0040-v851s-fel-spinand-linux-stage.patch \
+    file://shared/0041-spl-zlib-o3.patch \
+    file://spl/0042-v851s-spl-dcache-poc.patch \
+    file://shared/0043-spl-fit-verify-image-hashes.patch \
+    file://shared/0044-spl-crc32-slicing4.patch \
     file://v851s_defconfig \
     file://v851s_defconfig_fel \
     file://v851s_defconfig_staging \
