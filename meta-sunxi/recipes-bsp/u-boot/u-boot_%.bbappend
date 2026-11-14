@@ -93,9 +93,9 @@ do_compile:v851s() {
     grep -q '^CONFIG_EGON_MAX_SIZE=0x1e000$' "${B}/v851-main/.config"
     grep -Fq 'CONFIG_BOOTCOMMAND="bootm 0x41000000"' "${B}/v851-main/.config"
     oe_runmake -C "${S}" O="${B}/v851-main" CROSS_COMPILE="${TARGET_PREFIX}" \
-        KCFLAGS=-Oz NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=8 -no-pie" -j"$jobs" u-boot.bin
+        KCFLAGS=-Oz NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=2 -no-pie" -j"$jobs" u-boot.bin
     oe_runmake -C "${S}" O="${B}/v851-main" CROSS_COMPILE="${TARGET_PREFIX}" \
-        KCFLAGS=-O3 NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=8 -no-pie" -j"$jobs" spl/sunxi-spl.bin
+        KCFLAGS=-O3 NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=2 -no-pie" -j"$jobs" spl/sunxi-spl.bin
     install -Dm0644 "${B}/v851-main/spl/sunxi-spl.bin" "${B}/${MACHINE}-u-boot-spl.egon.bin"
     oe_runmake -C "${S}" O="${B}/v851-fel" CROSS_COMPILE="${TARGET_PREFIX}" v851s_defconfig
     "${S}/scripts/kconfig/merge_config.sh" -m -O "${B}/v851-fel" \
@@ -107,7 +107,7 @@ do_compile:v851s() {
     grep -q '^CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE=y$' "${B}/v851-fel/.config"
     grep -q '^CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_BOARD=y$' "${B}/v851-fel/.config"
     oe_runmake -C "${S}" O="${B}/v851-fel" CROSS_COMPILE="${TARGET_PREFIX}" \
-        KCFLAGS=-O3 NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=8 -no-pie" -j"$jobs" spl/sunxi-spl.bin
+        KCFLAGS=-O3 NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=2 -no-pie" -j"$jobs" spl/sunxi-spl.bin
     install -Dm0644 "${B}/v851-fel/spl/sunxi-spl.bin" "${B}/${MACHINE}-u-boot-fel.egon.bin"
     oe_runmake -C "${S}" O="${B}/v851-staging" CROSS_COMPILE="${TARGET_PREFIX}" v851s_defconfig
     "${S}/scripts/kconfig/merge_config.sh" -m -O "${B}/v851-staging" \
@@ -121,7 +121,7 @@ do_compile:v851s() {
     grep -q '^# CONFIG_SPL_SUNXI_FORCE_BOOT_DEVICE_BOARD is not set$' "${B}/v851-staging/.config"
     grep -q '^# CONFIG_SUNXI_FEL_RECOVERY is not set$' "${B}/v851-staging/.config"
     oe_runmake -C "${S}" O="${B}/v851-staging" CROSS_COMPILE="${TARGET_PREFIX}" \
-        KCFLAGS=-O3 NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=8 -no-pie" -j"$jobs" spl/sunxi-spl.bin
+        KCFLAGS=-O3 NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=2 -no-pie" -j"$jobs" spl/sunxi-spl.bin
     install -Dm0644 "${B}/v851-staging/spl/sunxi-spl.bin" "${B}/${MACHINE}-u-boot-staging.egon.bin"
 
     oe_runmake -C "${S}" O="${B}/v851-staging-proper" \
@@ -136,7 +136,7 @@ do_compile:v851s() {
         "${B}/v851-staging-proper/.config"
     grep -q '^CONFIG_BOOTDELAY=-2$' "${B}/v851-staging-proper/.config"
     oe_runmake -C "${S}" O="${B}/v851-staging-proper" \
-        CROSS_COMPILE="${TARGET_PREFIX}" KCFLAGS=-Oz NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=8 -no-pie" -j"$jobs" u-boot.bin
+        CROSS_COMPILE="${TARGET_PREFIX}" KCFLAGS=-Oz NPROC=8 LTO_FINAL_LDFLAGS="-fuse-linker-plugin -flto=2 -no-pie" -j"$jobs" u-boot.bin
     install -Dm0644 "${B}/v851-staging-proper/u-boot.bin" \
         "${B}/${MACHINE}-u-boot-staging-proper.bin"
 
