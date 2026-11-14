@@ -1,0 +1,294 @@
+Subject: [PATCH] irqchip/sifive-plic: scope Allwinner completion remedy to V821 non-B
+
+Upstream-Status: Pending
+
+Port the vendor's enabled-and-not-pending completion retry to the current
+PLIC driver. Detect the actual PRCM silicon revision instead of relying on
+the board name, and keep V821B and other platforms unchanged.
+
+Use per-context pinned hard timers, a bounded source scan, enable locking
+and active-IRQ tracking so that the remedy cannot prematurely complete a
+normal or threaded interrupt. Start after timer initialization and cancel
+on CPU offline. Keep the independent SBI clockevent preferred on non-B;
+otherwise a lost HSTIMER interrupt could also stop the remedy itself.
+
+diff --git a/include/linux/soc/sunxi/v821.h b/include/linux/soc/sunxi/v821.h
+new file mode 100644
+--- /dev/null
++++ b/include/linux/soc/sunxi/v821.h
+@@ -0,0 +1,35 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_SOC_SUNXI_V821_H
++#define _LINUX_SOC_SUNXI_V821_H
++
++#include <linux/errno.h>
++#include <linux/io.h>
++#include <linux/of_address.h>
++
++#define SUNXI_V821_CHIP_VERSION_REG	0x40
++#define SUNXI_V821_CHIP_VERSION_NON_B	0x2
++
++/* Brandy classifies PRCM ROM version 2 as V821, all other values as V821B. */
++static inline int sunxi_v821_is_non_b(void)
++{
++	struct device_node *np;
++	void __iomem *prcm;
++	u32 version;
++
++	if (!IS_ENABLED(CONFIG_ARCH_SUNXI_SUN300I))
++		return 0;
++
++	np = of_find_compatible_node(NULL, NULL, "allwinner,sun300i-v821-prcm");
++	if (!np)
++		return 0;
++	prcm = of_iomap(np, 0);
++	of_node_put(np);
++	if (!prcm)
++		return -ENOMEM;
++
++	version = readl(prcm + SUNXI_V821_CHIP_VERSION_REG);
++	iounmap(prcm);
++	return version == SUNXI_V821_CHIP_VERSION_NON_B;
++}
++
++#endif
+diff --git a/drivers/irqchip/irq-sifive-plic.c b/drivers/irqchip/irq-sifive-plic.c
+--- a/drivers/irqchip/irq-sifive-plic.c
++++ b/drivers/irqchip/irq-sifive-plic.c
+@@ -6,6 +6,7 @@
+ #define pr_fmt(fmt) "riscv-plic: " fmt
+ #include <linux/acpi.h>
+ #include <linux/cpu.h>
++#include <linux/hrtimer.h>
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+ #include <linux/irq.h>
+@@ -18,6 +19,7 @@
+ #include <linux/of_irq.h>
+ #include <linux/platform_device.h>
+ #include <linux/spinlock.h>
++#include <linux/soc/sunxi/v821.h>
+ #include <linux/syscore_ops.h>
+ #include <asm/smp.h>
+ 
+@@ -63,6 +65,9 @@
+ 
+ #define	PLIC_DISABLE_THRESHOLD		0x7
+ #define	PLIC_ENABLE_THRESHOLD		0
++
++#define PLIC_QUIRK_V821_COMPLETION	2
++#define V821_REMEDY_INTERVAL_NS		NSEC_PER_MSEC
+ 
+ #define PLIC_QUIRK_EDGE_INTERRUPT	0
+ #define PLIC_QUIRK_CP100_CLAIM_REGISTER_ERRATUM	1
+@@ -92,6 +97,10 @@
+ 	void __iomem		*enable_base;
+ 	u32			*enable_save;
+ 	struct plic_priv	*priv;
++#ifdef CONFIG_ARCH_SUNXI_SUN300I
++	struct hrtimer		remedy_timer;
++	DECLARE_BITMAP(active_irqs, MAX_DEVICES + 1);
++#endif
+ };
+ 
+ /*
+@@ -104,6 +113,101 @@
+ static DEFINE_PER_CPU(struct plic_handler, plic_handlers);
+ 
+ static int plic_irq_set_type(struct irq_data *d, unsigned int type);
++
++static void plic_v821_active(struct plic_handler *handler, unsigned int hwirq, bool active)
++{
++#ifdef CONFIG_ARCH_SUNXI_SUN300I
++	if (!test_bit(PLIC_QUIRK_V821_COMPLETION, &handler->priv->plic_quirks) ||
++	    hwirq > MAX_DEVICES)
++		return;
++
++	if (active)
++		set_bit(hwirq, handler->active_irqs);
++	else
++		clear_bit(hwirq, handler->active_irqs);
++#endif
++}
++
++#ifdef CONFIG_ARCH_SUNXI_SUN300I
++/* Allwinner's non-B remedy: retry completion for enabled, non-pending IRQs. */
++static enum hrtimer_restart plic_v821_remedy(struct hrtimer *timer)
++{
++	struct plic_handler *handler = container_of(timer, struct plic_handler, remedy_timer);
++	struct plic_priv *priv = handler->priv;
++	unsigned long flags;
++	unsigned int group;
++
++	/* Serialize against enable changes; local external IRQs cannot nest here. */
++	raw_spin_lock_irqsave(&handler->enable_lock, flags);
++	for (group = 0; group < priv->irq_groups; group++) {
++		u32 mask = readl(handler->enable_base + group * sizeof(u32)) &
++			   ~readl(priv->regs + PENDING_BASE + group * sizeof(u32));
++
++		while (mask) {
++			unsigned int hwirq = group * 32 + __ffs(mask);
++
++			mask &= mask - 1;
++			/* Never complete an IRQ still owned by a normal/threaded handler. */
++			if (hwirq && hwirq < ACCESS_PRIVATE(priv, total_irqs) &&
++			    !test_bit(hwirq, handler->active_irqs))
++				writel(hwirq, handler->hart_base + CONTEXT_CLAIM);
++		}
++	}
++	raw_spin_unlock_irqrestore(&handler->enable_lock, flags);
++
++	hrtimer_forward_now(timer, ns_to_ktime(V821_REMEDY_INTERVAL_NS));
++	return HRTIMER_RESTART;
++}
++
++static int plic_v821_remedy_online(unsigned int cpu)
++{
++	struct plic_handler *handler = per_cpu_ptr(&plic_handlers, cpu);
++
++	if (!handler->present ||
++	    !test_bit(PLIC_QUIRK_V821_COMPLETION, &handler->priv->plic_quirks))
++		return 0;
++
++	hrtimer_setup(&handler->remedy_timer, plic_v821_remedy, CLOCK_MONOTONIC,
++		      HRTIMER_MODE_REL_HARD);
++	hrtimer_start(&handler->remedy_timer, ns_to_ktime(V821_REMEDY_INTERVAL_NS),
++		      HRTIMER_MODE_REL_PINNED_HARD);
++	return 0;
++}
++
++static int plic_v821_remedy_offline(unsigned int cpu)
++{
++	struct plic_handler *handler = per_cpu_ptr(&plic_handlers, cpu);
++
++	if (handler->present &&
++	    test_bit(PLIC_QUIRK_V821_COMPLETION, &handler->priv->plic_quirks))
++		hrtimer_cancel(&handler->remedy_timer);
++	return 0;
++}
++
++static int __init plic_v821_remedy_init(void)
++{
++	int cpu, ret;
++
++	/* Timers are ready here; do not start one from early irqchip setup. */
++	for_each_possible_cpu(cpu) {
++		struct plic_handler *handler = per_cpu_ptr(&plic_handlers, cpu);
++
++		if (!handler->present ||
++		    !test_bit(PLIC_QUIRK_V821_COMPLETION, &handler->priv->plic_quirks))
++			continue;
++
++		ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "irqchip/v821:remedy",
++					plic_v821_remedy_online, plic_v821_remedy_offline);
++		if (ret < 0)
++			return ret;
++		pr_info("V821 non-B: enabled 1 ms PLIC completion remedy\n");
++		break;
++	}
++	return 0;
++}
++late_initcall(plic_v821_remedy_init);
++#endif
++
+ 
+ static void __plic_toggle(struct plic_handler *handler, int hwirq, int enable)
+ {
+@@ -185,6 +289,7 @@
+ 	} else {
+ 		writel(d->hwirq, handler->hart_base + CONTEXT_CLAIM);
+ 	}
++	plic_v821_active(handler, d->hwirq, false);
+ }
+ 
+ #ifdef CONFIG_SMP
+@@ -391,9 +496,15 @@
+ 	chained_irq_enter(chip, desc);
+ 
+ 	while ((hwirq = readl(claim))) {
+-		int err = generic_handle_domain_irq(handler->priv->irqdomain,
+-						    hwirq);
++		int err;
++
++		plic_v821_active(handler, hwirq, true);
++		err = generic_handle_domain_irq(handler->priv->irqdomain, hwirq);
+ 		if (unlikely(err)) {
++			if (test_bit(PLIC_QUIRK_V821_COMPLETION, &handler->priv->plic_quirks)) {
++				writel(hwirq, claim);
++				plic_v821_active(handler, hwirq, false);
++			}
+ 			pr_warn_ratelimited("%pfwP: can't find mapping for hwirq %lu\n",
+ 					    handler->priv->fwnode, hwirq);
+ 		}
+@@ -641,9 +752,23 @@
+ 			return PTR_ERR(regs);
+ 	}
+ 
++	if (is_of_node(fwnode) &&
++	    of_device_is_compatible(to_of_node(fwnode), "allwinner,sun300i-v821-plic")) {
++		error = sunxi_v821_is_non_b();
++		if (error < 0)
++			goto fail_free_regs;
++		if (error)
++			plic_quirks |= BIT(PLIC_QUIRK_V821_COMPLETION);
++	}
++
+ 	error = plic_parse_nr_irqs_and_contexts(fwnode, &nr_irqs, &nr_contexts, &gsi_base, &id);
+ 	if (error)
+ 		goto fail_free_regs;
++
++	if (test_bit(PLIC_QUIRK_V821_COMPLETION, &plic_quirks) && nr_irqs > MAX_DEVICES) {
++		error = -EINVAL;
++		goto fail_free_regs;
++	}
+ 
+ 	priv = kzalloc_obj(*priv);
+ 	if (!priv) {
+diff --git a/drivers/clocksource/timer-sun50i.c b/drivers/clocksource/timer-sun50i.c
+--- a/drivers/clocksource/timer-sun50i.c
++++ b/drivers/clocksource/timer-sun50i.c
+@@ -26,6 +26,7 @@
+ #include <linux/reset.h>
+ #include <linux/sched_clock.h>
+ #include <linux/slab.h>
++#include <linux/soc/sunxi/v821.h>
+ 
+ #include "timer-of.h"
+ 
+@@ -304,7 +305,11 @@
+    void __iomem *base;
+    unsigned long rate;
+    u32 val;
+-   int ret;
++   int ret, non_b;
++
++   non_b = sunxi_v821_is_non_b();
++   if (non_b < 0)
++       return non_b;
+ 
+    timer = kzalloc(sizeof(*timer), GFP_KERNEL);
+    if (!timer)
+@@ -319,7 +324,7 @@
+    timer->to.flags = TIMER_OF_BASE | TIMER_OF_IRQ;
+    timer->to.clkevt = (struct clock_event_device) {
+        .name           = "sunxi-hstimer",
+-       .rating         = timer->quirks->broken_riscv_timer ?
++       .rating         = timer->quirks->broken_riscv_timer && !non_b ?
+                      HSTIMER_CLKEVT_RATING_FORCED :
+                      HSTIMER_CLKEVT_RATING,
+        .features       = CLOCK_EVT_FEAT_PERIODIC |
+@@ -335,10 +340,13 @@
+        .flags      = IRQF_TIMER | IRQF_IRQPOLL,
+    };
+ 
+-   if (timer->quirks->broken_riscv_timer)
++   if (timer->quirks->broken_riscv_timer && !non_b)
+        dev_warn(&pdev->dev,
+             "broken RISC-V timer; forcing HSTIMER clockevent rating to %u to prevent system hang after 120s\n",
+             HSTIMER_CLKEVT_RATING_FORCED);
++
++   if (non_b)
++       dev_info(&pdev->dev, "V821 non-B: keeping SBI clockevents preferred for PLIC remedy\n");
+ 
+    ret = timer_of_init(node, &timer->to);
+    if (ret)

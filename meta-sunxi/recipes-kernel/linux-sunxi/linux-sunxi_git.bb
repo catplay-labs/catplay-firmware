@@ -21,6 +21,7 @@ SRC_URI:append = " file://drivers/spi/0001-spi-add-sunxi-SPIF-controller-support
 SRC_URI:append = " file://drivers/mtd/spi-nor/0001-mtd-spi-nor-add-XTX-flash-support.patch"
 SRC_URI:append = " file://drivers/pinctrl/sunxi/0001-pinctrl-sunxi-add-V821-pin-controllers.patch"
 SRC_URI:append = " file://drivers/clocksource/0001-clocksource-add-V821-high-speed-timer-support.patch"
+SRC_URI:append = " file://drivers/irqchip/0001-irqchip-sifive-plic-add-V821-non-B-completion-remedy.patch"
 SRC_URI:append = " file://drivers/reset/0001-dt-bindings-reset-add-V821-PRCM.patch"
 SRC_URI:append = " file://drivers/reset/0002-reset-add-V821-PRCM-watchdog-reset.patch"
 SRC_URI:append = " file://drivers/watchdog/0001-dt-bindings-watchdog-add-V821-RTC-WDT.patch"
