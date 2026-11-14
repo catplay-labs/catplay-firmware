@@ -11,7 +11,11 @@ uboot_prep_kimage() {
 
     bbnote "Preparing the C2A zImage kernel payload for fitImage"
 
-    IMG_SRC="${B}/arch/arm/boot/zImage"
+    if [ "${ARCH}" = "riscv" ]; then
+        IMG_SRC="${B}/arch/riscv/boot/Image"
+    else
+        IMG_SRC="${B}/arch/arm/boot/zImage"
+    fi
 
 	output_dir=$1
 	# Keep compatibility with kernel-uboot callers which omit the argument.
@@ -21,8 +25,13 @@ uboot_prep_kimage() {
 	linux_bin=$output_dir/linux.bin
 
     rm -f "${linux_bin}"
-    cp "${IMG_SRC}" "${linux_bin}"
-    linux_comp="none"
+    if [ "${ARCH}" = "riscv" ]; then
+        gzip -n -9 -c "${IMG_SRC}" > "${linux_bin}"
+        linux_comp="gzip"
+    else
+        cp "${IMG_SRC}" "${linux_bin}"
+        linux_comp="none"
+    fi
 
 	printf "$linux_comp" > "$output_dir/linux_comp"
 }
