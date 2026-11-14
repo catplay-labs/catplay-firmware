@@ -1,0 +1,139 @@
+Subject: [PATCH] reset: add the Allwinner V821 PRCM watchdog reset
+
+Use the shared PRCM syscon regmap to deassert the RTC watchdog reset,
+without duplicating the vendor PRCM clock and oscillator driver.
+
+Upstream-Status: Pending
+
+---
+diff --git a/drivers/reset/Kconfig b/drivers/reset/Kconfig
+--- a/drivers/reset/Kconfig
++++ b/drivers/reset/Kconfig
+@@ -308,6 +308,16 @@
+ 	  This enables the reset driver for the SoCFPGA ARMv7 platforms. This
+ 	  driver gets initialized early during platform init calls.
+ 
++config RESET_SUN300I_V821
++	tristate "Allwinner V821 PRCM watchdog reset controller"
++	depends on (ARCH_SUNXI || COMPILE_TEST) && OF
++	select MFD_SYSCON
++	help
++	  Support the RTC watchdog reset in the V821 PRCM register block.
++	  The controller shares its register map with the system controller
++	  used for reboot-mode storage. Enable this to allow the watchdog
++	  driver to release reset without depending on the bootloader.
++
+ config RESET_SUNPLUS
+ 	bool "Sunplus SoCs Reset Driver" if COMPILE_TEST
+ 	default ARCH_SUNPLUS
+diff --git a/drivers/reset/Makefile b/drivers/reset/Makefile
+--- a/drivers/reset/Makefile
++++ b/drivers/reset/Makefile
+@@ -40,6 +40,7 @@
+ obj-$(CONFIG_RESET_SIMPLE) += reset-simple.o
+ obj-$(CONFIG_RESET_SKY1) += reset-sky1.o
+ obj-$(CONFIG_RESET_SOCFPGA) += reset-socfpga.o
++obj-$(CONFIG_RESET_SUN300I_V821) += reset-sun300i-v821.o
+ obj-$(CONFIG_RESET_SUNPLUS) += reset-sunplus.o
+ obj-$(CONFIG_RESET_SUNXI) += reset-sunxi.o
+ obj-$(CONFIG_RESET_TENSTORRENT_ATLANTIS) += reset-tenstorrent-atlantis.o
+diff --git a/drivers/reset/reset-sun300i-v821.c b/drivers/reset/reset-sun300i-v821.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/reset/reset-sun300i-v821.c
+@@ -0,0 +1,95 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Allwinner V821 PRCM watchdog reset. */
++#include <linux/bitops.h>
++#include <linux/mfd/syscon.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/reset-controller.h>
++#include <linux/slab.h>
++
++#define V821_PRCM_RESET_CTRL 0x1c
++#define V821_PRCM_WDT_RESET BIT(3)
++
++struct sun300i_reset {
++	struct reset_controller_dev rcdev;
++	struct regmap *regmap;
++};
++
++static int sun300i_reset_update(struct reset_controller_dev *rcdev,
++				unsigned long id, bool assert)
++{
++	struct sun300i_reset *rst = container_of(rcdev, struct sun300i_reset, rcdev);
++
++	return regmap_update_bits(rst->regmap, V821_PRCM_RESET_CTRL,
++				  V821_PRCM_WDT_RESET,
++				  assert ? 0 : V821_PRCM_WDT_RESET);
++}
++
++static int sun300i_reset_assert(struct reset_controller_dev *rcdev,
++				unsigned long id)
++{
++	return sun300i_reset_update(rcdev, id, true);
++}
++
++static int sun300i_reset_deassert(struct reset_controller_dev *rcdev,
++				  unsigned long id)
++{
++	return sun300i_reset_update(rcdev, id, false);
++}
++
++static int sun300i_reset_status(struct reset_controller_dev *rcdev,
++				unsigned long id)
++{
++	struct sun300i_reset *rst = container_of(rcdev, struct sun300i_reset, rcdev);
++	unsigned int value;
++	int ret;
++
++	ret = regmap_read(rst->regmap, V821_PRCM_RESET_CTRL, &value);
++	return ret ? ret : !(value & V821_PRCM_WDT_RESET);
++}
++
++static const struct reset_control_ops sun300i_reset_ops = {
++	.assert = sun300i_reset_assert,
++	.deassert = sun300i_reset_deassert,
++	.status = sun300i_reset_status,
++};
++
++static int sun300i_reset_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct sun300i_reset *rst;
++
++	rst = devm_kzalloc(dev, sizeof(*rst), GFP_KERNEL);
++	if (!rst)
++		return -ENOMEM;
++
++	rst->regmap = syscon_node_to_regmap(dev->of_node);
++	if (IS_ERR(rst->regmap))
++		return dev_err_probe(dev, PTR_ERR(rst->regmap), "Failed to get PRCM regmap\n");
++
++	rst->rcdev.owner = THIS_MODULE;
++	rst->rcdev.ops = &sun300i_reset_ops;
++	rst->rcdev.of_node = dev->of_node;
++	rst->rcdev.nr_resets = 1;
++	return devm_reset_controller_register(dev, &rst->rcdev);
++}
++
++static const struct of_device_id sun300i_reset_dt_ids[] = {
++	{ .compatible = "allwinner,sun300i-v821-prcm" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sun300i_reset_dt_ids);
++
++static struct platform_driver sun300i_reset_driver = {
++	.probe = sun300i_reset_probe,
++	.driver = {
++		.name = "sun300i-v821-prcm-reset",
++		.of_match_table = sun300i_reset_dt_ids,
++	},
++};
++module_platform_driver(sun300i_reset_driver);
++
++MODULE_DESCRIPTION("Allwinner V821 PRCM watchdog reset controller");
++MODULE_LICENSE("GPL");

@@ -138,7 +138,8 @@
 };
 
 &wdt {
-	status = "disabled";
+	timeout-sec = <16>;
+	status = "okay";
 };
 
 &uart0 {

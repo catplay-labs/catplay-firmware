@@ -1,0 +1,60 @@
+Subject: [PATCH] reset: add the Allwinner V821 PRCM watchdog reset
+
+Use the shared PRCM syscon regmap to deassert the RTC watchdog reset,
+without duplicating the vendor PRCM clock and oscillator driver.
+
+Upstream-Status: Pending
+
+---
+diff --git a/Documentation/devicetree/bindings/reset/allwinner,sun300i-v821-prcm.yaml b/Documentation/devicetree/bindings/reset/allwinner,sun300i-v821-prcm.yaml
+new file mode 100644
+--- /dev/null
++++ b/Documentation/devicetree/bindings/reset/allwinner,sun300i-v821-prcm.yaml
+@@ -0,0 +1,47 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/reset/allwinner,sun300i-v821-prcm.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Allwinner V821 PRCM watchdog reset controller
++
++maintainers:
++  - Chen-Yu Tsai <wens@csie.org>
++  - Maxime Ripard <mripard@kernel.org>
++
++description:
++  The V821 PRCM block contains the active-low reset for the RTC watchdog.
++  Reset specifier 0 selects the watchdog reset. The same register block
++  provides general-purpose registers used by the reboot-mode consumer.
++
++properties:
++  compatible:
++    items:
++      - const: allwinner,sun300i-v821-prcm
++      - const: syscon
++      - const: simple-mfd
++
++  reg:
++    maxItems: 1
++
++  '#reset-cells':
++    const: 1
++
++  reboot-mode:
++    $ref: /schemas/power/reset/syscon-reboot-mode.yaml#
++
++required:
++  - compatible
++  - reg
++  - '#reset-cells'
++
++additionalProperties: false
++
++examples:
++  - |
++    prcm: syscon@4a000000 {
++        compatible = "allwinner,sun300i-v821-prcm", "syscon", "simple-mfd";
++        reg = <0x4a000000 0x1000>;
++        #reset-cells = <1>;
++    };

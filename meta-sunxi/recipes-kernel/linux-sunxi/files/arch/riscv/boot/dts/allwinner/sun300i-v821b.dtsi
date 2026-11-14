@@ -132,8 +132,9 @@
 		ranges;
 
 		rtc: syscon@4a000000 {
-			compatible = "syscon", "simple-mfd";
+			compatible = "allwinner,sun300i-v821-prcm", "syscon", "simple-mfd";
 			reg = <0x0 0x4a000000 0x0 0x1000>;
+			#reset-cells = <1>;
 
 			reboot_mode: reboot-mode {
 				compatible = "syscon-reboot-mode";
@@ -270,12 +271,10 @@
 		};
 
 		wdt: watchdog@4a001000 {
-			compatible = "allwinner,wdt-v105";
+			compatible = "allwinner,sun300i-v821-wdt";
 			reg = <0x0 0x4a001000 0x0 0x20>;
-			sys-24m-clk-select;
+			resets = <&rtc 0>;
 			status = "disabled";
-
-			// resets = <&prcm_ccu RST_RTC_WDG>;
 		};
 
 		soc_timer0: timer@43008000 {

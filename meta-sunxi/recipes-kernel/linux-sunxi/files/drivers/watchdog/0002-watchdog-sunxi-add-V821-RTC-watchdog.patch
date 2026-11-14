@@ -1,0 +1,161 @@
+Subject: [PATCH] watchdog: sunxi: support the V821 RTC watchdog
+
+The V821 RTC watchdog uses half-second ticks in a ten-bit interval field
+and has a keyed software reset. Preserve the existing variants and the
+bootloader handover, and deassert the optional peripheral reset at probe.
+
+Upstream-Status: Pending
+
+---
+diff --git a/drivers/watchdog/sunxi_wdt.c b/drivers/watchdog/sunxi_wdt.c
+--- a/drivers/watchdog/sunxi_wdt.c
++++ b/drivers/watchdog/sunxi_wdt.c
+@@ -19,12 +19,16 @@
+ #include <linux/moduleparam.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/reset.h>
+ #include <linux/types.h>
+ #include <linux/watchdog.h>
+ 
+ #define WDT_MAX_TIMEOUT         16
+ #define WDT_MIN_TIMEOUT         1
+ #define WDT_TIMEOUT_MASK        0x0F
++#define WDT_LINEAR_TIMEOUT_MASK GENMASK(9, 0)
++#define WDT_LINEAR_MAX_TIMEOUT  300
++#define WDT_SOFT_RESET          0x08
+ 
+ #define WDT_CTRL_RELOAD         ((1 << 0) | (0x0a57 << 1))
+ 
+@@ -48,6 +52,7 @@
+ 	u8 wdt_reset_mask;
+ 	u8 wdt_reset_val;
+ 	u32 wdt_key_val;
++	bool linear_timeout;
+ };
+ 
+ struct sunxi_wdt_dev {
+@@ -87,6 +92,13 @@
+ 	const struct sunxi_wdt_reg *regs = sunxi_wdt->wdt_regs;
+ 	u32 val;
+ 
++	if (regs->linear_timeout) {
++		writel(regs->wdt_key_val, wdt_base + regs->wdt_mode);
++		writel(regs->wdt_key_val | BIT(0), wdt_base + WDT_SOFT_RESET);
++		mdelay(500);
++		return 0;
++	}
++
+ 	/* Set system reset function */
+ 	val = readl(wdt_base + regs->wdt_cfg);
+ 	val &= ~(regs->wdt_reset_mask);
+@@ -145,6 +157,12 @@
+ 
+ 	interval = readl(sunxi_wdt->wdt_base + regs->wdt_mode);
+ 	interval >>= regs->wdt_timeout_shift;
++	if (regs->linear_timeout) {
++		interval &= WDT_LINEAR_TIMEOUT_MASK;
++		return interval ? min(DIV_ROUND_UP(interval, 2),
++				      WDT_LINEAR_MAX_TIMEOUT) : 0;
++	}
++
+ 	interval &= WDT_TIMEOUT_MASK;
+ 	/* Round the 0.5-second interval up to the minimum representable timeout. */
+ 	if (!interval)
+@@ -166,16 +184,23 @@
+ 	struct sunxi_wdt_dev *sunxi_wdt = watchdog_get_drvdata(wdt_dev);
+ 	void __iomem *wdt_base = sunxi_wdt->wdt_base;
+ 	const struct sunxi_wdt_reg *regs = sunxi_wdt->wdt_regs;
+-	u32 reg;
+-
+-	if (wdt_timeout_map[timeout] == 0)
+-		timeout++;
++	u32 reg, interval, mask;
++
++	if (regs->linear_timeout) {
++		interval = timeout * 2;
++		mask = WDT_LINEAR_TIMEOUT_MASK;
++	} else {
++		if (wdt_timeout_map[timeout] == 0)
++			timeout++;
++		interval = wdt_timeout_map[timeout];
++		mask = WDT_TIMEOUT_MASK;
++	}
+ 
+ 	sunxi_wdt->wdt_dev.timeout = timeout;
+ 
+ 	reg = readl(wdt_base + regs->wdt_mode);
+-	reg &= ~(WDT_TIMEOUT_MASK << regs->wdt_timeout_shift);
+-	reg |= wdt_timeout_map[timeout] << regs->wdt_timeout_shift;
++	reg &= ~(mask << regs->wdt_timeout_shift);
++	reg |= interval << regs->wdt_timeout_shift;
+ 	reg |= regs->wdt_key_val;
+ 	writel(reg, wdt_base + regs->wdt_mode);
+ 
+@@ -278,11 +303,23 @@
+ 	.wdt_key_val = 0x16aa0000,
+ };
+ 
++static const struct sunxi_wdt_reg sun300i_wdt_reg = {
++	.wdt_ctrl = 0x10,
++	.wdt_cfg = 0x14,
++	.wdt_mode = 0x18,
++	.wdt_timeout_shift = 4,
++	.wdt_reset_mask = 0x03,
++	.wdt_reset_val = 0x01,
++	.wdt_key_val = 0x16aa0000,
++	.linear_timeout = true,
++};
++
+ static const struct of_device_id sunxi_wdt_dt_ids[] = {
+ 	{ .compatible = "allwinner,sun4i-a10-wdt", .data = &sun4i_wdt_reg },
+ 	{ .compatible = "allwinner,sun6i-a31-wdt", .data = &sun6i_wdt_reg },
+ 	{ .compatible = "allwinner,sun20i-d1-wdt", .data = &sun20i_wdt_reg },
+ 	{ .compatible = "allwinner,sun55i-a523-wdt", .data = &sun55i_wdt_reg },
++	{ .compatible = "allwinner,sun300i-v821-wdt", .data = &sun300i_wdt_reg },
+ 	{ /* sentinel */ }
+ };
+ MODULE_DEVICE_TABLE(of, sunxi_wdt_dt_ids);
+@@ -292,6 +329,7 @@
+ 	struct device *dev = &pdev->dev;
+ 	struct sunxi_wdt_dev *sunxi_wdt;
+ 	unsigned int running_timeout;
++	struct reset_control *reset;
+ 	int err;
+ 
+ 	sunxi_wdt = devm_kzalloc(dev, sizeof(*sunxi_wdt), GFP_KERNEL);
+@@ -302,6 +340,14 @@
+ 	if (!sunxi_wdt->wdt_regs)
+ 		return -ENODEV;
+ 
++	reset = devm_reset_control_get_optional_exclusive(dev, NULL);
++	if (IS_ERR(reset))
++		return dev_err_probe(dev, PTR_ERR(reset), "Failed to get reset\n");
++
++	err = reset_control_deassert(reset);
++	if (err)
++		return dev_err_probe(dev, err, "Failed to deassert reset\n");
++
+ 	sunxi_wdt->wdt_base = devm_platform_ioremap_resource(pdev, 0);
+ 	if (IS_ERR(sunxi_wdt->wdt_base))
+ 		return PTR_ERR(sunxi_wdt->wdt_base);
+@@ -309,7 +355,8 @@
+ 	sunxi_wdt->wdt_dev.info = &sunxi_wdt_info;
+ 	sunxi_wdt->wdt_dev.ops = &sunxi_wdt_ops;
+ 	sunxi_wdt->wdt_dev.timeout = WDT_MAX_TIMEOUT;
+-	sunxi_wdt->wdt_dev.max_timeout = WDT_MAX_TIMEOUT;
++	sunxi_wdt->wdt_dev.max_timeout = sunxi_wdt->wdt_regs->linear_timeout ?
++		WDT_LINEAR_MAX_TIMEOUT : WDT_MAX_TIMEOUT;
+ 	sunxi_wdt->wdt_dev.min_timeout = WDT_MIN_TIMEOUT;
+ 	sunxi_wdt->wdt_dev.parent = dev;
+ 
+@@ -321,6 +368,9 @@
+ 
+ 	if (sunxi_wdt_is_running(&sunxi_wdt->wdt_dev)) {
+ 		running_timeout = sunxi_wdt_get_timeout(&sunxi_wdt->wdt_dev);
++		if (!running_timeout && sunxi_wdt->wdt_regs->linear_timeout)
++			dev_warn(dev, "Invalid running interval, using %u seconds\n",
++				 sunxi_wdt->wdt_dev.timeout);
+ 		if (running_timeout)
+ 			sunxi_wdt->wdt_dev.timeout = running_timeout;
+ 

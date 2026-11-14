@@ -1,0 +1,54 @@
+Subject: [PATCH] watchdog: sunxi: support the V821 RTC watchdog
+
+The V821 RTC watchdog uses half-second ticks in a ten-bit interval field
+and has a keyed software reset. Preserve the existing variants and the
+bootloader handover, and deassert the optional peripheral reset at probe.
+
+Upstream-Status: Pending
+
+---
+diff --git a/Documentation/devicetree/bindings/watchdog/allwinner,sun4i-a10-wdt.yaml b/Documentation/devicetree/bindings/watchdog/allwinner,sun4i-a10-wdt.yaml
+--- a/Documentation/devicetree/bindings/watchdog/allwinner,sun4i-a10-wdt.yaml
++++ b/Documentation/devicetree/bindings/watchdog/allwinner,sun4i-a10-wdt.yaml
+@@ -12,6 +12,18 @@
+ 
+ allOf:
+   - $ref: watchdog.yaml#
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: allwinner,sun300i-v821-wdt
++    then:
++      required:
++        - resets
++    else:
++      required:
++        - clocks
++        - interrupts
+ 
+ properties:
+   compatible:
+@@ -33,6 +45,7 @@
+           - const: allwinner,sun20i-d1-wdt-reset
+           - const: allwinner,sun20i-d1-wdt
+       - const: allwinner,sun55i-a523-wdt
++      - const: allwinner,sun300i-v821-wdt
+ 
+   reg:
+     maxItems: 1
+@@ -46,11 +59,12 @@
+   interrupts:
+     maxItems: 1
+ 
++  resets:
++    maxItems: 1
++
+ required:
+   - compatible
+   - reg
+-  - clocks
+-  - interrupts
+ 
+ if:
+   properties:
