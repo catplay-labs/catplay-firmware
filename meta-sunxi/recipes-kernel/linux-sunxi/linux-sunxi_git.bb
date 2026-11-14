@@ -7,6 +7,8 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 
 PR = "r7"
 
+SRC_URI:append = " file://drivers/leds/0001-leds-add-SPI-driven-WS2812B-RGB-driver.patch"
+
 SRC_URI = "git://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git;branch=${KBRANCH};protocol=https"
 SRC_URI:append = " file://crypto/0001-crypto-remove-forced-entropy-collection-that-adds-0.5s-lag-to-system-boot.patch"
 SRC_URI:append = " file://drivers/net/usb/0001-cdc-ncm-fix-linking-with-generic-CarPlay-Headunits.patch"

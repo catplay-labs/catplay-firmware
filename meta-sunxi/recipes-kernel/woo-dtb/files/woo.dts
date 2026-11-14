@@ -4,6 +4,7 @@
 #include "sun300i-v821b.dtsi"
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
 
 / {
 	model = "Wooboobox V821B-compatible dongle";
@@ -38,6 +39,10 @@
 	memory@80000000 {
 		device_type = "memory";
 		reg = <0x0 0x80000000 0x0 0x04000000>;
+	};
+
+	aliases {
+		spi1 = &spi1;
 	};
 
 	/*gpio_keys: gpio-keys {
@@ -161,5 +166,39 @@
 &cpu_opp_table {
 	opp-1000000000 {
 		status = "okay";
+	};
+};
+
+&pio {
+	spi1_mosi_pd13_pin: spi1-mosi-pd13-pin {
+		pins = "PD13";
+		function = "spi1";
+	};
+};
+
+/* Expose board RGB status as one logical LED; only MOSI is used. */
+&spi1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi1_mosi_pd13_pin>;
+	status = "okay";
+
+	led-controller@0 {
+		compatible = "worldsemi,ws2812b";
+		reg = <0>;
+		/* Match the vendor ly_led default: 10000000/11100000, GRB. */
+		spi-max-frequency = <3000000>;
+		bits-per-symbol = <8>;
+		spi-zero-frame = <128>;
+		spi-one-frame = <224>;
+		reset-delay-us = <4000>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		led@0 {
+			reg = <0>;
+			color = <LED_COLOR_ID_RGB>;
+			function = LED_FUNCTION_STATUS;
+		};
+
 	};
 };

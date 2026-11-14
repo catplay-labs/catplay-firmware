@@ -1,0 +1,426 @@
+Subject: [PATCH] leds: add SPI-driven WorldSemi WS2812B multicolor LEDs
+
+Upstream-Status: Pending
+
+Based on the WS2812B SPI driver by Chuanhong Guo. Expose each configured
+pixel through the LED multicolor class. Describe the symbol encoding,
+wire colour order, chain length and reset time in firmware properties.
+Send reset, payload and latch in one continuous SPI transfer.
+
+Signed-off-by: Chuanhong Guo <gch981213@gmail.com>
+---
+diff --git a/drivers/leds/rgb/Kconfig b/drivers/leds/rgb/Kconfig
+index 204cf470beae..5c2081852f01 100644
+--- a/drivers/leds/rgb/Kconfig
++++ b/drivers/leds/rgb/Kconfig
+@@ -74,5 +74,16 @@ config LEDS_MT6370_RGB
+ 
+ 	  This driver can also be built as a module. If so, the module
+ 	  will be called "leds-mt6370-rgb".
+ 
++config LEDS_WS2812B
++	tristate "SPI driven WS2812B RGB LED support"
++	depends on OF
++	depends on SPI
++	help
++	  This option enables support for driving daisy-chained WS2812B RGB
++	  LED chips using SPI bus. This driver simulates the single-wire
++	  protocol by sending bits over the SPI MOSI pin. For this to work,
++	  the SPI frequency should be 2.105MHz~2.85MHz and the controller
++	  needs to transfer all the bytes continuously.
++
+ endif # LEDS_CLASS_MULTICOLOR
+diff --git a/drivers/leds/rgb/Makefile b/drivers/leds/rgb/Makefile
+index 0675bc0f6e18..a6f855eaeb14 100644
+--- a/drivers/leds/rgb/Makefile
++++ b/drivers/leds/rgb/Makefile
+@@ -9,1 +9,2 @@
+ obj-$(CONFIG_LEDS_MT6370_RGB)		+= leds-mt6370-rgb.o
++obj-$(CONFIG_LEDS_WS2812B)		+= leds-ws2812b.o
+diff --git a/drivers/leds/rgb/leds-ws2812b.c b/drivers/leds/rgb/leds-ws2812b.c
+new file mode 100644
+index 000000000000..ca9c5caabe48
+--- /dev/null
++++ b/drivers/leds/rgb/leds-ws2812b.c
+@@ -0,0 +1,276 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * WorldSemi WS2812B individually-addressable LED driver using SPI
++ * Copyright 2022 Chuanhong Guo <gch981213@gmail.com>
++ *
++ * MOSI encodes LED bits as configurable MSB-first SPI symbols.
++ * Defaults: 110 (one), 100 (zero), 2.105-2.85 MHz.
++ */
++#include <linux/led-class-multicolor.h>
++#include <linux/module.h>
++#include <linux/math64.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/property.h>
++#include <linux/spi/spi.h>
++
++#define WS2812B_NUM_COLORS 3
++#define WS2812B_MAX_LEDS 1024
++
++struct ws2812b_priv;
++
++struct ws2812b_led {
++	struct led_classdev_mc mc_cdev;
++	struct mc_subled subled[WS2812B_NUM_COLORS];
++	struct ws2812b_priv *priv;
++	unsigned int cascade;
++};
++
++struct ws2812b_priv {
++	struct spi_device *spi;
++	struct mutex mutex;
++	unsigned int num_leds;
++	u32 bits_per_symbol;
++	u32 zero_frame;
++	u32 one_frame;
++	size_t reset_len;
++	size_t data_len;
++	u8 *data_buf;
++	struct ws2812b_led leds[];
++};
++
++static void ws2812b_set_byte(struct ws2812b_priv *priv, size_t offset, u8 val)
++{
++	u8 *p = priv->data_buf + priv->reset_len + offset * priv->bits_per_symbol;
++	unsigned int bit, symbol_bit, out_bit = 0;
++
++	/* Eight input bits occupy exactly bits_per_symbol output bytes. */
++	memset(p, 0, priv->bits_per_symbol);
++	for (bit = 0; bit < 8; bit++) {
++		u32 symbol = val & BIT(7 - bit) ? priv->one_frame : priv->zero_frame;
++
++		for (symbol_bit = 0; symbol_bit < priv->bits_per_symbol; symbol_bit++) {
++			if (symbol & BIT(priv->bits_per_symbol - 1 - symbol_bit))
++				p[out_bit / 8] |= BIT(7 - out_bit % 8);
++			out_bit++;
++		}
++	}
++}
++
++static int ws2812b_write(struct ws2812b_priv *priv)
++{
++	/*
++	 * Keep reset, payload and latch in one transfer. Controllers may change
++	 * the MOSI idle level between transfers, corrupting the first bits even
++	 * when chip select remains asserted throughout the message.
++	 */
++	return spi_write(priv->spi, priv->data_buf,
++			 priv->data_len + 2 * priv->reset_len);
++}
++
++static int ws2812b_set(struct led_classdev *cdev,
++		      enum led_brightness brightness)
++{
++	struct led_classdev_mc *mc_cdev = lcdev_to_mccdev(cdev);
++	struct ws2812b_led *led = container_of(mc_cdev, struct ws2812b_led, mc_cdev);
++	struct ws2812b_priv *priv = led->priv;
++	int i, ret;
++
++	mutex_lock(&priv->mutex);
++	led_mc_calc_color_components(mc_cdev, brightness);
++	for (i = 0; i < WS2812B_NUM_COLORS; i++)
++		ws2812b_set_byte(priv, led->cascade * WS2812B_NUM_COLORS + i,
++				led->subled[i].brightness);
++	ret = ws2812b_write(priv);
++	mutex_unlock(&priv->mutex);
++
++	return ret;
++}
++
++static int ws2812b_init_led(struct ws2812b_priv *priv,
++			  struct fwnode_handle *node)
++{
++	u32 colors[] = { LED_COLOR_ID_GREEN, LED_COLOR_ID_RED, LED_COLOR_ID_BLUE };
++	struct ws2812b_led *led;
++	u32 cascade;
++	int i, j, ret;
++
++	ret = fwnode_property_read_u32(node, "reg", &cascade);
++	if (ret)
++		return ret;
++	if (cascade >= priv->num_leds || priv->leds[cascade].priv)
++		return -EINVAL;
++
++	if (fwnode_property_present(node, "color-index")) {
++		if (fwnode_property_count_u32(node, "color-index") != WS2812B_NUM_COLORS)
++			return -EINVAL;
++		ret = fwnode_property_read_u32_array(node, "color-index", colors,
++						   WS2812B_NUM_COLORS);
++		if (ret)
++			return ret;
++	}
++	for (i = 0; i < WS2812B_NUM_COLORS; i++) {
++		if (colors[i] != LED_COLOR_ID_RED && colors[i] != LED_COLOR_ID_GREEN &&
++		    colors[i] != LED_COLOR_ID_BLUE)
++			return -EINVAL;
++		for (j = 0; j < i; j++)
++			if (colors[i] == colors[j])
++				return -EINVAL;
++	}
++
++	led = &priv->leds[cascade];
++	led->priv = priv;
++	led->cascade = cascade;
++	led->mc_cdev.subled_info = led->subled;
++	led->mc_cdev.num_colors = WS2812B_NUM_COLORS;
++	led->mc_cdev.led_cdev.max_brightness = 255;
++	led->mc_cdev.led_cdev.brightness_set_blocking = ws2812b_set;
++	for (i = 0; i < WS2812B_NUM_COLORS; i++) {
++		led->subled[i].color_index = colors[i];
++		led->subled[i].intensity = 255;
++	}
++
++	return 0;
++}
++
++/* Valid symbols are one high pulse followed by low, e.g. 100/110. */
++static bool ws2812b_valid_symbol(u32 symbol, u32 width)
++{
++	u32 low;
++
++	if (symbol >= BIT(width) || !(symbol & BIT(width - 1)) || (symbol & 1))
++		return false;
++	low = (BIT(width) - 1) ^ symbol;
++	return !(low & (low + 1));
++}
++
++static int ws2812b_read_u32(struct device *dev, const char *name, u32 *value)
++{
++	if (!device_property_present(dev, name))
++		return 0;
++	return device_property_read_u32(dev, name, value);
++}
++
++static int ws2812b_read_config(struct device *dev, struct ws2812b_priv *priv)
++{
++	u32 reset_us = 280;
++
++	priv->bits_per_symbol = 3;
++	priv->zero_frame = 4;
++	priv->one_frame = 6;
++	if (ws2812b_read_u32(dev, "bits-per-symbol", &priv->bits_per_symbol) ||
++	    ws2812b_read_u32(dev, "spi-zero-frame", &priv->zero_frame) ||
++	    ws2812b_read_u32(dev, "spi-one-frame", &priv->one_frame) ||
++	    ws2812b_read_u32(dev, "reset-delay-us", &reset_us))
++		return -EINVAL;
++	if (priv->bits_per_symbol < 3 || priv->bits_per_symbol > 8 ||
++	    !ws2812b_valid_symbol(priv->zero_frame, priv->bits_per_symbol) ||
++	    !ws2812b_valid_symbol(priv->one_frame, priv->bits_per_symbol) ||
++	    priv->zero_frame >= priv->one_frame || reset_us < 50 || reset_us > 10000)
++		return -EINVAL;
++
++	/* Accommodate both 400 kbit/s and 800 kbit/s WS281x variants. */
++	if (priv->spi->max_speed_hz < priv->bits_per_symbol * 300000U ||
++	    priv->spi->max_speed_hz > priv->bits_per_symbol * 1000000U)
++		return -EINVAL;
++	priv->reset_len = div_u64((u64)priv->spi->max_speed_hz * reset_us + 7999999,
++			   8000000);
++	return 0;
++}
++
++static int ws2812b_probe(struct spi_device *spi)
++{
++	struct device *dev = &spi->dev;
++	struct ws2812b_priv *priv;
++	struct fwnode_handle *node;
++	unsigned int num_leds, i;
++	int ret;
++
++	if (spi->mode & (SPI_CPOL | SPI_CPHA | SPI_LSB_FIRST))
++		return dev_err_probe(dev, -EINVAL, "requires mode 0, MSB first\n");
++	spi->bits_per_word = 8;
++	ret = spi_setup(spi);
++	if (ret)
++		return ret;
++
++	num_leds = device_get_child_node_count(dev);
++	if (!num_leds)
++		return -EINVAL;
++	ret = ws2812b_read_u32(dev, "chain-length", &num_leds);
++	if (ret)
++		return ret;
++	if (!num_leds || num_leds > WS2812B_MAX_LEDS)
++		return -EINVAL;
++	priv = devm_kzalloc(dev, struct_size(priv, leds, num_leds), GFP_KERNEL);
++	if (!priv)
++		return -ENOMEM;
++	priv->spi = spi;
++	ret = ws2812b_read_config(dev, priv);
++	if (ret)
++		return dev_err_probe(dev, ret, "invalid SPI symbol timing configuration\n");
++	priv->data_len = num_leds * priv->bits_per_symbol * WS2812B_NUM_COLORS;
++	priv->data_buf = devm_kzalloc(dev, priv->data_len + 2 * priv->reset_len,
++				    GFP_KERNEL);
++	if (!priv->data_buf)
++		return -ENOMEM;
++	priv->num_leds = num_leds;
++	priv->spi = spi;
++	mutex_init(&priv->mutex);
++	spi_set_drvdata(spi, priv);
++
++	for (i = 0; i < num_leds * WS2812B_NUM_COLORS; i++)
++		ws2812b_set_byte(priv, i, 0);
++
++	/* Validate the whole chain before exposing any LED to userspace. */
++	device_for_each_child_node(dev, node) {
++		ret = ws2812b_init_led(priv, node);
++		if (ret) {
++			fwnode_handle_put(node);
++			return dev_err_probe(dev, ret, "invalid LED index or color order\n");
++		}
++	}
++	ret = ws2812b_write(priv);
++	if (ret)
++		return ret;
++
++	device_for_each_child_node(dev, node) {
++		struct led_init_data init_data = { .fwnode = node };
++		u32 cascade;
++
++		ret = fwnode_property_read_u32(node, "reg", &cascade);
++		if (!ret)
++			ret = devm_led_classdev_multicolor_register_ext(dev,
++					&priv->leds[cascade].mc_cdev, &init_data);
++		if (ret) {
++			fwnode_handle_put(node);
++			return ret;
++		}
++	}
++	return 0;
++}
++
++static const struct spi_device_id ws2812b_spi_ids[] = {
++	{ "ws2812b" },
++	{},
++};
++MODULE_DEVICE_TABLE(spi, ws2812b_spi_ids);
++
++static const struct of_device_id ws2812b_dt_ids[] = {
++	{ .compatible = "worldsemi,ws2812b" },
++	{},
++};
++MODULE_DEVICE_TABLE(of, ws2812b_dt_ids);
++
++static struct spi_driver ws2812b_driver = {
++	.probe = ws2812b_probe,
++	.id_table = ws2812b_spi_ids,
++	.driver = {
++		.name = KBUILD_MODNAME,
++		.of_match_table = ws2812b_dt_ids,
++	},
++};
++module_spi_driver(ws2812b_driver);
++
++MODULE_AUTHOR("Chuanhong Guo <gch981213@gmail.com>");
++MODULE_DESCRIPTION("WS2812B LED driver using SPI");
++MODULE_LICENSE("GPL");
+diff --git a/Documentation/devicetree/bindings/leds/worldsemi,ws2812b.yaml b/Documentation/devicetree/bindings/leds/worldsemi,ws2812b.yaml
+new file mode 100644
+--- /dev/null
++++ b/Documentation/devicetree/bindings/leds/worldsemi,ws2812b.yaml
+@@ -0,0 +1,100 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/leds/worldsemi,ws2812b.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: WorldSemi WS2812B LED chain driven through SPI MOSI
++
++maintainers:
++  - Chuanhong Guo <gch981213@gmail.com>
++
++description: |
++  Each chip consumes 24 MSB-first data bits and forwards subsequent bits.
++  An LED data bit is encoded as a high pulse followed by a low pulse using
++  a configurable SPI symbol. SPI must transmit the payload continuously.
++  The SPI bus must be dedicated to the chain; chip select is not connected.
++  Defaults encode zero as 100 and one as 110, at 2.105-2.85 MHz. A four-bit
++  1000/1110 encoding at 3.2 MHz can be described without changing the driver.
++  Timing properties below are a proposed local extension, not an accepted
++  Linux upstream ABI. Actual SPI clock rounding and pulse lengths must be
++  checked for the attached LED revision and SPI controller.
++
++allOf:
++  - $ref: /schemas/spi/spi-peripheral-props.yaml#
++
++properties:
++  compatible:
++    const: worldsemi,ws2812b
++  reg:
++    maxItems: 1
++  spi-max-frequency:
++    minimum: 900000
++    maximum: 8000000
++  '#address-cells':
++    const: 1
++  '#size-cells':
++    const: 0
++  chain-length:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 1
++    maximum: 1024
++    description: |
++      Total number of physical addresses, including gaps or unexposed LEDs.
++      Defaults to the number of LED child nodes. Each child reg must be less
++      than this value. Undescribed addresses are transmitted as black.
++  bits-per-symbol:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 3
++    maximum: 8
++    default: 3
++  spi-zero-frame:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 4
++    maximum: 254
++    default: 4
++    description: MSB-first zero symbol, one high pulse followed by low bits.
++  spi-one-frame:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 6
++    maximum: 254
++    default: 6
++    description: |
++      MSB-first one symbol. Must fit bits-per-symbol and have a longer high
++      pulse than spi-zero-frame. Both symbols must start high and end low.
++  reset-delay-us:
++    minimum: 50
++    maximum: 10000
++    default: 280
++    description: Minimum low duration sent before and after every payload.
++
++patternProperties:
++  '^led@[0-9a-f]+$':
++    type: object
++    $ref: common.yaml#
++    unevaluatedProperties: false
++    properties:
++      reg:
++        maxItems: 1
++        description: Zero-based physical position in the chain.
++      color:
++        const: 9
++      color-index:
++        $ref: /schemas/types.yaml#/definitions/uint32-array
++        minItems: 3
++        maxItems: 3
++        uniqueItems: true
++        items:
++          enum: [1, 2, 3]
++        default: [2, 1, 3]
++        description: Wire channel order, default green, red, blue.
++    required: [reg, color]
++
++required:
++  - compatible
++  - reg
++  - spi-max-frequency
++  - '#address-cells'
++  - '#size-cells'
++
++unevaluatedProperties: false
