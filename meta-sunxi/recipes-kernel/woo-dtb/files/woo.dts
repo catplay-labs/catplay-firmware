@@ -45,17 +45,17 @@
 		spi1 = &spi1;
 	};
 
-	/*gpio_keys: gpio-keys {
+	gpio_keys: gpio-keys {
 		compatible = "gpio-keys";
 
 		debug-button {
 			label = "debug-button";
-			gpios = <&pio 2 16 GPIO_ACTIVE_LOW>; // PC16
+			gpios = <&pio 2 16 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; /* PC16 */
 			linux,input-type = <EV_KEY>;
 			linux,code = <KEY_PROG1>;
 			debounce-interval = <20>;
 		};
-	};*/
+	};
 };
 
 &usbphy {
