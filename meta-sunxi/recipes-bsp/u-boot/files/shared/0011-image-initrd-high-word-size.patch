@@ -1,0 +1,21 @@
+Subject: [PATCH] boot: compare initrd_high with an unsigned long sentinel
+
+hextoul() returns an unsigned long. On RV32 phys_addr_t is 64-bit, so
+comparing its result with the signed int ~0 promotes the sentinel to
+0xffffffffffffffff and fails to recognize initrd_high=ffffffff.
+Use the width of the parsed value to retain the in-place ramdisk.
+
+Upstream-Status: Pending
+
+diff --git a/boot/image-board.c b/boot/image-board.c
+--- a/boot/image-board.c
++++ b/boot/image-board.c
+@@ -550,7 +550,7 @@ int boot_ramdisk_high(ulong rd_data, ulong rd_len, ulong *initrd_start,
+ 		 * turning the "load high" feature off. This is intentional.
+ 		 */
+ 		initrd_high = hextoul(s, NULL);
+-		if (initrd_high == ~0)
++		if (initrd_high == ~0UL)
+ 			initrd_copy_to_ram = 0;
+ 	} else {
+ 		initrd_high = env_get_bootm_mapsize() + env_get_bootm_low();

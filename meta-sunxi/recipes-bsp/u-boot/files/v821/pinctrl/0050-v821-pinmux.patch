@@ -1,0 +1,201 @@
+Subject: [PATCH] pinctrl: sunxi: add V821 pinmux and GPIO support
+
+Upstream-Status: Inappropriate [CatPlay V821 port]
+
+diff --git a/drivers/gpio/Kconfig b/drivers/gpio/Kconfig
+--- a/drivers/gpio/Kconfig
++++ b/drivers/gpio/Kconfig
+@@ -460,7 +460,7 @@
+ 
+ config SUNXI_GPIO
+ 	bool "Allwinner GPIO driver"
+-	depends on ARCH_SUNXI
++	depends on SOC_SUNXI
+ 	select SPL_STRTO if SPL
+ 	help
+ 	  Support the GPIO device in Allwinner SoCs.
+diff --git a/drivers/pinctrl/sunxi/Kconfig b/drivers/pinctrl/sunxi/Kconfig
+--- a/drivers/pinctrl/sunxi/Kconfig
++++ b/drivers/pinctrl/sunxi/Kconfig
+@@ -1,6 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0
+ 
+-if ARCH_SUNXI
++if SOC_SUNXI
+ 
+ config PINCTRL_SUNXI
+ 	select PINCTRL_FULL
+@@ -139,6 +139,14 @@
+ 	default MACH_SUN8I_R528 || MACH_SUN8I_V851S
+ 	select PINCTRL_SUNXI
+ 
++config PINCTRL_SUN300I_V821
++	bool "Support for the Allwinner V821 PIO"
++	default MACH_SUN300I_V821
++	select PINCTRL_SUNXI
++	help
++	  Enable support for the main pin controller and the RTC pin
++	  controller found on the Allwinner V821 SoC.
++
+ config PINCTRL_SUN55I_A523
+ 	bool "Support for the Allwinner A523 PIO"
+ 	default MACH_SUN55I_A523
+diff --git a/drivers/pinctrl/sunxi/pinctrl-sunxi.c b/drivers/pinctrl/sunxi/pinctrl-sunxi.c
+--- a/drivers/pinctrl/sunxi/pinctrl-sunxi.c
++++ b/drivers/pinctrl/sunxi/pinctrl-sunxi.c
+@@ -625,6 +625,34 @@
+ 	.num_banks	= 7,
+ };
+ 
++static const struct sunxi_pinctrl_function sun300i_v821_pinctrl_functions[] = {
++	{ "gpio_in",	0 },
++	{ "gpio_out",	1 },
++	{ "mmc0",	2 },	/* PC0-PC5 */
++	{ "spif",	2 },	/* PC6-PC11 */
++};
++
++static const struct sunxi_pinctrl_desc __maybe_unused sun300i_v821_pinctrl_desc = {
++	.functions	= sun300i_v821_pinctrl_functions,
++	.num_functions	= ARRAY_SIZE(sun300i_v821_pinctrl_functions),
++	.first_bank	= SUNXI_GPIO_A,
++	.num_banks	= 4,
++};
++
++static const struct sunxi_pinctrl_function sun300i_v821_r_pinctrl_functions[] = {
++	{ "gpio_in",	0 },
++	{ "gpio_out",	1 },
++	{ "uart0",	3 },	/* PL4-PL5 */
++	{ "uart3",	3 },	/* PL2-PL3 */
++};
++
++static const struct sunxi_pinctrl_desc __maybe_unused sun300i_v821_r_pinctrl_desc = {
++	.functions	= sun300i_v821_r_pinctrl_functions,
++	.num_functions	= ARRAY_SIZE(sun300i_v821_r_pinctrl_functions),
++	.first_bank	= SUNXI_GPIO_L,
++	.num_banks	= 1,
++};
++
+ static const struct sunxi_pinctrl_function sun50i_a64_pinctrl_functions[] = {
+ 	{ "emac",	4 },	/* PD8-PD23 */
+ 	{ "gpio_in",	0 },
+@@ -968,6 +996,16 @@
+ 	{
+ 		.compatible = "allwinner,sun20i-d1-pinctrl",
+ 		.data = (ulong)&sun20i_d1_pinctrl_desc,
++	},
++#endif
++#ifdef CONFIG_PINCTRL_SUN300I_V821
++	{
++		.compatible = "allwinner,sun300i-v821-pinctrl",
++		.data = (ulong)&sun300i_v821_pinctrl_desc,
++	},
++	{
++		.compatible = "allwinner,sun300i-v821-r-pinctrl",
++		.data = (ulong)&sun300i_v821_r_pinctrl_desc,
+ 	},
+ #endif
+ #ifdef CONFIG_PINCTRL_SUN50I_A64
+diff --git a/dts/upstream/Bindings/pinctrl/allwinner,sun300i-v821-pinctrl.yaml b/dts/upstream/Bindings/pinctrl/allwinner,sun300i-v821-pinctrl.yaml
+--- /dev/null
++++ b/dts/upstream/Bindings/pinctrl/allwinner,sun300i-v821-pinctrl.yaml
+@@ -0,0 +1,87 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/pinctrl/allwinner,sun300i-v821-pinctrl.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Allwinner V821 Pin Controllers
++
++maintainers: []
++
++properties:
++  compatible:
++    enum:
++      - allwinner,sun300i-v821-pinctrl
++      - allwinner,sun300i-v821-r-pinctrl
++
++  reg:
++    maxItems: 1
++
++  interrupts: true
++
++  clocks: true
++
++  clock-names: true
++
++  gpio-controller: true
++
++  "#gpio-cells":
++    const: 3
++
++  interrupt-controller: true
++
++  "#interrupt-cells":
++    const: 3
++
++patternProperties:
++  "-pins$":
++    type: object
++
++    properties:
++      pins: true
++      function: true
++      bias-disable: true
++      bias-pull-up: true
++      bias-pull-down: true
++      drive-strength:
++        enum: [10, 20, 30, 40]
++
++    required:
++      - pins
++      - function
++
++    additionalProperties: false
++
++required:
++  - compatible
++  - reg
++  - interrupts
++  - clocks
++  - clock-names
++  - gpio-controller
++  - "#gpio-cells"
++  - interrupt-controller
++  - "#interrupt-cells"
++
++additionalProperties: false
++
++examples:
++  - |
++    pio: pinctrl@42000000 {
++        compatible = "allwinner,sun300i-v821-pinctrl";
++        reg = <0 0x42000000 0 0x500>;
++        interrupts = <0 68 4>, <0 72 4>, <0 74 4>;
++        clocks = <&pio_apb>, <&dcxo>, <&losc>;
++        clock-names = "apb", "hosc", "losc";
++        gpio-controller;
++        #gpio-cells = <3>;
++        interrupt-controller;
++        #interrupt-cells = <3>;
++
++        mmc0_pins: mmc0-pins {
++            pins = "PC0", "PC1", "PC2", "PC3", "PC4", "PC5";
++            function = "mmc0";
++            drive-strength = <30>;
++            bias-pull-up;
++        };
++    };
+diff --git a/include/sunxi_gpio.h b/include/sunxi_gpio.h
+--- a/include/sunxi_gpio.h
++++ b/include/sunxi_gpio.h
+@@ -22,6 +22,9 @@
+ #elif defined(CONFIG_SUNXI_GEN_NCAT2)
+ #define SUNXI_PIO_BASE		0x02000000
+ #define SUNXI_R_PIO_BASE	0x07022000
++#elif defined(CONFIG_MACH_SUN300I_V821)
++#define SUNXI_PIO_BASE		0x42000000
++#define SUNXI_R_PIO_BASE	0x42000540
+ #else
+ #define SUNXI_PIO_BASE		0x01c20800
+ #define SUNXI_R_PIO_BASE	0x01f02c00

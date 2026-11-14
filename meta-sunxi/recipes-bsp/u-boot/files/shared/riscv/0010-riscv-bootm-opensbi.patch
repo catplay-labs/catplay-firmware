@@ -1,0 +1,175 @@
+Subject: [PATCH] riscv: boot Linux FIT configurations through OpenSBI
+
+Upstream-Status: Pending
+
+diff --git a/arch/riscv/Kconfig b/arch/riscv/Kconfig
+--- a/arch/riscv/Kconfig
++++ b/arch/riscv/Kconfig
+@@ -222,6 +222,23 @@ config RISCV_SMODE
+ 
+ endchoice
+ 
++config BOOTM_OPENSBI
++	bool "Boot Linux FIT configurations through OpenSBI"
++	depends on RISCV_MMODE && CMD_BOOTM && BOOTM_LINUX && FIT
++	help
++	  Load OpenSBI fw_dynamic from the firmware image referenced by a
++	  Linux FIT configuration. Pass the kernel entry, device tree and
++	  boot hart through the OpenSBI dynamic firmware interface.
++	  Configurations without OpenSBI retain the normal Linux boot path.
++
++config BOOTM_OPENSBI_SCRATCH_OPTIONS
++	hex "OpenSBI scratch options for bootm"
++	depends on BOOTM_OPENSBI
++	default 0x0
++	help
++	  Options passed to OpenSBI in fw_dynamic_info. Set bit 0 to
++	  suppress OpenSBI boot messages.
++
+ choice
+ 	prompt "SPL Run Mode"
+ 	default SPL_RISCV_MMODE
+diff --git a/arch/riscv/lib/bootm.c b/arch/riscv/lib/bootm.c
+index 69c9ca5..d0f3e16 100644
+--- a/arch/riscv/lib/bootm.c
++++ b/arch/riscv/lib/bootm.c
+@@ -7,6 +7,8 @@
+  */
+ 
+ #include <bootstage.h>
++#include <cpu_func.h>
++#include <opensbi.h>
+ #include <bootm.h>
+ #include <command.h>
+ #include <dm.h>
+@@ -25,6 +27,62 @@
+ 
+ DECLARE_GLOBAL_DATA_PTR;
+ 
++#if CONFIG_IS_ENABLED(BOOTM_OPENSBI)
++static struct fw_dynamic_info opensbi_info;
++static ulong opensbi_entry;
++static bool opensbi_loaded;
++
++static int bootm_load_opensbi(struct bootm_headers *images)
++{
++	const void *fit = images->fit_hdr_os;
++	const char *name;
++	ulong load, length;
++	int config, node;
++	u8 os, type;
++
++	/* Do not retain firmware state when preparing another Linux image. */
++	opensbi_loaded = false;
++	if (!fit || !images->fit_uname_cfg)
++		return 0;
++	config = fit_conf_get_node(fit, images->fit_uname_cfg);
++	if (config < 0)
++		return config;
++	if (!fdt_getprop(fit, config, FIT_FIRMWARE_PROP, NULL))
++		return 0;
++	node = fit_conf_get_prop_node(fit, config, FIT_FIRMWARE_PROP,
++				      IH_PHASE_NONE);
++	if (node < 0)
++		return node;
++	if (fit_image_get_os(fit, node, &os))
++		return -EINVAL;
++	if (os != IH_OS_OPENSBI)
++		return 0;
++	if (fit_image_get_type(fit, node, &type) || type != IH_TYPE_FIRMWARE)
++		return -EINVAL;
++
++	name = fit_get_name(fit, node, NULL);
++	node = fit_image_load(images, (ulong)fit, &name, &images->fit_uname_cfg,
++			      IH_ARCH_RISCV, IH_TYPE_FIRMWARE,
++			      BOOTSTAGE_ID_FIT_LOADABLE_START, FIT_LOAD_REQUIRED,
++			      &load, &length);
++	if (node < 0)
++		return node;
++	if (fit_image_get_entry(fit, node, &opensbi_entry))
++		opensbi_entry = load;
++
++	opensbi_info = (struct fw_dynamic_info) {
++		.magic = FW_DYNAMIC_INFO_MAGIC_VALUE,
++		.version = FW_DYNAMIC_INFO_VERSION,
++		.next_addr = images->ep,
++		.next_mode = FW_DYNAMIC_INFO_NEXT_MODE_S,
++		.options = CONFIG_BOOTM_OPENSBI_SCRATCH_OPTIONS,
++		.boot_hart = gd->arch.boot_hart,
++	};
++	opensbi_loaded = true;
++	return 0;
++}
++#endif
++
+ static void boot_prep_linux(struct bootm_headers *images)
+ {
+ 	if (CONFIG_IS_ENABLED(OF_LIBFDT) && IS_ENABLED(CONFIG_LMB) && images->ft_len) {
+@@ -33,6 +91,13 @@ static void boot_prep_linux(struct bootm_headers *images)
+ 			printf("FDT creation failed! hanging...");
+ 			hang();
+ 		}
++#if CONFIG_IS_ENABLED(BOOTM_OPENSBI)
++		if (bootm_load_opensbi(images)) {
++			bootstage_error(BOOTSTAGE_ID_FIT_LOADABLE_START);
++			printf("OpenSBI FIT firmware load failed! hanging...\n");
++			hang();
++		}
++#endif
+ 	} else {
+ 		printf("Device tree not found or missing FDT support\n");
+ 		hang();
+@@ -42,6 +107,8 @@ static void boot_prep_linux(struct bootm_headers *images)
+ static void boot_jump_linux(struct bootm_headers *images, int flag)
+ {
+ 	void (*kernel)(ulong hart, void *dtb);
++	ulong entry = images->ep;
++	ulong firmware_arg = 0;
+ #ifdef CONFIG_SMP
+ 	int ret;
+ #endif
+@@ -56,15 +123,28 @@ static void boot_jump_linux(struct bootm_headers *images, int flag)
+ 	bootm_final(flag);
+ 	cleanup_before_linux();
+ 
++#if CONFIG_IS_ENABLED(BOOTM_OPENSBI)
++	if (opensbi_loaded) {
++		entry = opensbi_entry;
++		firmware_arg = (ulong)&opensbi_info;
++		invalidate_icache_all();
++	}
++#endif
++
+ 	if (!(flag & BOOTM_STATE_OS_FAKE_GO)) {
+ 		if (CONFIG_IS_ENABLED(OF_LIBFDT) && images->ft_len) {
+ #ifdef CONFIG_SMP
+-			ret = smp_call_function(images->ep,
+-						(ulong)images->ft_addr, 0, 0);
++			ret = smp_call_function(entry, (ulong)images->ft_addr,
++						firmware_arg, 0);
+ 			if (ret)
+ 				hang();
+ #endif
+-			kernel(gd->arch.boot_hart, images->ft_addr);
++			if (firmware_arg)
++				((void (*)(ulong, void *, void *))entry)(
++					gd->arch.boot_hart, images->ft_addr,
++					(void *)firmware_arg);
++			else
++				kernel(gd->arch.boot_hart, images->ft_addr);
+ 		}
+ 	}
+ }
+diff --git a/boot/image-fit.c b/boot/image-fit.c
+index b0fcaf6..97bf35f 100644
+--- a/boot/image-fit.c
++++ b/boot/image-fit.c
+@@ -2200,6 +2200,8 @@ int fit_image_load(struct bootm_headers *images, ulong addr,
+ 
+ 	os_ok = image_type == IH_TYPE_FLATDT ||
+ 		image_type == IH_TYPE_FPGA ||
++		(image_type == IH_TYPE_FIRMWARE &&
++		 fit_image_check_os(fit, noffset, IH_OS_OPENSBI)) ||
+ 		fit_image_check_os(fit, noffset, IH_OS_LINUX) ||
+ 		fit_image_check_os(fit, noffset, IH_OS_U_BOOT) ||
+ 		fit_image_check_os(fit, noffset, IH_OS_TEE) ||

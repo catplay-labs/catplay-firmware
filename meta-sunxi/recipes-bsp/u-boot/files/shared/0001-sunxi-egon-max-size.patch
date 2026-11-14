@@ -47,10 +47,7 @@ diff --git a/arch/arm/mach-sunxi/Kconfig b/arch/arm/mach-sunxi/Kconfig
 index 370277f0ff..55873abc29 100644
 --- a/arch/arm/mach-sunxi/Kconfig
 +++ b/arch/arm/mach-sunxi/Kconfig
-@@ -229,6 +229,15 @@ config SUNXI_SRAM_ADDRESS
- 	Some newer SoCs map the boot ROM at address 0 instead and move the
- 	SRAM to a different address.
- 
+@@ -232,3 +232,12 @@ config SUNXI_SRAM_ADDRESS
 +config EGON_MAX_SIZE
 +	hex "Maximum size of the complete eGON image"
 +	depends on BINMAN && SPL_IMAGE_TYPE_SUNXI_EGON

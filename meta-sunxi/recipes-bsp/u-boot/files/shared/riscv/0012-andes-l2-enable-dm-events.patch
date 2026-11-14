@@ -1,0 +1,18 @@
+Subject: [PATCH] cache: andes-l2: enable DM events for post-relocation init
+
+Upstream-Status: Pending
+
+The Andes post-relocation cache init spy needs DM events even on boards
+that disable EFI and do not otherwise select DM_EVENT.
+
+diff --git a/drivers/cache/Kconfig b/drivers/cache/Kconfig
+--- a/drivers/cache/Kconfig
++++ b/drivers/cache/Kconfig
+@@ -26,6 +26,7 @@
+ 	bool "Andes L2 cache driver"
+ 	depends on RISCV
+ 	select CACHE
++	select DM_EVENT
+ 	help
+ 	  Support Andes L2 cache controller in AE350 platform.
+ 	  It will configure tag and data ram timing control from the

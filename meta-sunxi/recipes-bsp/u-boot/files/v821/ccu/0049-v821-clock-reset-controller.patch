@@ -1,0 +1,336 @@
+Subject: [PATCH] clk: sunxi: add V821 clock and reset controller
+
+Upstream-Status: Inappropriate [CatPlay V821 port]
+
+diff --git a/arch/riscv/include/asm/arch-sunxi/clock.h b/arch/riscv/include/asm/arch-sunxi/clock.h
+--- /dev/null
++++ b/arch/riscv/include/asm/arch-sunxi/clock.h
+@@ -0,0 +1,80 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef _ASM_ARCH_SUNXI_CLOCK_H
++#define _ASM_ARCH_SUNXI_CLOCK_H
++
++#include <asm/io.h>
++#include <asm/arch-sunxi/cpu.h>
++#include <linux/bitops.h>
++#include <linux/kernel.h>
++
++#define SUNXI_CCU_PLL_PERI_CTRL0	0x0010
++#define SUNXI_CCU_MMC0_CLK		0x0014
++#define SUNXI_CCU_SPI0_CLK		0x001c
++#define SUNXI_CCU_SPIF_CLK		0x0020
++#define SUNXI_CCU_BUS_GATE0		0x0080
++#define SUNXI_CCU_BUS_GATE1		0x0084
++#define SUNXI_CCU_BUS_RST0		0x0090
++#define SUNXI_CCU_BUS_RST1		0x0094
++
++#define CCM_SPIF_CTRL_ENABLE		BIT(31)
++#define CCM_SPIF_CTRL_SRC_MASK		GENMASK(25, 24)
++#define CCM_SPIF_CTRL_PLL_PERI_384M	(2U << 24)
++#define CCM_SPIF_CTRL_N_MASK		GENMASK(17, 16)
++#define CCM_SPIF_CTRL_N(x)		((x) << 16)
++#define CCM_SPIF_CTRL_M_MASK		GENMASK(3, 0)
++#define CCM_SPIF_CTRL_M(x)		((x) - 1)
++#define CCM_BUS_GATE1_SPIF		BIT(5)
++#define CCM_BUS_RST1_SPIF		BIT(5)
++
++/* Shared by the DM clock driver and SPL's board-managed SPIF setup. */
++static inline unsigned long clock_set_spif_rate(void __iomem *ccu,
++					       unsigned long rate)
++{
++	u32 best = 0;
++	unsigned long best_rate = 0;
++	unsigned int n;
++
++	if (!rate)
++		return 0;
++	for (n = 0; n < 4; n++) {
++		unsigned long parent = 384000000UL >> n;
++		u32 m = DIV_ROUND_UP(parent, rate);
++		unsigned long actual;
++
++		if (!m || m > 16)
++			continue;
++		actual = parent / m;
++		if (actual > rate)
++			continue;
++		if (!best || actual > best_rate) {
++			best = CCM_SPIF_CTRL_PLL_PERI_384M |
++			       CCM_SPIF_CTRL_N(n) | CCM_SPIF_CTRL_M(m);
++			best_rate = actual;
++		}
++	}
++	if (best_rate)
++		clrsetbits_le32(ccu + SUNXI_CCU_SPIF_CLK,
++			       CCM_SPIF_CTRL_SRC_MASK | CCM_SPIF_CTRL_N_MASK |
++			       CCM_SPIF_CTRL_M_MASK, best);
++	return best_rate;
++}
++
++#define CCM_MMC_CTRL_OSCM24		(0 << 24)
++#define CCM_MMC_CTRL_PLL6		BIT(24)
++#define CCM_MMC_CTRL_ENABLE		BIT(31)
++#define CCM_MMC_CTRL_N(x)		((x) << 16)
++#define CCM_MMC_CTRL_M(x)		((x) - 1)
++#define CCM_MMC_CTRL_OCLK_DLY(x)	((void)(x), 0)
++#define CCM_MMC_CTRL_SCLK_DLY(x)	((void)(x), 0)
++
++static inline unsigned int clock_get_pll6(void)
++{
++	u32 val = readl((void __iomem *)SUNXI_CCU_APP_BASE +
++			SUNXI_CCU_PLL_PERI_CTRL0);
++	unsigned int n = (val >> 8) & 0xff;
++	unsigned int m = val & 0x7;
++
++	return 48000000 * 2 * (n + 1) / (m + 1);
++}
++
++#endif
+diff --git a/drivers/clk/sunxi/Kconfig b/drivers/clk/sunxi/Kconfig
+--- a/drivers/clk/sunxi/Kconfig
++++ b/drivers/clk/sunxi/Kconfig
+@@ -1,6 +1,6 @@
+ config CLK_SUNXI
+ 	bool "Clock support for Allwinner SoCs"
+-	depends on CLK && ARCH_SUNXI
++	depends on CLK && SOC_SUNXI
+ 	select DM_RESET
+ 	select SPL_DM_RESET if SPL_CLK
+ 	default y
+@@ -94,6 +94,13 @@
+ 	  This enables common clock driver support for platforms based
+ 	  on Allwinner D1 SoC.
+ 
++config CLK_SUN300I_V821
++	bool "Clock driver for Allwinner V821"
++	default MACH_SUN300I_V821
++	help
++	  Enable support for the clock gates and resets used by U-Boot on the
++	  Allwinner V821 SoC. The driver also programs SPI module clock rates.
++
+ config CLK_SUN50I_H6
+ 	bool "Clock driver for Allwinner H6"
+ 	default MACH_SUN50I_H6
+diff --git a/drivers/clk/sunxi/Makefile b/drivers/clk/sunxi/Makefile
+--- a/drivers/clk/sunxi/Makefile
++++ b/drivers/clk/sunxi/Makefile
+@@ -20,6 +20,7 @@
+ obj-$(CONFIG_CLK_SUN9I_A80) += clk_a80.o
+ obj-$(CONFIG_CLK_SUN8I_H3) += clk_h3.o
+ obj-$(CONFIG_CLK_SUN20I_D1) += clk_d1.o
++obj-$(CONFIG_CLK_SUN300I_V821) += clk_v821.o
+ obj-$(CONFIG_CLK_SUN50I_H6) += clk_h6.o
+ obj-$(CONFIG_CLK_SUN50I_H6_R) += clk_h6_r.o
+ obj-$(CONFIG_CLK_SUN50I_H616) += clk_h616.o
+diff --git a/drivers/clk/sunxi/clk_sunxi.c b/drivers/clk/sunxi/clk_sunxi.c
+--- a/drivers/clk/sunxi/clk_sunxi.c
++++ b/drivers/clk/sunxi/clk_sunxi.c
+@@ -67,7 +67,10 @@
+ static const struct clk_ops sunxi_clk_ops = {
+ 	.enable = sunxi_clk_enable,
+ 	.disable = sunxi_clk_disable,
++#ifdef CONFIG_CLK_SUN300I_V821
++	.set_rate = sunxi_clk_set_rate,
++#endif
+ };
+ 
+ static int sunxi_clk_bind(struct udevice *dev)
+ {
+@@ -202,6 +208,10 @@
+ 	{ .compatible = "allwinner,sun20i-d1-ccu",
+ 	  .data = (ulong)&d1_ccu_desc },
+ #endif
++#ifdef CONFIG_CLK_SUN300I_V821
++	{ .compatible = "allwinner,sun300i-v821-app-ccu",
++	  .data = (ulong)&v821_ccu_desc },
++#endif
+ #ifdef CONFIG_CLK_SUN50I_H6
+ 	{ .compatible = "allwinner,sun50i-h6-ccu",
+ 	  .data = (ulong)&h6_ccu_desc },
+diff --git a/drivers/clk/sunxi/clk_v821.c b/drivers/clk/sunxi/clk_v821.c
+--- /dev/null
++++ b/drivers/clk/sunxi/clk_v821.c
+@@ -0,0 +1,57 @@
++// SPDX-License-Identifier: GPL-2.0+
++
++#include <clk-uclass.h>
++#include <dm.h>
++#include <clk/sunxi.h>
++#include <asm/io.h>
++#include <asm/arch-sunxi/clock.h>
++#include <dt-bindings/clock/sun300i-v821-ccu.h>
++#include <dt-bindings/reset/sun300i-v821-ccu.h>
++#include <linux/bitops.h>
++#include <linux/kernel.h>
++
++static struct ccu_clk_gate v821_gates[] = {
++	[CLK_MMC0]		= GATE(0x14, BIT(31)),
++	[CLK_MMC1]		= GATE(0x5c, BIT(31)),
++	[CLK_SPI0]		= GATE(0x1c, BIT(31)),
++	[CLK_SPIF]		= GATE(SUNXI_CCU_SPIF_CLK, CCM_SPIF_CTRL_ENABLE),
++	[CLK_BUS_MMC0]		= GATE(0x84, BIT(20)),
++	[CLK_BUS_MMC1]		= GATE(0x84, BIT(21)),
++	[CLK_BUS_UART0]		= GATE(0x80, BIT(15)),
++	[CLK_BUS_UART1]		= GATE(0x80, BIT(16)),
++	[CLK_BUS_UART2]		= GATE(0x80, BIT(17)),
++	[CLK_BUS_UART3]		= GATE(0x80, BIT(18)),
++	[CLK_BUS_SPI0]		= GATE(0x84, BIT(4)),
++	[CLK_BUS_SPIF]		= GATE(SUNXI_CCU_BUS_GATE1, CCM_BUS_GATE1_SPIF),
++};
++
++static struct ccu_reset v821_resets[] = {
++	[RST_BUS_MMC0]		= RESET(0x94, BIT(20)),
++	[RST_BUS_MMC1]		= RESET(0x94, BIT(21)),
++	[RST_BUS_UART0]		= RESET(0x90, BIT(15)),
++	[RST_BUS_UART1]		= RESET(0x90, BIT(16)),
++	[RST_BUS_UART2]		= RESET(0x90, BIT(17)),
++	[RST_BUS_UART3]		= RESET(0x90, BIT(18)),
++	[RST_BUS_SPI0]		= RESET(0x94, BIT(4)),
++	[RST_BUS_SPIF]		= RESET(SUNXI_CCU_BUS_RST1, CCM_BUS_RST1_SPIF),
++};
++
++ulong sunxi_clk_set_rate(struct clk *clk, ulong rate)
++{
++	struct ccu_plat *plat = dev_get_plat(clk->dev);
++	ulong actual;
++
++	if (!rate)
++		return -EINVAL;
++	if (clk->id != CLK_SPIF)
++		return -ENOSYS;
++	actual = clock_set_spif_rate(plat->base, rate);
++	return actual ? actual : -EINVAL;
++}
++
++const struct ccu_desc v821_ccu_desc = {
++	.gates = v821_gates,
++	.resets = v821_resets,
++	.num_gates = ARRAY_SIZE(v821_gates),
++	.num_resets = ARRAY_SIZE(v821_resets),
++};
+diff --git a/drivers/reset/Kconfig b/drivers/reset/Kconfig
+--- a/drivers/reset/Kconfig
++++ b/drivers/reset/Kconfig
+@@ -179,7 +179,7 @@
+ 
+ config RESET_SUNXI
+ 	bool "RESET support for Allwinner SoCs"
+-	depends on DM_RESET && ARCH_SUNXI
++	depends on DM_RESET && SOC_SUNXI
+ 	default y
+ 	help
+ 	  This enables support for common reset driver for
+diff --git a/dts/upstream/Bindings/clock/allwinner,sun300i-v821-ccu.yaml b/dts/upstream/Bindings/clock/allwinner,sun300i-v821-ccu.yaml
+--- /dev/null
++++ b/dts/upstream/Bindings/clock/allwinner,sun300i-v821-ccu.yaml
+@@ -0,0 +1,51 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/clock/allwinner,sun300i-v821-ccu.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Allwinner V821 Application Clock Control Unit
++
++maintainers: []
++
++properties:
++  compatible:
++    const: allwinner,sun300i-v821-app-ccu
++
++  reg:
++    maxItems: 1
++
++  clocks:
++    items:
++      - description: High Frequency Oscillator
++
++  clock-names:
++    items:
++      - const: hosc
++
++  "#clock-cells":
++    const: 1
++
++  "#reset-cells":
++    const: 1
++
++required:
++  - compatible
++  - reg
++  - clocks
++  - clock-names
++  - "#clock-cells"
++  - "#reset-cells"
++
++additionalProperties: false
++
++examples:
++  - |
++    ccu: clock-controller@42001000 {
++        compatible = "allwinner,sun300i-v821-app-ccu";
++        reg = <0 0x42001000 0 0x100>;
++        clocks = <&dcxo>;
++        clock-names = "hosc";
++        #clock-cells = <1>;
++        #reset-cells = <1>;
++    };
+diff --git a/dts/upstream/include/dt-bindings/clock/sun300i-v821-ccu.h b/dts/upstream/include/dt-bindings/clock/sun300i-v821-ccu.h
+--- /dev/null
++++ b/dts/upstream/include/dt-bindings/clock/sun300i-v821-ccu.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++#ifndef _DT_BINDINGS_CLOCK_SUN300I_V821_CCU_H
++#define _DT_BINDINGS_CLOCK_SUN300I_V821_CCU_H
++
++#define CLK_MMC0		0
++#define CLK_MMC1		1
++#define CLK_SPI0		2
++#define CLK_SPIF		3
++#define CLK_BUS_MMC0		4
++#define CLK_BUS_MMC1		5
++#define CLK_BUS_UART0		6
++#define CLK_BUS_UART1		7
++#define CLK_BUS_UART2		8
++#define CLK_BUS_UART3		9
++#define CLK_BUS_SPI0		10
++#define CLK_BUS_SPIF		11
++
++#endif
+diff --git a/dts/upstream/include/dt-bindings/reset/sun300i-v821-ccu.h b/dts/upstream/include/dt-bindings/reset/sun300i-v821-ccu.h
+--- /dev/null
++++ b/dts/upstream/include/dt-bindings/reset/sun300i-v821-ccu.h
+@@ -0,0 +1,14 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++#ifndef _DT_BINDINGS_RESET_SUN300I_V821_CCU_H
++#define _DT_BINDINGS_RESET_SUN300I_V821_CCU_H
++
++#define RST_BUS_MMC0		0
++#define RST_BUS_MMC1		1
++#define RST_BUS_UART0		2
++#define RST_BUS_UART1		3
++#define RST_BUS_UART2		4
++#define RST_BUS_UART3		5
++#define RST_BUS_SPI0		6
++#define RST_BUS_SPIF		7
++
++#endif
+diff --git a/include/clk/sunxi.h b/include/clk/sunxi.h
+--- a/include/clk/sunxi.h
++++ b/include/clk/sunxi.h
+@@ -8,6 +8,8 @@
+ #define _CLK_SUNXI_H
+ 
+ #include <linux/bitops.h>
++
++struct clk;
+ 
+ /**
+  * enum ccu_flags - ccu clock/reset flags
+@@ -85,4 +87,6 @@
+ 	const struct ccu_desc *desc;
+ };
+ 
++ulong sunxi_clk_set_rate(struct clk *clk, ulong rate);
++extern const struct ccu_desc v821_ccu_desc;
+ #endif /* _CLK_SUNXI_H */

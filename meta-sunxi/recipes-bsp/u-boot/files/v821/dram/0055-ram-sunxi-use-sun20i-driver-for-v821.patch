@@ -1,0 +1,385 @@
+Subject: [PATCH] ram: sunxi: use sun20i DRAM driver for V821
+
+Implement the CatPlay V821 MMIO/PLL variant and retain deployed Brandy
+parameters in v821_defconfig. No vendor DRAM assembly is included.
+Upstream-Status: Inappropriate [CatPlay V821 port]
+
+diff --git a/drivers/ram/sunxi/Kconfig b/drivers/ram/sunxi/Kconfig
+index fcf3547..7206f76 100644
+--- a/drivers/ram/sunxi/Kconfig
++++ b/drivers/ram/sunxi/Kconfig
+@@ -1,6 +1,6 @@
+ config DRAM_SUN20I_D1
+ 	bool
+-	depends on ARCH_SUNXI
++	depends on ARCH_SUNXI || MACH_SUN300I_V821
+ 	help
+ 	  This enables support for the DRAM controller driver covering
+ 	  the Allwinner D1/R528/T113s SoCs.
+@@ -121,3 +121,20 @@ config DRAM_SUNXI_TPR3
+ 	  TPR3 value from vendor DRAM settings.
+ 
+ endif
++
++config DRAM_SUNXI_V821_HOSC_MHZ
++	int "V821 HOSC frequency in MHz"
++	depends on MACH_SUN300I_V821
++	range 24 40
++	default 24
++
++if MACH_SUN300I_V821
++# The ARM sunxi Kconfig is not sourced for this RISC-V SoC.
++config DRAM_CLK
++	int "DRAM clock in MHz"
++	default 520
++
++config DRAM_ZQ
++	int "DRAM ZQ calibration value"
++	default 8092665
++endif
+diff --git a/drivers/ram/sunxi/dram_sun20i_d1.c b/drivers/ram/sunxi/dram_sun20i_d1.c
+index 0e8aee0..7276c0c 100644
+--- a/drivers/ram/sunxi/dram_sun20i_d1.c
++++ b/drivers/ram/sunxi/dram_sun20i_d1.c
+@@ -13,8 +13,13 @@
+  */
+ 
+ #include <asm/io.h>
++#ifdef CONFIG_MACH_SUN300I_V821
++#include <asm/arch-sunxi/cpu.h>
++#else
+ #include <asm/arch/clock.h>
+ #include <asm/arch/cpu.h>
++#endif
++#include <linux/kernel.h>
+ #include <config.h>
+ #ifdef CONFIG_RAM
+   #include <dm.h>
+@@ -27,11 +32,41 @@
+ 
+ #define SUNXI_R_CPUCFG_SUP_STAN_FLAG 0x1d4
+ 
++#ifdef CONFIG_MACH_SUN300I_V821
++#define VDD_SYS_PWROFF_GATING_REG 0x838
++#define ANALOG_PWROFF_GATING_REG 0x83c
++#define V821_DDR_PLL ((void __iomem *)0x4a010080UL)
++#define V821_DDR_CLK ((void __iomem *)0x42001004UL)
++#define V821_MBUS_RESET ((void __iomem *)0x42001094UL)
++#define V821_MBUS_GATE ((void __iomem *)0x42001090UL)
++#define V821_DRAM_RESET ((void __iomem *)0x42001084UL)
++#define V821_DRAM_GATE ((void __iomem *)0x42001080UL)
++#else
+ #define VDD_SYS_PWROFF_GATING_REG 0x250
+ #define ANALOG_PWROFF_GATING_REG 0x254
++#endif
+ 
+ #define SP_STDBY_FLAG_REG 0x1f8
+ 
++static bool mctl_is_resume(void)
++{
++#ifdef CONFIG_MACH_SUN300I_V821
++	return (readl((void __iomem *)(SUNXI_PRCM_BASE + 0x1c0)) & 0xf) == 1;
++#else
++	return readl((void __iomem *)(SUNXI_R_CPUCFG_BASE +
++		     SUNXI_R_CPUCFG_SUP_STAN_FLAG)) & BIT(16);
++#endif
++}
++
++static bool mctl_test_is_resume(void)
++{
++#ifdef CONFIG_MACH_SUN300I_V821
++	return mctl_is_resume();
++#else
++	return readl((void __iomem *)(SUNXI_RTC_BASE + SP_STDBY_FLAG_REG)) & BIT(16);
++#endif
++}
++
+ static inline int ns_to_t(struct dram_para *para, int nanoseconds)
+ {
+ 	const unsigned int ctrl_freq = para->clk / 2;
+@@ -70,7 +105,7 @@ static void sid_read_ldoB_cal(struct dram_para *para)
+ 
+ static uint32_t sid_read_soc_chipid(void)
+ {
+-	return readl(SUNXI_SID_BASE + 0x00) & 0xffff;
++	return readl((void __iomem *)(uintptr_t)(SUNXI_SID_BASE + 0x00)) & 0xffff;
+ }
+ 
+ static void dram_voltage_set(struct dram_para *para)
+@@ -105,7 +140,8 @@ static void dram_enable_all_master(void)
+ 			(struct sunxi_mctl_com_reg *)SUNXI_DRAM_COM_BASE;
+ 	
+ 	writel(~0, &mctl_com->maer0);
+-	writel(0xffff, &mctl_com->maer1);
++	writel(IS_ENABLED(CONFIG_MACH_SUN300I_V821) ? 0xff : 0xffff,
++	       &mctl_com->maer1);
+ 	writel(0xffff, &mctl_com->maer2);
+ 	udelay(10);
+ }
+@@ -515,6 +551,57 @@ static void mctl_set_timing_params(struct dram_para *para)
+ // Purpose of this routine seems to be to initialize the PLL driving
+ // the MBUS and sdram.
+ //
++#ifdef CONFIG_MACH_SUN300I_V821
++static u32 v821_set_pll_ddr_clk(struct dram_para *para)
++{
++	const u32 hosc = CONFIG_DRAM_SUNXI_V821_HOSC_MHZ;
++	u32 clock, n, m = 1, val;
++
++	clock = (para->tpr13 & BIT(6)) ? para->tpr9 : para->clk;
++	n = (clock * 2) / hosc;
++	if (n <= 11) {
++		n *= 4;
++		m = 2;
++	}
++	val = readl(V821_DDR_PLL) & 0xf7f800f8;
++	val |= (m - 1) | ((m - 1) << 1) | ((n - 1) << 8);
++	val |= BIT(31) | BIT(30);
++	writel(val, V821_DDR_PLL);
++	clrbits_le32(V821_DDR_PLL, BIT(29));
++	setbits_le32(V821_DDR_PLL, BIT(29));
++	while (!(readl(V821_DDR_PLL) & BIT(28)))
++		;
++	udelay(20);
++	setbits_le32(V821_DDR_PLL, BIT(27));
++	val = (readl(V821_DDR_CLK) & 0xf8fcffe0) | 0x81000000;
++	writel(val, V821_DDR_CLK);
++	return ((n * hosc) / m) / m;
++}
++
++static void mctl_sys_init(struct dram_para *para)
++{
++	u32 clk;
++	clrbits_le32(V821_MBUS_RESET, BIT(12));
++	clrbits_le32(V821_MBUS_GATE, BIT(3));
++	clrbits_le32(V821_DRAM_RESET, BIT(12));
++	clrbits_le32(V821_DRAM_GATE, BIT(3));
++	clrbits_le32(V821_DDR_CLK, BIT(31));
++	setbits_le32(V821_DDR_CLK, BIT(27));
++	udelay(10);
++	clk = v821_set_pll_ddr_clk(para);
++	para->clk = clk / 2;
++	udelay(100);
++	dram_disable_all_master();
++	setbits_le32(V821_MBUS_GATE, BIT(3));
++	setbits_le32(V821_MBUS_RESET, BIT(12));
++	setbits_le32(V821_DRAM_GATE, BIT(3));
++	setbits_le32(V821_DRAM_RESET, BIT(12));
++	setbits_le32(V821_DDR_CLK, BIT(31) | BIT(27));
++	udelay(5);
++	writel(0x8000, SUNXI_DRAM_PHY_BASE + 0xc);
++	udelay(10);
++}
++#else
+ static int ccu_set_pll_ddr_clk(int index, struct dram_para *para)
+ {
+ 	struct sunxi_ccm_reg * const ccm =
+@@ -595,6 +682,8 @@ static void mctl_sys_init(struct dram_para *para)
+ 	udelay(10);
+ }
+ 
++#endif
++
+ // The main purpose of this routine seems to be to copy an address configuration
+ // from the dram_para1 and dram_para2 fields to the PHY configuration registers
+ // (MCTL_COM_WORK_MODE0, MCTL_COM_WORK_MODE1).
+@@ -707,7 +796,7 @@ static void mctl_phy_ac_remapping_legacy(struct dram_para *para)
+ 		para->type != SUNXI_DRAM_TYPE_DDR3)
+ 		return;
+ 
+-	fuse = (readl(SUNXI_SID_BASE + 0x28) & 0xf00) >> 8;
++	fuse = (readl((void __iomem *)(uintptr_t)(SUNXI_SID_BASE + 0x28)) & 0xf00) >> 8;
+ 	debug("DDR efuse: 0x%x\n", fuse);
+ 	debug("SoC Chip ID: 0x%08x\n", sid_read_soc_chipid());
+ 
+@@ -896,7 +985,7 @@ static unsigned int mctl_channel_init(unsigned int ch_index,
+ 	clrsetbits_le32(&mctl_phy->dtcr, 0x0fffffff,
+ 			(para->para2 & BIT(12)) ? 0x03000001 : 0x01000007);
+ 
+-	if (readl((SUNXI_R_CPUCFG_BASE + SUNXI_R_CPUCFG_SUP_STAN_FLAG)) & (1 << 16)) {
++	if (mctl_is_resume()) {
+ 		clrbits_le32((SUNXI_PRCM_BASE + VDD_SYS_PWROFF_GATING_REG), 0x2);
+ 		udelay(10);
+ 	}
+@@ -919,7 +1008,7 @@ static unsigned int mctl_channel_init(unsigned int ch_index,
+ 		else
+ 			writel(0x520, &mctl_phy->pir);
+ 	} else {
+-		if ((readl((SUNXI_R_CPUCFG_BASE + SUNXI_R_CPUCFG_SUP_STAN_FLAG)) & (1 << 16)) == 0) {
++		if ((mctl_is_resume()) == 0) {
+ 			// prep DRAM init + PHY reset + d-cal + PLL init + z-cal
+ 			if (para->type == SUNXI_DRAM_TYPE_DDR3)
+ 				writel(0x1f2, &mctl_phy->pir); // + DRAM reset
+@@ -930,13 +1019,12 @@ static unsigned int mctl_channel_init(unsigned int ch_index,
+ 			writel(0x62, &mctl_phy->pir);
+ 		}
+ 	}
+-
+ 	setbits_le32(&mctl_phy->pir, BIT(0)); // GO
+ 
+ 	udelay(10);
+ 	while ((readl(&mctl_phy->pgsr0) & BIT(0)) == 0) {} // wait for IDONE
+ 
+-	if (readl((SUNXI_R_CPUCFG_BASE + SUNXI_R_CPUCFG_SUP_STAN_FLAG)) & BIT(16)) {
++	if (mctl_is_resume()) {
+ 		clrsetbits_le32(&mctl_phy->pgcr3, 0x06000000, 0x04000000);
+ 		udelay(10);
+ 
+@@ -962,7 +1050,6 @@ static unsigned int mctl_channel_init(unsigned int ch_index,
+ 			while ((readl(&mctl_phy->pgsr0) & BIT(0)) == 0) {}
+ 		}
+ 	}
+-
+ 	// Check for training error
+ 	if (readl(&mctl_phy->pgsr0) & BIT(20)) {
+ 		printf("ZQ calibration error, check external 240 ohm resistor\n");
+@@ -1086,20 +1173,20 @@ static int dramc_simple_wr_test(unsigned int mem_mb, int len)
+ 
+ 	addr = (unsigned int *)CFG_SYS_SDRAM_BASE;
+ 	for (i = 0; i != len; i++, addr++) {
+-		writel(patt1 + i, (unsigned long)addr);
+-		writel(patt2 + i, (unsigned long)(addr + offs));
++		writel(patt1 + i, addr);
++		writel(patt2 + i, addr + offs);
+ 	}
+ 
+ 	addr = (unsigned int *)CFG_SYS_SDRAM_BASE;
+ 	for (i = 0; i != len; i++) {
+-		v1 = readl((unsigned long)(addr + i));
++		v1 = readl(addr + i);
+ 		v2 = patt1 + i;
+ 		if (v1 != v2) {
+ 			printf("DRAM: simple test FAIL\n");
+ 			printf("%x != %x at address %p\n", v1, v2, addr + i);
+ 			return 1;
+ 		}
+-		v1 = readl((unsigned long)(addr + offs + i));
++		v1 = readl(addr + offs + i);
+ 		v2 = patt2 + i;
+ 		if (v1 != v2) {
+ 			printf("DRAM: simple test FAIL\n");
+@@ -1142,7 +1229,9 @@ static int mctl_core_init(struct dram_para *para)
+ 
+ 	mctl_com_init(para);
+ 
++#ifndef CONFIG_MACH_SUN300I_V821
+ 	mctl_phy_ac_remapping(para);
++#endif
+ 
+ 	mctl_set_timing_params(para);
+ 
+@@ -1195,7 +1284,7 @@ static int auto_scan_dram_size(struct dram_para *para)
+ 		/* write test pattern */
+ 		for (i = 0; i < 64; i++) {
+ 			writel((i % 2) ? (CFG_SYS_SDRAM_BASE + 4 * i) : (~(CFG_SYS_SDRAM_BASE + 4 * i)),
+-				   CFG_SYS_SDRAM_BASE + 4 * i);
++			       (void __iomem *)(uintptr_t)(CFG_SYS_SDRAM_BASE + 4 * i));
+ 		}
+ 		/* set row mode */
+ 		clrsetbits_le32(mc_work_mode, 0xf0c, 0x6f0);
+@@ -1206,7 +1295,7 @@ static int auto_scan_dram_size(struct dram_para *para)
+ 			cnt = 0;
+ 			for (j = 0; j < 64; j++) {
+ 				reg_val = (j % 2) ? (rank1_addr + 4 * j) : (~(rank1_addr + 4 * j));
+-				if (reg_val == readl(ret + j * 4)) {
++				if (reg_val == readl((void __iomem *)(uintptr_t)(ret + j * 4))) {
+ 					cnt++;
+ 				} else
+ 					break;
+@@ -1240,7 +1329,7 @@ static int auto_scan_dram_size(struct dram_para *para)
+ 			cnt = 0;
+ 			for (j = 0; j < 64; j++) {
+ 				reg_val = (j % 2) ? (rank1_addr + 4 * j) : (~(rank1_addr + 4 * j));
+-				if (reg_val == readl(ret + j * 4)) {
++				if (reg_val == readl((void __iomem *)(uintptr_t)(ret + j * 4))) {
+ 					cnt++;
+ 				} else
+ 					break;
+@@ -1273,7 +1362,7 @@ static int auto_scan_dram_size(struct dram_para *para)
+ 			cnt = 0;
+ 			for (j = 0; j < 64; j++) {
+ 				reg_val = (j % 2) ? (CFG_SYS_SDRAM_BASE + 4 * j) : (~(CFG_SYS_SDRAM_BASE + 4 * j));
+-				if (reg_val == readl(ret + j * 4)) {
++				if (reg_val == readl((void __iomem *)(uintptr_t)(ret + j * 4))) {
+ 					cnt++;
+ 				} else {
+ 					break;
+@@ -1395,6 +1484,13 @@ static int init_dram(struct dram_para *para)
+ 	else
+ 		debug("DRAMC ZQ value: 0x%x\n", para->zq);
+ 
++#ifdef CONFIG_MACH_SUN300I_V821
++	/* V821 vendor clears both PMU RTC power-off gates before ZQ setup. */
++	writel(0, (void __iomem *)(SUNXI_PRCM_BASE +
++				 VDD_SYS_PWROFF_GATING_REG));
++	writel(0, (void __iomem *)(SUNXI_PRCM_BASE +
++				 ANALOG_PWROFF_GATING_REG));
++#endif
+ 	/* Test ZQ status */
+ 	if (para->tpr13 & BIT(16)) {
+ 		debug("DRAM only have internal ZQ\n");
+@@ -1403,7 +1499,8 @@ static int init_dram(struct dram_para *para)
+ 		udelay(10);
+ 	} else {
+ 		clrbits_le32(&sramc->zq_cal_ctrl, 0x3);
+-		writel(para->tpr13 & (1 << 16), (SUNXI_PRCM_BASE + ANALOG_PWROFF_GATING_REG));
++		writel(para->tpr13 & BIT(16),
++		       (void __iomem *)(SUNXI_PRCM_BASE + ANALOG_PWROFF_GATING_REG));
+ 		udelay(10);
+ 		clrsetbits_le32(&sramc->zq_cal_ctrl, 0x108, BIT(1));
+ 		udelay(10);
+@@ -1412,7 +1509,9 @@ static int init_dram(struct dram_para *para)
+ 		debug("ZQ value = 0x%x\n", readl(&sramc->zq_res_status));
+ 	}
+ 
++#ifndef CONFIG_MACH_SUN300I_V821
+ 	dram_voltage_set(para);
++#endif
+ 
+ 	/* Set SDRAM controller auto config */
+ 	if ((para->tpr13 & BIT(0)) == 0) {
+@@ -1479,7 +1578,8 @@ static int init_dram(struct dram_para *para)
+ 		writel(readl(&mctl_phy->vtfcr) | 0x300, &mctl_phy->vtfcr);
+ 
+ 	/* V85x boot0 uses TPR13[26] for PGCR2[13], independently of ZQ. */
+-	rc = IS_ENABLED(CONFIG_MACH_SUN8I_V851S) ? BIT(26) : BIT(16);
++	rc = (IS_ENABLED(CONFIG_MACH_SUN8I_V851S) ||
++	      IS_ENABLED(CONFIG_MACH_SUN300I_V821)) ? BIT(26) : BIT(16);
+ 	if (para->tpr13 & rc)
+ 		clrbits_le32(&mctl_phy->pgcr2, BIT(13));
+ 	else
+@@ -1491,7 +1591,7 @@ static int init_dram(struct dram_para *para)
+ 
+ 	dram_enable_all_master();
+ 	if (para->tpr13 & BIT(28)) {
+-		if ((readl(SUNXI_RTC_BASE + SP_STDBY_FLAG_REG) & BIT(16)) || dramc_simple_wr_test(mem_size_mb, 4096))
++		if (mctl_test_is_resume() || dramc_simple_wr_test(mem_size_mb, 4096))
+ 			return 0;
+ 	}
+ 
+diff --git a/drivers/ram/sunxi/dram_sun20i_d1.h b/drivers/ram/sunxi/dram_sun20i_d1.h
+index a1aa065..6fe3cd2 100644
+--- a/drivers/ram/sunxi/dram_sun20i_d1.h
++++ b/drivers/ram/sunxi/dram_sun20i_d1.h
+@@ -186,7 +186,7 @@ enum sunxi_soc_chipid {
+  */
+ struct dram_para {
+ 	/* normal configuration */
+-	const u32 clk;
++	u32 clk;
+ 	const u32 type;
+ 	const u32 zq;
+ 	const u32 odt_en;
+diff --git a/arch/riscv/include/asm/arch-sunxi/dram.h b/arch/riscv/include/asm/arch-sunxi/dram.h
+new file mode 100644
+index 0000000..3ea62a7
+--- /dev/null
++++ b/arch/riscv/include/asm/arch-sunxi/dram.h
+@@ -0,0 +1,7 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef __ASM_ARCH_SUNXI_DRAM_H
++#define __ASM_ARCH_SUNXI_DRAM_H
++
++unsigned long sunxi_dram_init(void);
++
++#endif

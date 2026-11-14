@@ -6,9 +6,6 @@ The SPL driver-model watchdog needs the same enabled hardware node as
 U-Boot proper. Keep it in the SPL device tree when bootph filtering runs.
 Stop it when SPL intentionally returns to BootROM FEL, which cannot service
 the timer during a large USB transfer.
-Use a phase-aware check for watchdog sysreset registration: the proper
-configuration enables it, but SPL does not link the sysreset provider.
-Only format the servicing string when sprintf is linked in this phase.
 
 ---
 diff --git a/arch/arm/mach-sunxi/board.c b/arch/arm/mach-sunxi/board.c
@@ -44,19 +41,3 @@ diff --git a/arch/arm/dts/sunxi-u-boot.dtsi b/arch/arm/dts/sunxi-u-boot.dtsi
  	status = "okay";
  };
  #endif
-diff --git a/drivers/watchdog/wdt-uclass.c b/drivers/watchdog/wdt-uclass.c
---- a/drivers/watchdog/wdt-uclass.c
-+++ b/drivers/watchdog/wdt-uclass.c
-@@ -74,6 +74,6 @@ static void init_watchdog_dev(struct udevice *dev)
- 	priv = dev_get_uclass_priv(dev);
- 
--	if (IS_ENABLED(CONFIG_SYSRESET_WATCHDOG_AUTO)) {
-+	if (CONFIG_IS_ENABLED(SYSRESET_WATCHDOG_AUTO)) {
- 		ret = sysreset_register_wdt(dev);
- 		if (ret)
- 			printf("WDT:   Failed to register %s for sysreset\n",
-@@ -142,2 +142,3 @@ int wdt_start(struct udevice *dev, u64 timeout_ms, ulong flags)
--			snprintf(str, 16, "every %ldms", priv->reset_period);
-+			if (CONFIG_IS_ENABLED(SPRINTF))
-+				snprintf(str, 16, "every %ldms", priv->reset_period);
- 		}

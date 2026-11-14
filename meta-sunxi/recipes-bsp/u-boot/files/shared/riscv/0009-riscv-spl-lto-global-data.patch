@@ -1,0 +1,17 @@
+Subject: [PATCH] riscv: preserve SPL global data under LTO
+
+Upstream-Status: Inappropriate [CatPlay V821 port]
+
+diff --git a/arch/riscv/include/asm/global_data.h b/arch/riscv/include/asm/global_data.h
+index 33f2b5e..ae144ad 100644
+--- a/arch/riscv/include/asm/global_data.h
++++ b/arch/riscv/include/asm/global_data.h
+@@ -48,7 +48,7 @@ struct arch_global_data {
+ 
+ #include <asm-generic/global_data.h>
+ 
+-#if defined(__clang__) || CONFIG_IS_ENABLED(LTO)
++#if defined(__clang__) || defined(LTO_ENABLE)
+ 
+ #define DECLARE_GLOBAL_DATA_PTR
+ #define gd			get_gd()

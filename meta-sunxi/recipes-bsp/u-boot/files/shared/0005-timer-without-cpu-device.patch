@@ -1,0 +1,20 @@
+Subject: [PATCH] timer: support fallback without a CPU device
+
+Upstream-Status: Inappropriate [CatPlay V821 port]
+
+diff --git a/drivers/timer/timer-uclass.c b/drivers/timer/timer-uclass.c
+index 8305f06d..402eba57 100644
+--- a/drivers/timer/timer-uclass.c
++++ b/drivers/timer/timer-uclass.c
+@@ -111,6 +111,11 @@ int timer_timebase_fallback(struct udevice *dev)
+ 	uc_priv->clock_rate = cpu_plat->timebase_freq;
+ 	return 0;
+ }
++#else
++int timer_timebase_fallback(struct udevice *dev)
++{
++	return 0;
++}
+ #endif
+ 
+ u64 timer_conv_64(u32 count)

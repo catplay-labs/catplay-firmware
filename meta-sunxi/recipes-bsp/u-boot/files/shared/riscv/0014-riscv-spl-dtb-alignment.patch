@@ -1,0 +1,27 @@
+Subject: [PATCH] riscv: spl: materialize alignment before the appended DTB
+
+Upstream-Status: Pending
+
+SPL with a separate BSS locates its appended control DTB through
+_image_binary_end. When there are no binman symbols and the preceding
+image ends four bytes short of an eight-byte boundary, the alignment-only
+.binman_sym_table section can become NOBITS. Its padding is then absent
+from the objcopy binary, so the appended DTB precedes _image_binary_end
+by four bytes and fdtdec_setup() fails with -ENOENT.
+
+Align the end of the existing linker-list output section instead, so
+its padding is included in the binary. The linker-list end markers stay
+before the padding and their entry counts are unchanged. Retain the
+binman section alignment for images with binman symbols.
+
+diff --git a/arch/riscv/cpu/u-boot-spl.lds b/arch/riscv/cpu/u-boot-spl.lds
+--- a/arch/riscv/cpu/u-boot-spl.lds
++++ b/arch/riscv/cpu/u-boot-spl.lds
+@@ -35,6 +35,7 @@ SECTIONS
+ 
+ 	__u_boot_list : {
+ 		KEEP(*(SORT(__u_boot_list*)));
++		. = ALIGN(8);
+ 	} > .spl_mem
+ 
+ 	. = ALIGN(4);

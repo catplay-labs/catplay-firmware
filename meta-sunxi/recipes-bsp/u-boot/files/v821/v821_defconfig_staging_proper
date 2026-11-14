@@ -1,0 +1,2 @@
+# M-mode proper: read the non-recovery FIT from the kernel NOR partition.
+CONFIG_BOOTCOMMAND="sf probe; sf read 0x81000000 0x40000 0x400000; bootm 0x81000000"

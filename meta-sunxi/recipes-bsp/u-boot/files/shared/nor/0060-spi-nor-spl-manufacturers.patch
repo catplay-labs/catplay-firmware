@@ -1,0 +1,253 @@
+Subject: [PATCH] mtd: spi-nor: allow independent SPL manufacturer selection
+
+DM and the tiny NOR core otherwise inherit the complete proper JEDEC table,
+which can cost several KiB in a constrained SPL. Add phase-specific options,
+defaulting to the existing proper selections, and use them for the table
+and tiny manufacturer helpers. Proper remains unchanged.
+
+Keep the SR1+SR2 quad-enable helper available for XTX and Zbit even when
+Winbond and Spansion are omitted from SPL. ZB25VQ128 (5e4018) uses SR2 bit 1,
+read with 35h and written by 01h with two bytes, as does XT25F128B.
+
+Upstream-Status: Pending
+
+diff --git a/drivers/mtd/spi/Kconfig b/drivers/mtd/spi/Kconfig
+--- a/drivers/mtd/spi/Kconfig
++++ b/drivers/mtd/spi/Kconfig
+@@ -1,0 +2,131 @@
++
++menu "SPL SPI flash manufacturers"
++	depends on SPL_SPI_FLASH_SUPPORT
++
++config SPL_SPI_FLASH_ATMEL
++	bool "ATMEL support in SPL"
++	default SPI_FLASH_ATMEL
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_DOSILICON
++	bool "DOSILICON support in SPL"
++	default SPI_FLASH_DOSILICON
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_EON
++	bool "EON support in SPL"
++	default SPI_FLASH_EON
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FRAM_FUJITSU
++	bool "FUJITSU support in SPL"
++	default SPI_FRAM_FUJITSU
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_GIGADEVICE
++	bool "GIGADEVICE support in SPL"
++	default SPI_FLASH_GIGADEVICE
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_ISSI
++	bool "ISSI support in SPL"
++	default SPI_FLASH_ISSI
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_MACRONIX
++	bool "MACRONIX support in SPL"
++	default SPI_FLASH_MACRONIX
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_PUYA
++	bool "PUYA support in SPL"
++	default SPI_FLASH_PUYA
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_SILICONKAISER
++	bool "SILICONKAISER support in SPL"
++	default SPI_FLASH_SILICONKAISER
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_STMICRO
++	bool "STMICRO support in SPL"
++	default SPI_FLASH_STMICRO
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_MT35XU
++	bool "MT35XU support in SPL"
++	default SPI_FLASH_MT35XU
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_SPANSION
++	bool "SPANSION support in SPL"
++	default SPI_FLASH_SPANSION
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_S28HX_T
++	bool "S28HX_T support in SPL"
++	default SPI_FLASH_S28HX_T
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_SST
++	bool "SST support in SPL"
++	default SPI_FLASH_SST
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_WINBOND
++	bool "WINBOND support in SPL"
++	default SPI_FLASH_WINBOND
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_XMC
++	bool "XMC support in SPL"
++	default SPI_FLASH_XMC
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_XTX
++	bool "XTX support in SPL"
++	default SPI_FLASH_XTX
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++config SPL_SPI_FLASH_ZBIT
++	bool "ZBIT support in SPL"
++	default SPI_FLASH_ZBIT
++	help
++	  Include this manufacturer in the SPL JEDEC table. This can be
++	  disabled independently of U-Boot proper to reduce SPL size.
++
++endmenu
+diff --git a/drivers/mtd/spi/spi-nor-ids.c b/drivers/mtd/spi/spi-nor-ids.c
+--- a/drivers/mtd/spi/spi-nor-ids.c
++++ b/drivers/mtd/spi/spi-nor-ids.c
+@@ -65 +65 @@
+-#ifdef CONFIG_SPI_FLASH_ATMEL		/* ATMEL */
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_ATMEL)		/* ATMEL */
+@@ -80 +80 @@
+-#ifdef CONFIG_SPI_FLASH_DOSILICON
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_DOSILICON)
+@@ -93 +93 @@
+-#ifdef CONFIG_SPI_FLASH_EON		/* EON */
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_EON)		/* EON */
+@@ -102 +102 @@
+-#ifdef CONFIG_SPI_FRAM_FUJITSU
++#if SPI_NOR_IS_ENABLED(SPI_FRAM_FUJITSU)
+@@ -115 +115 @@
+-#ifdef CONFIG_SPI_FLASH_GIGADEVICE	/* GIGADEVICE */
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_GIGADEVICE)	/* GIGADEVICE */
+@@ -242 +242 @@
+-#ifdef CONFIG_SPI_FLASH_ISSI		/* ISSI */
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_ISSI)		/* ISSI */
+@@ -312 +312 @@
+-#ifdef CONFIG_SPI_FLASH_MACRONIX	/* MACRONIX */
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_MACRONIX)	/* MACRONIX */
+@@ -363 +363 @@
+-#ifdef CONFIG_SPI_FLASH_PUYA
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_PUYA)
+@@ -410 +410 @@
+-#ifdef CONFIG_SPI_FLASH_SILICONKAISER
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_SILICONKAISER)
+@@ -414 +414 @@
+-#ifdef CONFIG_SPI_FLASH_STMICRO		/* STMICRO */
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_STMICRO)		/* STMICRO */
+@@ -440 +440 @@
+-#ifdef CONFIG_SPI_FLASH_MT35XU
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_MT35XU)
+@@ -451 +451 @@
+-#ifdef CONFIG_SPI_FLASH_SPANSION	/* SPANSION */
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_SPANSION)	/* SPANSION */
+@@ -501 +501 @@
+-#ifdef CONFIG_SPI_FLASH_S28HX_T
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_S28HX_T)
+@@ -512 +512 @@
+-#ifdef CONFIG_SPI_FLASH_SST		/* SST */
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_SST)		/* SST */
+@@ -532 +532 @@
+-#ifdef CONFIG_SPI_FLASH_STMICRO		/* STMICRO */
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_STMICRO)		/* STMICRO */
+@@ -546 +546 @@
+-#ifdef CONFIG_SPI_FLASH_WINBOND		/* WINBOND */
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_WINBOND)		/* WINBOND */
+@@ -678 +678 @@
+-#ifdef CONFIG_SPI_FLASH_XMC
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_XMC)
+@@ -691 +691 @@
+-#ifdef CONFIG_SPI_FLASH_XTX
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_XTX)
+@@ -731 +731 @@
+-#ifdef CONFIG_SPI_FLASH_ZBIT
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_ZBIT)
+diff --git a/drivers/mtd/spi/spi-nor-tiny.c b/drivers/mtd/spi/spi-nor-tiny.c
+--- a/drivers/mtd/spi/spi-nor-tiny.c
++++ b/drivers/mtd/spi/spi-nor-tiny.c
+@@ -123 +123,2 @@
+-#if defined(CONFIG_SPI_FLASH_SPANSION) || defined(CONFIG_SPI_FLASH_WINBOND)
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_SPANSION) || SPI_NOR_IS_ENABLED(SPI_FLASH_WINBOND) || \
++	SPI_NOR_IS_ENABLED(SPI_FLASH_XTX) || SPI_NOR_IS_ENABLED(SPI_FLASH_ZBIT)
+@@ -260,3 +261,4 @@
+-#if defined(CONFIG_SPI_FLASH_SPANSION) ||	\
+-	defined(CONFIG_SPI_FLASH_WINBOND) ||	\
+-	defined(CONFIG_SPI_FLASH_MACRONIX)
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_SPANSION) ||	\
++	SPI_NOR_IS_ENABLED(SPI_FLASH_WINBOND) ||	\
++	SPI_NOR_IS_ENABLED(SPI_FLASH_MACRONIX) || \
++	SPI_NOR_IS_ENABLED(SPI_FLASH_XTX) || SPI_NOR_IS_ENABLED(SPI_FLASH_ZBIT)
+@@ -440 +442 @@
+-#ifdef CONFIG_SPI_FLASH_MACRONIX
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_MACRONIX)
+@@ -479 +481,2 @@
+-#if defined(CONFIG_SPI_FLASH_SPANSION) || defined(CONFIG_SPI_FLASH_WINBOND)
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_SPANSION) || SPI_NOR_IS_ENABLED(SPI_FLASH_WINBOND) || \
++	SPI_NOR_IS_ENABLED(SPI_FLASH_XTX) || SPI_NOR_IS_ENABLED(SPI_FLASH_ZBIT)
+@@ -591 +594 @@
+-#ifdef CONFIG_SPI_FLASH_SPANSION
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_SPANSION)
+@@ -669 +672 @@
+-#ifdef CONFIG_SPI_FLASH_MACRONIX
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_MACRONIX)
+@@ -679,2 +682,3 @@
+-#if defined(CONFIG_SPI_FLASH_SPANSION) || defined(CONFIG_SPI_FLASH_WINBOND)
+-			/* Kept only for backward compatibility purpose. */
++#if SPI_NOR_IS_ENABLED(SPI_FLASH_SPANSION) || SPI_NOR_IS_ENABLED(SPI_FLASH_WINBOND) || \
++	SPI_NOR_IS_ENABLED(SPI_FLASH_XTX) || SPI_NOR_IS_ENABLED(SPI_FLASH_ZBIT)
++			/* SR2 bit 1, written together with SR1 (also XTX/Zbit). */
+diff --git a/drivers/mtd/spi/sf_internal.h b/drivers/mtd/spi/sf_internal.h
+--- a/drivers/mtd/spi/sf_internal.h
++++ b/drivers/mtd/spi/sf_internal.h
+@@ -14,0 +15,7 @@
++
++/* SPL can carry a smaller JEDEC table than proper or other XPL phases. */
++#ifdef CONFIG_SPL_BUILD
++#define SPI_NOR_IS_ENABLED(option) IS_ENABLED(CONFIG_SPL_ ## option)
++#else
++#define SPI_NOR_IS_ENABLED(option) IS_ENABLED(CONFIG_ ## option)
++#endif

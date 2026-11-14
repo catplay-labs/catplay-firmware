@@ -1,0 +1,119 @@
+Subject: [PATCH] sunxi: enable shared eGON image build for RISC-V
+
+Upstream-Status: Inappropriate [CatPlay V821 port]
+
+diff --git a/arch/arm/mach-sunxi/Kconfig b/arch/arm/mach-sunxi/Kconfig
+--- a/arch/arm/mach-sunxi/Kconfig
++++ b/arch/arm/mach-sunxi/Kconfig
+@@ -235,15 +235,6 @@
+ 	  with the first SRAM region being located at address 0.
+ 	  Some newer SoCs map the boot ROM at address 0 instead and move the
+ 	  SRAM to a different address.
+-
+-config EGON_MAX_SIZE
+-	hex "Maximum size of the complete eGON image"
+-	depends on BINMAN && SPL_IMAGE_TYPE_SUNXI_EGON
+-	default 0x0
+-	help
+-	  Maximum eGON length, including SPL and its appended payload.
+-	  The build rounds the binman output up to 512 bytes, matching the
+-	  length later stored in the eGON header. Set to zero to disable.
+ 
+ config SUNXI_RVBAR_ADDRESS
+ 	hex
+@@ -1526,6 +1517,5 @@
+ 
+ endif # SPL_SUNXI_LED_STATUS
+ 
+-source "board/sunxi/Kconfig"
+ 
+ endif
+diff --git a/common/spl/Kconfig.sunxi b/common/spl/Kconfig.sunxi
+--- /dev/null
++++ b/common/spl/Kconfig.sunxi
+@@ -0,0 +1,33 @@
++choice
++	prompt "SPL Image Type"
++	default SPL_IMAGE_TYPE_SUNXI_EGON
++
++config SPL_IMAGE_TYPE_SUNXI_EGON
++	bool "eGON (normal)"
++	help
++	  Select this option to embed the SPL binary in an eGON.BT0 image,
++	  which is compatible with the normal boot ROM (NBROM).
++
++	  This is usually the correct option to choose.
++
++config SPL_IMAGE_TYPE_SUNXI_TOC0
++	bool "TOC0 (secure)"
++	help
++	  Select this option to embed the SPL binary in a TOC0 image,
++	  which is compatible with the secure boot ROM (SBROM).
++
++endchoice
++
++config SPL_IMAGE_TYPE
++	string
++	default "sunxi_egon" if SPL_IMAGE_TYPE_SUNXI_EGON
++	default "sunxi_toc0" if SPL_IMAGE_TYPE_SUNXI_TOC0
++
++config EGON_MAX_SIZE
++	hex "Maximum size of the complete eGON image"
++	depends on SPL_IMAGE_TYPE_SUNXI_EGON
++	default 0x0
++	help
++	  Maximum eGON length, including its header and alignment padding.
++	  Also checked after binman appends a payload. Set to zero to
++	  disable the limit.
+diff --git a/scripts/Makefile.xpl b/scripts/Makefile.xpl
+--- a/scripts/Makefile.xpl
++++ b/scripts/Makefile.xpl
+@@ -275,7 +275,7 @@
+ 
+ INPUTS-$(CONFIG_ARCH_SOCFPGA_SOC64) += $(obj)/u-boot-spl-dtb.hex
+ 
+-ifdef CONFIG_ARCH_SUNXI
++ifdef CONFIG_SOC_SUNXI
+ INPUTS-y	+= $(obj)/sunxi-spl.bin
+ 
+ ifdef CONFIG_NAND_SUNXI
+@@ -455,6 +455,16 @@
+ 
+ $(obj)/sunxi-spl.bin: $(obj)/$(SPL_BIN).bin FORCE
+ 	$(call if_changed,mkimage)
++ifneq ($(filter-out 0x0,$(CONFIG_EGON_MAX_SIZE)),)
++	@actual=$$(wc -c < $@); \
++	limit=$$(printf "%d" $(CONFIG_EGON_MAX_SIZE)); \
++	if test $$actual -gt $$limit; then \
++		echo "eGON length exceeds CONFIG_EGON_MAX_SIZE:" >&2; \
++		echo "  limit:  $$(printf 0x%x $$limit) bytes" >&2; \
++		echo "  length: $$(printf 0x%x $$actual) bytes" >&2; \
++		exit 1; \
++	fi
++endif
+ 
+ quiet_cmd_sunxi_spl_image_builder = SUNXI_SPL_IMAGE_BUILDER $@
+ cmd_sunxi_spl_image_builder = $(objtree)/tools/sunxi-spl-image-builder \
+diff --git a/tools/Makefile b/tools/Makefile
+--- a/tools/Makefile
++++ b/tools/Makefile
+@@ -234,8 +234,8 @@
+ hostprogs-always-$(CONFIG_MX28) += mxsboot
+ HOSTCFLAGS_mxsboot.o := -pedantic
+ 
+-hostprogs-always-$(CONFIG_ARCH_SUNXI) += mksunxiboot
+-hostprogs-always-$(CONFIG_ARCH_SUNXI) += sunxi-spl-image-builder
++hostprogs-always-$(CONFIG_SOC_SUNXI) += mksunxiboot
++hostprogs-always-$(CONFIG_SOC_SUNXI) += sunxi-spl-image-builder
+ sunxi-spl-image-builder-objs := sunxi-spl-image-builder.o generated/lib/bch.o
+ 
+ hostprogs-always-$(CONFIG_NETCONSOLE) += ncb
+diff --git a/common/spl/Kconfig b/common/spl/Kconfig
+--- a/common/spl/Kconfig
++++ b/common/spl/Kconfig
+@@ -1762,1 +1762,5 @@
++if SOC_SUNXI
++source "common/spl/Kconfig.sunxi"
++endif
++
+ config TPL

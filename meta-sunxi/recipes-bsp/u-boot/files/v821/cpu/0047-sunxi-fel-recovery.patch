@@ -1,0 +1,101 @@
+Subject: [PATCH] sunxi: add V821 FEL return and RTC watchdog recovery
+
+Upstream-Status: Inappropriate [CatPlay V821 port]
+
+diff --git a/arch/riscv/cpu/sunxi/fel_recovery.c b/arch/riscv/cpu/sunxi/fel_recovery.c
+new file mode 100644
+--- /dev/null
++++ b/arch/riscv/cpu/sunxi/fel_recovery.c
+@@ -0,0 +1,39 @@
++// SPDX-License-Identifier: GPL-2.0+
++
++#include <asm/io.h>
++#include <asm/arch-sunxi/cpu.h>
++#include <asm/arch-sunxi/fel.h>
++#include <asm/arch-sunxi/watchdog.h>
++
++void __noreturn sunxi_fel_recover(void)
++{
++	writel(SUNXI_FEL_REQUEST_SET, SUNXI_FEL_REQUEST_REG);
++	asm volatile("fence iorw, iorw" ::: "memory");
++	sunxi_watchdog_reset();
++}
++
++void sunxi_fel_clear_request(void)
++{
++	/* Consume both Brandy FEL requests and verify the MMIO stores. */
++	do {
++		writel(SUNXI_FEL_REQUEST_CLEAR, SUNXI_FEL_REQUEST_REG);
++		writel(0, SUNXI_RTC_FEL_FLAG);
++		asm volatile("fence iorw, iorw" ::: "memory");
++	} while (readl(SUNXI_FEL_REQUEST_REG) || readl(SUNXI_RTC_FEL_FLAG));
++}
++
++void sunxi_fel_boot_guard(void)
++{
++	if (readl(SUNXI_RTC_FEL_FLAG) == SUNXI_RTC_FEL_MAGIC) {
++		sunxi_fel_recover();
++	}
++
++	/* Consume the hardware FEL request on every successful SPL entry. */
++	do {
++		writel(SUNXI_FEL_REQUEST_CLEAR, SUNXI_FEL_REQUEST_REG);
++		asm volatile("fence iorw, iorw" ::: "memory");
++	} while (readl(SUNXI_FEL_REQUEST_REG));
++	/* Linux clears this guard; the DRAM-only helper clears it on return. */
++	writel(SUNXI_RTC_FEL_MAGIC, SUNXI_RTC_FEL_FLAG);
++	asm volatile("fence iorw, iorw" ::: "memory");
++}
+diff --git a/arch/riscv/include/asm/arch-sunxi/fel.h b/arch/riscv/include/asm/arch-sunxi/fel.h
+new file mode 100644
+--- /dev/null
++++ b/arch/riscv/include/asm/arch-sunxi/fel.h
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef __V821_FEL_H
++#define __V821_FEL_H
++
++#include <linux/compiler.h>
++
++void __noreturn sunxi_fel_recover(void);
++void sunxi_fel_clear_request(void);
++void sunxi_fel_boot_guard(void);
++
++#endif
+diff --git a/arch/riscv/cpu/sunxi/Makefile b/arch/riscv/cpu/sunxi/Makefile
+--- a/arch/riscv/cpu/sunxi/Makefile
++++ b/arch/riscv/cpu/sunxi/Makefile
+@@ -3,1 +3,3 @@
+ obj-y += fel.o
++obj-y += fel_recovery.o
++obj-$(CONFIG_XPL_BUILD) += fel_spl.o
+diff --git a/arch/riscv/cpu/sunxi/fel_spl.c b/arch/riscv/cpu/sunxi/fel_spl.c
+new file mode 100644
+--- /dev/null
++++ b/arch/riscv/cpu/sunxi/fel_spl.c
+@@ -0,0 +1,25 @@
++// SPDX-License-Identifier: GPL-2.0+
++
++#include <linux/errno.h>
++#include <spl.h>
++#include <wdt.h>
++#include <asm/arch-sunxi/fel.h>
++
++void __noreturn sunxi_unstash_fel(void);
++
++static int spl_fel_load_image(struct spl_image_info *image,
++			      struct spl_boot_device *bootdev)
++{
++	int ret;
++
++	if (!IS_ENABLED(CONFIG_SUNXI_FEL_STASH))
++		return -ENODEV;
++
++	sunxi_fel_clear_request();
++	/* BootROM cannot service the watchdog during USB transfers. */
++	ret = wdt_stop_all();
++	if (ret)
++		sunxi_fel_recover();
++	sunxi_unstash_fel();
++}
++SPL_LOAD_IMAGE_METHOD("FEL", 0, BOOT_DEVICE_BOARD, spl_fel_load_image);

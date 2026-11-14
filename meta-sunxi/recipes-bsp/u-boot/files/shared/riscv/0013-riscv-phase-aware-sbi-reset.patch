@@ -1,0 +1,24 @@
+Subject: [PATCH] riscv: guard SBI reset binding in non-DM SPL
+
+Upstream-Status: Pending
+
+Proper may select SYSRESET_SBI while SPL has neither SYSRESET nor DM.
+Do not reference gd->dm_root in that phase, where the field is absent.
+
+diff --git a/arch/riscv/cpu/cpu.c b/arch/riscv/cpu/cpu.c
+--- a/arch/riscv/cpu/cpu.c
++++ b/arch/riscv/cpu/cpu.c
+@@ -711,9 +711,10 @@
+ 
+ int arch_early_init_r(void)
+ {
+-	if (IS_ENABLED(CONFIG_SYSRESET_SBI))
+-		device_bind_driver(gd->dm_root, "sbi-sysreset",
+-				   "sbi-sysreset", NULL);
++#if CONFIG_IS_ENABLED(SYSRESET_SBI)
++	device_bind_driver(gd->dm_root, "sbi-sysreset",
++			   "sbi-sysreset", NULL);
++#endif
+ 
+ 	return 0;
+ }

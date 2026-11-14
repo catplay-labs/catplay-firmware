@@ -1,0 +1,43 @@
+Subject: [PATCH] riscv: fix single-hart initialization without the hart lottery
+
+Upstream-Status: Pending
+
+A single-hart image does not need the atomic hart lottery. Skip it when
+SMP is disabled, so single-hart CPUs can initialize without requiring
+atomic instructions for boot-hart selection.
+
+The common initialization path also uses s2 as the lottery result.
+Initialize it to zero when bypassing the lottery, including XIP builds,
+so the boot hart follows the initialization path deterministically.
+Keep the existing handling of unexpected non-boot harts.
+
+diff --git a/arch/riscv/cpu/start.S b/arch/riscv/cpu/start.S
+--- a/arch/riscv/cpu/start.S
++++ b/arch/riscv/cpu/start.S
+@@ -144,7 +144,7 @@ call_board_init_f_0:
+ call_harts_early_init:
+ 	jal	harts_early_init
+ 
+-#if !CONFIG_IS_ENABLED(XIP)
++#if !CONFIG_IS_ENABLED(XIP) && CONFIG_IS_ENABLED(SMP)
+ 	/*
+ 	 * Pick hart to initialize global data and run U-Boot. The other harts
+ 	 * wait for initialization to complete.
+@@ -155,12 +155,12 @@ call_harts_early_init:
+ 	bnez	s2, wait_for_gd_init
+ #else
+ 	/*
+-	 * FIXME: gp is set before it is initialized. If an XIP U-Boot ever
+-	 * encounters a pending IPI on boot it is liable to jump to whatever
+-	 * memory happens to be in ipi_data.addr on boot. It may also run into
+-	 * problems if it encounters an exception too early (because printf/puts
+-	 * accesses gd).
++	 * A single-hart image has no lottery to run, and an XIP image cannot
++	 * mutate lock variables in flash. Park any unexpected non-boot hart.
++	 * Keep the lottery result zero so the common path below takes the boot
++	 * hart branch.
+ 	 */
++	li	s2, 0
+ 	mv	gp, s0
+ #if CONFIG_IS_ENABLED(RISCV_MMODE)
+ 	bnez	tp, secondary_hart_loop

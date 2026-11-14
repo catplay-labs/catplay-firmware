@@ -1,0 +1,39 @@
+Subject: [PATCH] cache: andes-l2: disable prefetch on Allwinner V821 non-B
+
+Upstream-Status: Pending
+
+The V821 and V821B share a device tree, but Brandy only programs the L2
+instruction/data prefetch depths on V821B. PRCM ROM version 2 identifies
+the original V821; explicitly disable both prefetchers there rather than
+applying the B-specific DT settings. Keep RAM timings and cache enablement
+unchanged. Apply the revision check in both SPL and U-Boot proper.
+
+diff --git a/drivers/cache/cache-andes-l2.c b/drivers/cache/cache-andes-l2.c
+--- a/drivers/cache/cache-andes-l2.c
++++ b/drivers/cache/cache-andes-l2.c
+@@ -12,6 +12,10 @@
+ #include <asm/io.h>
+ #include <dm/ofnode.h>
+ #include <linux/bitops.h>
++
++#if IS_ENABLED(CONFIG_MACH_SUN300I_V821)
++#include <asm/arch-sunxi/cpu.h>
++#endif
+ 
+ struct l2cache {
+ 	volatile u64	configure;
+@@ -143,6 +147,14 @@
+ 	dev_read_u32(dev, "andes,inst-prefetch", &plat->iprefetch);
+ 	dev_read_u32(dev, "andes,data-prefetch", &plat->dprefetch);
+ 
++#if IS_ENABLED(CONFIG_MACH_SUN300I_V821)
++	/* Brandy only enables L2 prefetch on the V821B revision. */
++	if (readl((void __iomem *)SUNXI_CHIP_VERSION_REG) == SUNXI_CHIP_VERSION_V821) {
++		plat->iprefetch = 0;
++		plat->dprefetch = 0;
++	}
++#endif
++
+ 	/* Set tag RAM and data RAM setup and output cycle */
+ 	dev_read_u32_array(dev, "andes,tag-ram-ctl", plat->tram_ctl, 2);
+ 	dev_read_u32_array(dev, "andes,data-ram-ctl", plat->dram_ctl, 2);

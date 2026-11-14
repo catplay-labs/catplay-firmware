@@ -21,27 +21,33 @@ diff --git a/arch/arm/mach-sunxi/spl_spi_sunxi.c b/arch/arm/mach-sunxi/spl_spi_s
 index 5f72e809..4de81ae5 100644
 --- a/arch/arm/mach-sunxi/spl_spi_sunxi.c
 +++ b/arch/arm/mach-sunxi/spl_spi_sunxi.c
-@@ -122,10 +122,12 @@ static void spi0_pinmux_setup(unsigned int pin_function)
- 		sunxi_gpio_set_cfgpin(SUNXI_GPC(1), pin_function);
+@@ -112,6 +112,9 @@ static void spi0_pinmux_setup(unsigned int pin_function)
+ {
+-	const u16 spi0_pc_pins[4] = {
+-#if IS_ENABLED(CONFIG_MACH_SUN8I_R528)
++	const u16 spi0_pc_pins[] = {
++#if IS_ENABLED(CONFIG_MACH_SUN8I_V851S)
++		SUNXI_GPC(0), SUNXI_GPC(1), SUNXI_GPC(2), SUNXI_GPC(3),
++		SUNXI_GPC(4), SUNXI_GPC(5)
++#elif IS_ENABLED(CONFIG_MACH_SUN8I_R528)
+ 		SUNXI_GPC(2), SUNXI_GPC(3), SUNXI_GPC(4), SUNXI_GPC(5)
+ #elif IS_ENABLED(CONFIG_MACH_SUN55I_A523)
+ 		SUNXI_GPC(2), SUNXI_GPC(3), SUNXI_GPC(4), SUNXI_GPC(12)
+@@ -131,7 +133,7 @@ static void spi0_pinmux_setup(unsigned int pin_function)
+ #endif
+ 	};
  
- 	if (IS_ENABLED(CONFIG_MACH_SUN50I_H6) ||
--	    IS_ENABLED(CONFIG_MACH_SUN8I_R528))
-+	    IS_ENABLED(CONFIG_MACH_SUN8I_R528) ||
-+	    IS_ENABLED(CONFIG_MACH_SUN8I_V851S))
- 		sunxi_gpio_set_cfgpin(SUNXI_GPC(5), pin_function);
- 	if (IS_ENABLED(CONFIG_MACH_SUN50I_H616) ||
--	    IS_ENABLED(CONFIG_MACH_SUN8I_R528))
-+	    IS_ENABLED(CONFIG_MACH_SUN8I_R528) ||
-+	    IS_ENABLED(CONFIG_MACH_SUN8I_V851S))
- 		sunxi_gpio_set_cfgpin(SUNXI_GPC(4), pin_function);
+-	for (int i = 0; i < 4; i++)
++	for (int i = 0; i < ARRAY_SIZE(spi0_pc_pins); i++)
+ 		sunxi_gpio_set_cfgpin(spi0_pc_pins[i], pin_function);
+ }
  
- 	/* Older generations use PC23 for CS, newer ones use PC3. */
-@@ -257,7 +259,8 @@ static void spi0_init(void)
- 	unsigned int pin_function = SUNXI_GPC_SPI0;
+@@ -255,7 +257,8 @@ static void spi0_init(void)
  
  	if (IS_ENABLED(CONFIG_MACH_SUN50I) ||
--	    IS_ENABLED(CONFIG_SUN50I_GEN_H6))
-+	    IS_ENABLED(CONFIG_SUN50I_GEN_H6) ||
+ 	    IS_ENABLED(CONFIG_SUN50I_GEN_H6) ||
+-	    IS_ENABLED(CONFIG_MACH_SUN55I_A523))
++	    IS_ENABLED(CONFIG_MACH_SUN55I_A523) ||
 +	    IS_ENABLED(CONFIG_MACH_SUN8I_V851S))
  		pin_function = SUN50I_GPC_SPI0;
  	else if (IS_ENABLED(CONFIG_MACH_SUNIV) ||

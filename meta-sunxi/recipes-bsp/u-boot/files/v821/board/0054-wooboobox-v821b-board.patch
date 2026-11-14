@@ -1,0 +1,464 @@
+Subject: [PATCH] board: add Wooboobox V821B configuration and boot integration
+
+Upstream-Status: Inappropriate [CatPlay V821 port]
+
+diff --git a/arch/riscv/Kconfig b/arch/riscv/Kconfig
+index ad75891..ffd4db6 100644
+--- a/arch/riscv/Kconfig
++++ b/arch/riscv/Kconfig
+@@ -61,6 +61,12 @@ config TARGET_TH1520_LPI4A
+ config TARGET_XILINX_MBV
+ 	bool "Support AMD/Xilinx MicroBlaze V"
+ 
++config TARGET_WOOBOOBOX_V821B
++	bool "Support Wooboobox V821B (Allwinner V821)"
++	help
++	  Enable support for the Wooboobox V821B board. This board uses
++	  the Allwinner V821 RV32 SoC and boots from SPI NOR or SD card.
++
+ config TARGET_ASPEED_AST2700_IBEX
+ 	bool "Support Ibex RISC-V cores on Aspeed AST2700 SoC"
+ 
+@@ -123,6 +129,7 @@ source "board/spacemit/bananapi-f3/Kconfig"
+ source "board/starfive/visionfive2/Kconfig"
+ source "board/thead/th1520_lpi4a/Kconfig"
+ source "board/xilinx/mbv/Kconfig"
++source "board/allwinner/wooboobox_v821b/Kconfig"
+ 
+ # platform-specific options below
+ source "arch/riscv/cpu/andes/Kconfig"
+diff --git a/arch/riscv/dts/sun300i-v821-wooboobox-v821b-u-boot.dtsi b/arch/riscv/dts/sun300i-v821-wooboobox-v821b-u-boot.dtsi
+new file mode 100644
+--- /dev/null
++++ b/arch/riscv/dts/sun300i-v821-wooboobox-v821b-u-boot.dtsi
+@@ -0,0 +1,86 @@
++// SPDX-License-Identifier: GPL-2.0+
++
++&{/cpus} {
++	compatible = "simple-bus";
++	bootph-some-ram;
++};
++
++&cpu0 {
++	bootph-some-ram;
++};
++
++&wdt {
++	bootph-all;
++	timeout-sec = <16>;
++};
++
++&l2_cache {
++	bootph-pre-ram;
++};
++
++&dcxo {
++	bootph-some-ram;
++};
++
++&losc {
++	bootph-some-ram;
++};
++
++&pio_apb {
++	bootph-some-ram;
++};
++
++&cpu0_intc {
++	bootph-some-ram;
++};
++
++&plic {
++	bootph-some-ram;
++};
++
++&ccu {
++	bootph-some-ram;
++};
++
++&pio {
++	bootph-some-ram;
++};
++
++&r_pio {
++	bootph-some-ram;
++};
++
++&uart0_pins {
++	bootph-some-ram;
++};
++
++&mmc0_pins {
++	bootph-some-ram;
++};
++
++&spif_bus_pins {
++	bootph-some-ram;
++};
++
++&spif_control_pins {
++	bootph-some-ram;
++};
++
++&plmt0 {
++	bootph-some-ram;
++};
++
++&uart0 {
++	bootph-some-ram;
++};
++
++&mmc0 {
++	bootph-some-ram;
++};
++
++&spif {
++	bootph-pre-ram;
++	flash@0 {
++		bootph-pre-ram;
++	};
++};
+diff --git a/arch/riscv/dts/sun300i-v821-wooboobox-v821b.dts b/arch/riscv/dts/sun300i-v821-wooboobox-v821b.dts
+new file mode 100644
+index 0000000..3481db2
+--- /dev/null
++++ b/arch/riscv/dts/sun300i-v821-wooboobox-v821b.dts
+@@ -0,0 +1,47 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++
++/dts-v1/;
++
++#include "sun300i-v821.dtsi"
++
++/ {
++	model = "Wooboobox V821B";
++	compatible = "wooboobox,wooboobox-v821b", "allwinner,sun300i-v821",
++		     "allwinner,sun300iw1p1";
++
++	aliases {
++		mmc0 = &mmc0;
++		serial0 = &uart0;
++		spi0 = &spif;
++	};
++
++	chosen {
++		stdout-path = "serial0:115200n8";
++	};
++
++	memory@80000000 {
++		device_type = "memory";
++		reg = <0 0x80000000 0 0x4000000>;
++	};
++};
++
++&uart0 {
++	status = "okay";
++};
++
++&mmc0 {
++	status = "okay";
++};
++
++&spif {
++	/* CatPlay V821 tuning, matching the Linux machine DT. */
++	allwinner,sample-mode = <0>;
++	allwinner,sample-delay = <25>;
++	status = "okay";
++
++	flash@0 {
++		spi-max-frequency = <100000000>;
++		spi-rx-bus-width = <4>;
++		spi-tx-bus-width = <4>;
++	};
++};
+diff --git a/board/allwinner/wooboobox_v821b/Kconfig b/board/allwinner/wooboobox_v821b/Kconfig
+new file mode 100644
+--- /dev/null
++++ b/board/allwinner/wooboobox_v821b/Kconfig
+@@ -0,0 +1,74 @@
++if TARGET_WOOBOOBOX_V821B
++
++config SYS_BOARD
++	default "wooboobox_v821b"
++
++config SYS_VENDOR
++	default "allwinner"
++
++config SYS_SOC
++	default "sunxi"
++
++config SYS_CPU
++	default "andes"
++
++config SYS_CONFIG_NAME
++	default "wooboobox_v821b"
++
++config TEXT_BASE
++	default 0x82000000
++
++config SYS_LOAD_ADDR
++	default 0x81000000
++
++config HAS_CUSTOM_SYS_INIT_SP_ADDR
++	default y
++
++config CUSTOM_SYS_INIT_SP_ADDR
++	default 0x83000000
++
++config SPL_TEXT_BASE
++	default 0x02000060
++
++config SPL_STACK
++	default 0x02021c00
++
++config SPL_MAX_SIZE
++	default 0x13fa0
++
++config SPL_BSS_START_ADDR
++	default 0x02016000
++
++config SPL_BSS_MAX_SIZE
++	default 0xb000
++
++config BOARD_SPECIFIC_OPTIONS
++	def_bool y
++	select SOC_SUNXI
++	select MACH_SUN300I_V821
++	select OF_HAS_PRIOR_STAGE if RISCV_SMODE
++	select BINMAN if SPL
++	select RISCV_ANDES
++	select DM_GPIO
++	select SUNXI_GPIO
++	select SUNXI_NEW_PINCTRL
++	select ARCH_SUPPORTS_LTO
++	select SUPPORT_SPL
++	select SPL_IMAGE_TYPE_SUNXI_EGON
++	select DRAM_SUN20I_D1
++	select CLK_SUN300I_V821
++	select PINCTRL_SUN300I_V821
++	select SPL_DM
++
++config SPL_IMAGE
++	default "spl/sunxi-spl.bin"
++
++config WOOBOOBOX_V821B_SPL_FORCE_FEL
++	bool "Force return to FEL after Wooboobox V821B DRAM initialization"
++	depends on SPL
++	select SUNXI_FEL_STASH
++
++endif
++
++config MACH_SUN300I_V821
++	bool
+diff --git a/board/allwinner/wooboobox_v821b/MAINTAINERS b/board/allwinner/wooboobox_v821b/MAINTAINERS
+new file mode 100644
+index 0000000..5a1b4ef
+--- /dev/null
++++ b/board/allwinner/wooboobox_v821b/MAINTAINERS
+@@ -0,0 +1,5 @@
++WOOBOOBOX V821B BOARD
++S:	Orphan
++F:	board/allwinner/wooboobox_v821b/
++F:	configs/v821_defconfig
++F:	arch/riscv/dts/sun300i-v821*
+diff --git a/include/configs/wooboobox_v821b.h b/include/configs/wooboobox_v821b.h
+new file mode 100644
+index 0000000..f63772b
+--- /dev/null
++++ b/include/configs/wooboobox_v821b.h
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef __CONFIG_WOOBOOBOX_V821B_H
++#define __CONFIG_WOOBOOBOX_V821B_H
++
++#ifdef CONFIG_SPL_BUILD
++#define CFG_SYS_TIMER_RATE 40000000
++#define CFG_SYS_TIMER_COUNTER ((void *)0x48400000)
++#endif
++
++#define CFG_SYS_SDRAM_BASE 0x80000000UL
++
++#define RISCV_MMODE_TIMERBASE		0x48400000
++#define RISCV_MMODE_TIMER_FREQ		40000000
++#define RISCV_SMODE_TIMER_FREQ		40000000
++
++#endif
+diff --git a/board/allwinner/wooboobox_v821b/Makefile b/board/allwinner/wooboobox_v821b/Makefile
+new file mode 100644
+--- /dev/null
++++ b/board/allwinner/wooboobox_v821b/Makefile
+@@ -0,0 +1,2 @@
++obj-y += board.o
++obj-$(CONFIG_XPL_BUILD) += spl.o
+diff --git a/board/allwinner/wooboobox_v821b/spl.c b/board/allwinner/wooboobox_v821b/spl.c
+new file mode 100644
+--- /dev/null
++++ b/board/allwinner/wooboobox_v821b/spl.c
+@@ -0,0 +1,13 @@
++// SPDX-License-Identifier: GPL-2.0+
++
++#include <spl.h>
++#include <asm/arch-sunxi/fel.h>
++
++u32 spl_boot_device(void)
++{
++	if (IS_ENABLED(CONFIG_WOOBOOBOX_V821B_SPL_FORCE_FEL))
++		return BOOT_DEVICE_BOARD;
++
++	/* CatPlay V821 boots from NOR; boot_media's ROM encoding is unverified. */
++	return BOOT_DEVICE_SPI;
++}
+diff --git a/board/allwinner/wooboobox_v821b/board.c b/board/allwinner/wooboobox_v821b/board.c
+new file mode 100644
+--- /dev/null
++++ b/board/allwinner/wooboobox_v821b/board.c
+@@ -0,0 +1,149 @@
++// SPDX-License-Identifier: GPL-2.0+
++
++#include <init.h>
++#include <fdtdec.h>
++#include <asm/arch-sunxi/sys_proto.h>
++#include <asm/arch-sunxi/fel.h>
++#include <asm/arch-sunxi/watchdog.h>
++
++#ifdef CONFIG_XPL_BUILD
++#include <cpu_func.h>
++#include <spl.h>
++#include <wdt.h>
++#include <linux/errno.h>
++#include <linux/bitops.h>
++#include <linux/kernel.h>
++#include <sunxi_spif.h>
++#include <sunxi_image.h>
++#include <asm/arch-sunxi/bootrom.h>
++#include <asm/arch-sunxi/dram.h>
++#include <asm/arch-sunxi/clock.h>
++#include <asm/global_data.h>
++#include <asm/io.h>
++
++DECLARE_GLOBAL_DATA_PTR;
++#endif
++
++#ifdef CONFIG_XPL_BUILD
++void board_init_f(ulong dummy)
++{
++	int ret;
++
++	/* A forced DRAM helper may run after a previous failed boot. */
++	if (IS_ENABLED(CONFIG_WOOBOOBOX_V821B_SPL_FORCE_FEL))
++		sunxi_fel_clear_request();
++	/* Preserve recovery from a previous failed boot, before touching DRAM. */
++	sunxi_fel_boot_guard();
++	sunxi_watchdog_init();
++	sunxi_debug_uart_init();
++	ret = spl_early_init();
++	if (ret)
++		sunxi_fel_recover();
++	initr_watchdog();
++	if (!CONFIG_IS_ENABLED(SYS_DCACHE_OFF))
++		enable_caches();
++	ret = dram_init();
++	if (ret)
++		sunxi_fel_recover();
++	sunxi_raise_cpu_clock();
++}
++
++
++#if CONFIG_IS_ENABLED(SPI_SUNXI_SPIF)
++static struct sunxi_spif_desc desc __aligned(64);
++static u8 bounce[SUNXI_SPIF_MAX_DATA] __aligned(64);
++
++static int spif_clock(void *priv, unsigned long rate)
++{
++	return clock_set_spif_rate((void __iomem *)SUNXI_CCU_APP_BASE, rate) ?
++		0 : -EINVAL;
++}
++
++int board_sunxi_spif_init(struct udevice *dev, struct sunxi_spif *core)
++{
++	int ret;
++
++	*core = (struct sunxi_spif) {
++		.base = (void __iomem *)SUNXI_SPIF_BASE,
++		.desc = &desc,
++		.buffer = bounce,
++		.set_clock = spif_clock,
++		/* Matches woo.dts: mode 0, delay 25, max 100 MHz. */
++		.max_frequency = 100000000,
++		.sample_mode = 0,
++		.sample_delay = 25,
++		.sample_configured = true,
++	};
++
++	ret = sunxi_spif_prepare(20000000);
++	if (ret)
++		return ret;
++	return sunxi_spif_init(core);
++}
++
++/* BootROM FEL leaves active USB endpoints; Linux must see reset hardware. */
++void spl_board_prepare_for_boot(void)
++{
++	if (!CONFIG_IS_ENABLED(SYS_DCACHE_OFF))
++		flush_dcache_all();
++	sunxi_reset_usb();
++}
++#endif
++#endif
++
++int dram_init(void)
++{
++#ifdef CONFIG_XPL_BUILD
++	struct boot_file_head *spl = (void *)SUNXI_SPL_EGON_ADDR;
++
++	gd->ram_size = sunxi_dram_init();
++	if (!gd->ram_size)
++		return -ENOMEM;
++	writel(gd->ram_size >> 20, &spl->dram_size);
++	return 0;
++#else
++	return fdtdec_setup_mem_size_base();
++#endif
++}
++
++int dram_init_banksize(void)
++{
++	return fdtdec_setup_memory_banksize();
++}
++
++int board_init(void)
++{
++	return 0;
++}
++
++/* Standard U-Boot debug-UART board hook. */
++void board_debug_uart_init(void)
++{
++	sunxi_debug_uart_init();
++}
++
++#ifndef CONFIG_XPL_BUILD
++int board_early_init_f(void)
++{
++	sunxi_watchdog_init();
++	sunxi_debug_uart_init();
++	sunxi_raise_cpu_clock();
++
++	return 0;
++}
++
++void board_quiesce_devices(void)
++{
++	sunxi_reset_usb();
++}
++#endif
++
++void arch_hang(void)
++{
++	sunxi_fel_recover();
++}
++
++void board_boot_failure(void)
++{
++	sunxi_fel_recover();
++}

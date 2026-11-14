@@ -1,0 +1,173 @@
+Subject: [PATCH] watchdog: sunxi: support the V821 RTC watchdog
+
+The V821 interval is a linear count of half-second ticks in a ten-bit
+field. Bound and round millisecond requests without changing the legacy
+variants' timeout tables. Use the keyed software-reset register for
+immediate reset, and allow the shared driver on RISC-V sunxi systems.
+
+Keep watchdog sysreset registration phase-aware and omit optional service
+formatting when SPL does not link snprintf. Watchdog servicing itself
+continues to follow the shared WATCHDOG setting.
+
+Upstream-Status: Pending
+
+diff --git a/drivers/watchdog/Kconfig b/drivers/watchdog/Kconfig
+--- a/drivers/watchdog/Kconfig
++++ b/drivers/watchdog/Kconfig
+@@ -427,7 +427,7 @@
+ 
+ config WDT_SUNXI
+ 	bool "Allwinner sunxi watchdog timer support"
+-	depends on WDT && ARCH_SUNXI
++	depends on WDT && (ARCH_SUNXI || SOC_SUNXI)
+ 	default y
+ 	help
+ 	  Enable support for the watchdog timer in Allwinner sunxi SoCs.
+diff --git a/drivers/watchdog/sunxi_wdt.c b/drivers/watchdog/sunxi_wdt.c
+--- a/drivers/watchdog/sunxi_wdt.c
++++ b/drivers/watchdog/sunxi_wdt.c
+@@ -8,11 +8,14 @@
+ #include <dm.h>
+ #include <wdt.h>
+ #include <asm/io.h>
++#include <linux/bitops.h>
+ #include <linux/delay.h>
+ #include <linux/time.h>
+ 
+ #define WDT_MAX_TIMEOUT		16
+ #define WDT_TIMEOUT_MASK	0xf
++#define WDT_LINEAR_TIMEOUT_MASK	GENMASK(9, 0)
++#define WDT_LINEAR_MAX_TIMEOUT	300
+ 
+ #define WDT_CTRL_RELOAD		((1 << 0) | (0x0a57 << 1))
+ 
+@@ -26,6 +29,8 @@
+ 	u8 wdt_reset_mask;
+ 	u8 wdt_reset_val;
+ 	u32 wdt_key_val;
++	u8 wdt_soft_reset;
++	bool linear_timeout;
+ };
+ 
+ struct sunxi_wdt_priv {
+@@ -70,11 +75,23 @@
+ 	struct sunxi_wdt_priv *priv = dev_get_priv(dev);
+ 	const struct sunxi_wdt_reg *regs = priv->regs;
+ 	void __iomem *base = priv->base;
+-	u32 val;
+-
+-	timeout /= MSEC_PER_SEC;
+-	if (timeout > WDT_MAX_TIMEOUT)
+-		timeout = WDT_MAX_TIMEOUT;
++	u32 val, interval, mask;
++
++	if (regs->linear_timeout) {
++		/* Bound before rounding to avoid overflowing a large request. */
++		if (timeout > WDT_LINEAR_MAX_TIMEOUT * MSEC_PER_SEC)
++			timeout = WDT_LINEAR_MAX_TIMEOUT * MSEC_PER_SEC;
++		interval = (timeout + 499) / 500;
++		if (!interval)
++			interval = 1;
++		mask = WDT_LINEAR_TIMEOUT_MASK;
++	} else {
++		timeout /= MSEC_PER_SEC;
++		if (timeout > WDT_MAX_TIMEOUT)
++			timeout = WDT_MAX_TIMEOUT;
++		interval = wdt_timeout_map[timeout];
++		mask = WDT_TIMEOUT_MASK;
++	}
+ 
+ 	/* Set system reset function */
+ 	val = readl(base + regs->wdt_cfg);
+@@ -85,8 +102,8 @@
+ 
+ 	/* Set timeout and enable watchdog */
+ 	val = readl(base + regs->wdt_mode);
+-	val &= ~(WDT_TIMEOUT_MASK << regs->wdt_timeout_shift);
+-	val |= wdt_timeout_map[timeout] << regs->wdt_timeout_shift;
++	val &= ~(mask << regs->wdt_timeout_shift);
++	val |= interval << regs->wdt_timeout_shift;
+ 	val |= WDT_MODE_EN;
+ 	val |= regs->wdt_key_val;
+ 	writel(val, base + regs->wdt_mode);
+@@ -107,11 +124,19 @@
+ 
+ static int sunxi_wdt_expire_now(struct udevice *dev, ulong flags)
+ {
++	struct sunxi_wdt_priv *priv = dev_get_priv(dev);
++	const struct sunxi_wdt_reg *regs = priv->regs;
+ 	int ret;
+ 
+-	ret = sunxi_wdt_start(dev, 0, flags);
+-	if (ret)
+-		return ret;
++	if (regs->wdt_soft_reset) {
++		sunxi_wdt_stop(dev);
++		writel(regs->wdt_key_val | BIT(0),
++		       priv->base + regs->wdt_soft_reset);
++	} else {
++		ret = sunxi_wdt_start(dev, 0, flags);
++		if (ret)
++			return ret;
++	}
+ 
+ 	mdelay(500);
+ 
+@@ -163,11 +188,24 @@
+ 	.wdt_key_val		= 0x16aa0000,
+ };
+ 
++static const struct sunxi_wdt_reg sun300i_wdt_reg = {
++	.wdt_ctrl		= 0x10,
++	.wdt_cfg		= 0x14,
++	.wdt_mode		= 0x18,
++	.wdt_timeout_shift	= 4,
++	.wdt_reset_mask		= 0x03,
++	.wdt_reset_val		= 0x01,
++	.wdt_key_val		= 0x16aa0000,
++	.wdt_soft_reset		= 0x08,
++	.linear_timeout		= true,
++};
++
+ static const struct udevice_id sunxi_wdt_ids[] = {
+ 	{ .compatible = "allwinner,sun4i-a10-wdt", .data = (ulong)&sun4i_wdt_reg },
+ 	{ .compatible = "allwinner,sun6i-a31-wdt", .data = (ulong)&sun6i_wdt_reg },
+ 	{ .compatible = "allwinner,sun20i-d1-wdt", .data = (ulong)&sun20i_wdt_reg },
+ 	{ .compatible = "allwinner,sun55i-a523-wdt", .data = (ulong)&sun55i_wdt_reg },
++	{ .compatible = "allwinner,sun300i-v821-wdt", .data = (ulong)&sun300i_wdt_reg },
+ 	{ /* sentinel */ }
+ };
+ 
+diff --git a/drivers/watchdog/wdt-uclass.c b/drivers/watchdog/wdt-uclass.c
+--- a/drivers/watchdog/wdt-uclass.c
++++ b/drivers/watchdog/wdt-uclass.c
+@@ -73,7 +73,7 @@
+ 
+ 	priv = dev_get_uclass_priv(dev);
+ 
+-	if (IS_ENABLED(CONFIG_SYSRESET_WATCHDOG_AUTO)) {
++	if (CONFIG_IS_ENABLED(SYSRESET_WATCHDOG_AUTO)) {
+ 		ret = sysreset_register_wdt(dev);
+ 		if (ret)
+ 			printf("WDT:   Failed to register %s for sysreset\n",
+@@ -164,8 +164,9 @@
+ 					priv->reset_period * 1000,
+ 					dev->name);
+ 
+-			snprintf(svc_str, sizeof(svc_str), "every %ldms",
+-				 priv->reset_period);
++			if (CONFIG_IS_ENABLED(SPRINTF))
++				snprintf(svc_str, sizeof(svc_str), "every %ldms",
++					 priv->reset_period);
+ 		}
+ 
+ 		priv->running = true;
+@@ -179,7 +180,7 @@
+ 		 * Sub-second rounding is ignored to avoid noise.
+ 		 */
+ 		req_str[0] = '\0';
+-		if (req_s != tout_s)
++		if (CONFIG_IS_ENABLED(SPRINTF) && req_s != tout_s)
+ 			snprintf(req_str, sizeof(req_str), ", requested %ds", req_s);
+ 
+ 		printf("WDT:   Started %s with%s servicing %s (%ds timeout%s)\n",

@@ -1,0 +1,205 @@
+Subject: [PATCH] riscv: dts: describe the Allwinner V821 SoC
+
+Upstream-Status: Inappropriate [CatPlay V821 port]
+
+diff --git a/arch/riscv/dts/sun300i-v821.dtsi b/arch/riscv/dts/sun300i-v821.dtsi
+new file mode 100644
+index 00000000..a1a2946a
+--- /dev/null
++++ b/arch/riscv/dts/sun300i-v821.dtsi
+@@ -0,0 +1,195 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++
++#include <dt-bindings/clock/sun300i-v821-ccu.h>
++#include <dt-bindings/interrupt-controller/irq.h>
++#include <dt-bindings/reset/sun300i-v821-ccu.h>
++
++/ {
++	#address-cells = <2>;
++	#size-cells = <2>;
++
++	cpus {
++		#address-cells = <1>;
++		#size-cells = <0>;
++		timebase-frequency = <40000000>;
++
++		cpu0: cpu@0 {
++			device_type = "cpu";
++			reg = <0>;
++			status = "okay";
++			compatible = "riscv";
++			riscv,isa = "rv32imafdc";
++			mmu-type = "riscv,sv32";
++			clock-frequency = <1008000000>;
++
++			cpu0_intc: interrupt-controller {
++				compatible = "riscv,cpu-intc";
++				interrupt-controller;
++				#interrupt-cells = <1>;
++			};
++		};
++	};
++
++	dcxo: clock-40m {
++		compatible = "fixed-clock";
++		#clock-cells = <0>;
++		clock-frequency = <40000000>;
++	};
++
++	losc: clock-32k {
++		compatible = "fixed-clock";
++		#clock-cells = <0>;
++		clock-frequency = <32768>;
++	};
++
++	pio_apb: clock-40m-apb {
++		compatible = "fixed-clock";
++		#clock-cells = <0>;
++		clock-frequency = <40000000>;
++	};
++
++	soc {
++		compatible = "simple-bus";
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		l2_cache: cache-controller@49000000 {
++			compatible = "cache";
++			reg = <0 0x49000000 0 0x1000>;
++			andes,inst-prefetch = <3>;
++			andes,data-prefetch = <3>;
++			andes,tag-ram-ctl = <1 1>;
++			andes,data-ram-ctl = <1 1>;
++		};
++
++		ccu: clock-controller@42001000 {
++			compatible = "allwinner,sun300i-v821-app-ccu";
++			reg = <0 0x42001000 0 0x100>;
++			clocks = <&dcxo>;
++			clock-names = "hosc";
++			#clock-cells = <1>;
++			#reset-cells = <1>;
++		};
++
++		plic: interrupt-controller@48000000 {
++			compatible = "riscv,plic0";
++			reg = <0 0x48000000 0 0x400000>;
++			interrupt-controller;
++			#interrupt-cells = <2>;
++			riscv,ndev = <187>;
++			interrupts-extended = <&cpu0_intc 11 &cpu0_intc 9>;
++		};
++
++		pio: pinctrl@42000000 {
++			compatible = "allwinner,sun300i-v821-pinctrl";
++			reg = <0 0x42000000 0 0x500>;
++			#gpio-cells = <3>;
++			gpio-controller;
++			interrupt-controller;
++			#interrupt-cells = <3>;
++			interrupts-extended = <&plic 68 IRQ_TYPE_LEVEL_HIGH>,
++					      <&plic 72 IRQ_TYPE_LEVEL_HIGH>,
++					      <&plic 74 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&pio_apb>, <&dcxo>, <&losc>;
++			clock-names = "apb", "hosc", "losc";
++
++			mmc0_pins: mmc0-pins {
++				pins = "PC0", "PC1", "PC2", "PC3", "PC4", "PC5";
++				function = "mmc0";
++				drive-strength = <30>;
++				bias-pull-up;
++			};
++
++			spif_bus_pins: spif-bus-pins {
++				pins = "PC8", "PC9", "PC11";
++				function = "spif";
++				drive-strength = <20>;
++			};
++
++			spif_control_pins: spif-control-pins {
++				pins = "PC6", "PC7", "PC10";
++				function = "spif";
++				drive-strength = <20>;
++				bias-pull-up;
++			};
++		};
++
++		r_pio: pinctrl@42000540 {
++			compatible = "allwinner,sun300i-v821-r-pinctrl";
++			reg = <0 0x42000540 0 0x100>;
++			#gpio-cells = <3>;
++			gpio-controller;
++			interrupt-controller;
++			#interrupt-cells = <3>;
++			interrupts-extended = <&plic 84 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&dcxo>;
++			clock-names = "hosc";
++
++			uart0_pins: uart0-pins {
++				pins = "PL4", "PL5";
++				function = "uart0";
++			};
++		};
++
++		plmt0: timer@48400000 {
++			compatible = "andestech,plmt0";
++			reg = <0 0x48400000 0 0x100000>;
++			clock-frequency = <40000000>;
++			interrupts-extended = <&cpu0_intc 7>;
++		};
++
++		wdt: watchdog@4a001000 {
++			compatible = "allwinner,sun300i-v821-wdt";
++			reg = <0 0x4a001000 0 0x20>;
++		};
++
++		uart0: serial@42500000 {
++			compatible = "ns16550a";
++			reg = <0 0x42500000 0 0x400>;
++			clocks = <&ccu CLK_BUS_UART0>;
++			resets = <&ccu RST_BUS_UART0>;
++			reg-shift = <2>;
++			current-speed = <115200>;
++			clock-frequency = <192000000>;
++			pinctrl-names = "default";
++			pinctrl-0 = <&uart0_pins>;
++			status = "disabled";
++		};
++
++		mmc0: mmc@44020000 {
++			compatible = "allwinner,sun300i-v821-mmc";
++			reg = <0 0x44020000 0 0x1000>;
++			clocks = <&ccu CLK_BUS_MMC0>, <&ccu CLK_MMC0>;
++			clock-names = "ahb", "mmc";
++			resets = <&ccu RST_BUS_MMC0>;
++			pinctrl-names = "default";
++			pinctrl-0 = <&mmc0_pins>;
++			bus-width = <4>;
++			cap-sd-highspeed;
++			max-frequency = <50000000>;
++			no-mmc;
++			status = "disabled";
++		};
++
++		spif: spi@44f00000 {
++			compatible = "allwinner,sun300i-v821-spif";
++			reg = <0 0x44f00000 0 0x1000>;
++			interrupts-extended = <&plic 19 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&ccu CLK_BUS_SPIF>, <&ccu CLK_SPIF>;
++			clock-names = "ahb", "mod";
++			resets = <&ccu RST_BUS_SPIF>;
++			pinctrl-names = "default";
++			pinctrl-0 = <&spif_bus_pins &spif_control_pins>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++			status = "disabled";
++
++			flash@0 {
++				compatible = "jedec,spi-nor";
++				reg = <0>;
++				spi-max-frequency = <30000000>;
++			};
++		};
++	};
++};

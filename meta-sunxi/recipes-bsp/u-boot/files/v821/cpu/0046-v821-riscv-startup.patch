@@ -1,0 +1,698 @@
+Subject: [PATCH] riscv: add V821 E907 to A27 startup and SPL layout
+
+Upstream-Status: Inappropriate [CatPlay V821 port]
+
+diff --git a/arch/riscv/cpu/Makefile b/arch/riscv/cpu/Makefile
+--- a/arch/riscv/cpu/Makefile
++++ b/arch/riscv/cpu/Makefile
+@@ -5,3 +5,4 @@
+ extra-y = start.o
+ 
+ obj-y += cpu.o mtrap.o
++obj-$(CONFIG_MACH_SUN300I_V821) += sunxi/
+diff --git a/arch/riscv/cpu/start.S b/arch/riscv/cpu/start.S
+--- a/arch/riscv/cpu/start.S
++++ b/arch/riscv/cpu/start.S
+@@ -39,8 +39,12 @@ secondary_harts_relocation_error:
+ .section .text
+ .globl _start
+ _start:
++#ifdef CONFIG_MACH_SUN300I_V821
++#include "sunxi/start.S"
++#else
+ #if CONFIG_IS_ENABLED(RISCV_MMODE)
+ 	csrr	a0, CSR_MHARTID
++#endif
+ #endif
+ 
+ 	/*
+diff --git a/arch/riscv/cpu/sunxi/start.S b/arch/riscv/cpu/sunxi/start.S
+new file mode 100644
+--- /dev/null
++++ b/arch/riscv/cpu/sunxi/start.S
+@@ -0,0 +1,176 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/* V821 E907-to-A27 entry, included in place by start.S. */
++
++/* Vendor CSR layouts differ between E907 and A27. */
++.set E907_CSR_MHCR, 0x7c1
++.set A27_CSR_MXSTATUS, 0x7c4
++
++/* MMIO addresses and offsets used by the E907-to-A27 handoff. */
++.set SUNXI_POWERCTRL_AON_BASE, 0x4a011000
++.set SUNXI_CPUX_POWER_OFFSET, 0x64
++.set SUNXI_CCU_AON_BASE, 0x4a010000
++.set SUNXI_A27L2_CLK_OFFSET, 0x588
++.set SUNXI_E907_CLK_OFFSET, 0x584
++.set SUNXI_CCU_APP_BASE, 0x42001000
++.set SUNXI_A27_PLMT_CLK_OFFSET, 0x10
++.set SUNXI_CPUX_AXI_CLK_OFFSET, 0x7c
++.set SUNXI_CPUX_RESET_OFFSET, 0x94
++.set SUNXI_CPUX_WDT_RESET_OFFSET, 0x98
++.set SUNXI_E907_RESET_REG, 0x4200109c
++.set SUNXI_E907_RESET_KEY, 0xa5690000
++.set SUNXI_CPUCFG_BASE, 0x49100000
++.set SUNXI_CPUX_START_ADDR_OFFSET, 0x204
++.set SUNXI_CPUX_WFI_MODE_OFFSET, 0x4
++
++/* Control bits used during the handoff. */
++.set V821_MSTATUS_MIE, 1 << 3
++.set E907_MHCR_HANDOFF_DISABLE_MASK, 0x103f
++.set A27_MXSTATUS_ISA_EXT_ENABLE, 1 << 22
++.set SUNXI_CPUX_POWER_ENABLE, 1 << 8
++.set SUNXI_CPU_CLK_ENABLE, 1 << 31
++.set SUNXI_CPUX_AXI_DIV_MASK, 3 << 8
++.set SUNXI_CPUX_AXI_DIV2, 1 << 8
++.set SUNXI_CPUX_CFG_MSGBOX_CLK_ENABLE, (1 << 7) | (1 << 6)
++.set SUNXI_CPUX_WDT_RESET_DEASSERT, 1 << 2
++.set SUNXI_CPUX_CFG_MSGBOX_RESET_DEASSERT, (1 << 28) | (1 << 27)
++.set SUNXI_CPUX_RESET_DEASSERT, 1 << 26
++
++#if defined(CONFIG_XPL_BUILD) && defined(CONFIG_SUNXI_FEL_STASH)
++	.option push
++	.option norvc
++	j save_boot_params
++.globl save_boot_params_ret
++	.option pop
++save_boot_params_ret:
++#endif
++#if CONFIG_IS_ENABLED(RISCV_MMODE)
++#ifndef CONFIG_XPL_BUILD
++	/* FEL SPL left A27 parked; assert CPU-only reset before relaunch. */
++	li t0, SUNXI_CCU_APP_BASE + SUNXI_CPUX_RESET_OFFSET
++	lw t1, 0(t0)
++	li t2, ~SUNXI_CPUX_RESET_DEASSERT
++	and t1, t1, t2
++	sw t1, 0(t0)
++	fence iorw, iorw
++#endif
++	.option push
++	.option norvc
++	.option norelax
++/* Keep the validated full-width instruction spacing on both CPUs. */
++	.macro v821_handoff_sync
++	.option push
++	.option norvc
++	.rept 8
++	nop
++	.endr
++	fence iorw, iorw
++	.option pop
++	.endm
++v821_boot_switch:
++/*
++ * Follow sun300iw1p1/e907_boot/boot0_main.c in Brandy. In particular,
++ * power and clock CPUX before accessing its configuration/mailbox domain.
++ * FEL can leave a different initial state from a BootROM NOR boot.
++ *
++ * Use PC-relative relocation instead of a fixed trampoline size. The FEL
++ * context-save jump and proper's CPU-only reset may precede this code.
++ * All instructions before a27_start use the base RV32 ISA and numeric CSRs.
++ */
++	v821_handoff_sync
++	lla a1, a27_start
++	li a2, V821_MSTATUS_MIE
++	csrc mstatus, a2
++
++	/* POWERCTRL_AON: request CPUX power. */
++	li a4, SUNXI_POWERCTRL_AON_BASE
++	lw a3, SUNXI_CPUX_POWER_OFFSET(a4)
++	ori a3, a3, SUNXI_CPUX_POWER_ENABLE
++	sw a3, SUNXI_CPUX_POWER_OFFSET(a4)
++
++	/* CPUX starts from HOSC; PLMT must run before any C timer/udelay use. */
++	li a5, SUNXI_CCU_AON_BASE
++	li a3, SUNXI_CPU_CLK_ENABLE
++	sw a3, SUNXI_A27L2_CLK_OFFSET(a5)
++	li a4, SUNXI_CCU_APP_BASE
++	/* PLMT: select 40 MHz HOSC and enable its gate, independent of UART. */
++	sw a3, SUNXI_A27_PLMT_CLK_OFFSET(a4)
++
++	/* CPUX AXI divide-by-two and msgbox/config bus clocks. */
++	lw a3, SUNXI_CPUX_AXI_CLK_OFFSET(a4)
++	andi a3, a3, ~SUNXI_CPUX_AXI_DIV_MASK
++	ori a3, a3, SUNXI_CPUX_AXI_DIV2 | SUNXI_CPUX_CFG_MSGBOX_CLK_ENABLE
++	sw a3, SUNXI_CPUX_AXI_CLK_OFFSET(a4)
++
++	/* Disable E907 caches and select HOSC, as in the vendor handoff. */
++	li a2, E907_MHCR_HANDOFF_DISABLE_MASK
++	csrc E907_CSR_MHCR, a2
++	sw zero, SUNXI_E907_CLK_OFFSET(a5)
++
++	/* Allow CPUX/AXI clocks to settle with E907 running from HOSC. */
++	fence iorw, iorw
++	li t0, 64
++.Lv821_clock_settle:
++	addi t0, t0, -1
++	bnez t0, .Lv821_clock_settle
++
++	/* Preserve the existing CPUX watchdog reset deassertion. */
++	lw a3, SUNXI_CPUX_WDT_RESET_OFFSET(a4)
++	ori a3, a3, SUNXI_CPUX_WDT_RESET_DEASSERT
++	sw a3, SUNXI_CPUX_WDT_RESET_OFFSET(a4)
++	/* Release msgbox/config reset only after their clocks are running. */
++	lw a3, SUNXI_CPUX_RESET_OFFSET(a4)
++	li a2, SUNXI_CPUX_CFG_MSGBOX_RESET_DEASSERT
++	or a3, a3, a2
++	sw a3, SUNXI_CPUX_RESET_OFFSET(a4)
++	fence iorw, iorw
++
++	/* Publish A27 entry and clear CPUX WFI mode before CPU release. */
++	li a5, SUNXI_CPUCFG_BASE
++	sw a1, SUNXI_CPUX_START_ADDR_OFFSET(a5)
++	sw zero, SUNXI_CPUX_WFI_MODE_OFFSET(a5)
++	fence iorw, iorw
++	v821_handoff_sync
++1:
++	lw a3, SUNXI_CPUX_START_ADDR_OFFSET(a5)
++	beqz a3, 1b
++	v821_handoff_sync
++	lw a3, SUNXI_CPUX_RESET_OFFSET(a4)
++	li a2, SUNXI_CPUX_RESET_DEASSERT
++	or a3, a3, a2
++	sw a3, SUNXI_CPUX_RESET_OFFSET(a4)
++	fence iorw, iorw
++	j v821_e907_park
++
++	.option pop
++.globl a27_start
++a27_start:
++	v821_handoff_sync
++	.purgem v821_handoff_sync
++	/* A27 owns execution now; E907 must not fetch reclaimed memory. */
++	li t0, SUNXI_E907_RESET_REG
++	li t1, SUNXI_E907_RESET_KEY
++	sw t1, 0(t0)
++	fence iorw, iorw
++	/* The A27 needs the vendor ISA-extension window before C code. */
++	csrw	MODE_PREFIX(ie), zero
++	li	t1, A27_MXSTATUS_ISA_EXT_ENABLE
++	csrs	A27_CSR_MXSTATUS, t1
++	fence.i
++	li	a0, 0
++	li	a1, 0
++
++/* Keep E907 clocked until A27 asserts reset; WFI can gate its clock. */
++.pushsection .text.v821_e907_park, "ax"
++.option push
++.option norvc
++.option norelax
++.balign 4
++.globl v821_e907_park
++.type v821_e907_park, @function
++v821_e907_park:
++.Lv821_e907_park:
++	j .Lv821_e907_park
++.size v821_e907_park, . - v821_e907_park
++.option pop
++.popsection
++#endif
+diff --git a/common/spl/Kconfig b/common/spl/Kconfig
+index 5080d4a..ead359e 100644
+--- a/common/spl/Kconfig
++++ b/common/spl/Kconfig
+@@ -408,6 +408,7 @@ config SPL_HAVE_INIT_STACK
+ 	default y if MACH_SUN50I || MACH_SUN50I_H5
+ 	default y if MACH_SUN9I
+ 	default y if ARCH_SUNXI
++	default y if SOC_SUNXI
+ 	default y if ARCH_SC5XX && (SC59X_64 || SC59X)
+ 	default y if ARCH_SC5XX && SC58X
+ 	default y if ARCH_SC5XX && SC57X
+@@ -537,7 +538,7 @@ config SPL_DISPLAY_PRINT
+ config SPL_SYS_MMCSD_RAW_MODE
+ 	bool "Use raw reads to locate the next boot phase"
+ 	depends on SPL_DM_MMC || SPL_MMC
+-	default y if ARCH_SUNXI || ARCH_DAVINCI || ARCH_UNIPHIER || \
++	default y if ARCH_SUNXI || SOC_SUNXI || ARCH_DAVINCI || ARCH_UNIPHIER || \
+ 		     ARCH_MX6 || ARCH_MX7 || \
+ 		     ARCH_ROCKCHIP || ARCH_MVEBU || ARCH_SOCFPGA_GEN5 || \
+ 		     ARCH_AT91 || ARCH_ZYNQ || ARCH_KEYSTONE || OMAP34XX || \
+@@ -579,7 +580,7 @@ endchoice
+ config SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR
+ 	hex "Address on the MMC to load U-Boot from"
+ 	depends on SYS_MMCSD_RAW_MODE_U_BOOT_USE_SECTOR
+-	default 0x40 if ARCH_SUNXI
++	default 0x40 if ARCH_SUNXI || SOC_SUNXI
+ 	default 0x75 if ARCH_DAVINCI
+ 	default 0x8a if ARCH_MX6 || ARCH_MX7
+ 	default 0x100 if ARCH_UNIPHIER
+@@ -596,7 +597,7 @@ config SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR
+ config SYS_MMCSD_RAW_MODE_U_BOOT_DATA_PART_OFFSET
+ 	hex "U-Boot main hardware partition image offset"
+ 	depends on SYS_MMCSD_RAW_MODE_U_BOOT_USE_SECTOR
+-	default 0x10 if ARCH_SUNXI
++	default 0x10 if ARCH_SUNXI || SOC_SUNXI
+ 	default 0x0
+ 	help
+ 	  On some platforms SPL location depends on hardware partition. The ROM
+@@ -1711,7 +1712,8 @@ config SPL_OPTEE_IMAGE
+ 
+ config SPL_OPENSBI
+ 	bool "Support RISC-V OpenSBI"
+-	depends on RISCV && SPL_RISCV_MMODE && RISCV_SMODE
++	depends on RISCV && SPL_RISCV_MMODE
++	depends on RISCV_SMODE || SPL_LOAD_FIT_OPENSBI_OS_BOOT
+ 	depends on SPL_LOAD_FIT && !SPL_FIT_IMAGE_TINY
+ 	help
+ 	  OpenSBI is an open-source implementation of the RISC-V Supervisor Binary
+diff --git a/arch/riscv/cpu/sunxi/fel.S b/arch/riscv/cpu/sunxi/fel.S
+new file mode 100644
+--- /dev/null
++++ b/arch/riscv/cpu/sunxi/fel.S
+@@ -0,0 +1,413 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#if defined(CONFIG_XPL_BUILD) && defined(CONFIG_SUNXI_FEL_STASH)
++
++/* CSR numbers and cache commands are local to their executing core. */
++.set E907_CSR_MTVT, 0x307
++.set E907_CSR_MINTSTATUS, 0x346
++.set E907_CSR_MXSTATUS, 0x7c0
++.set E907_CSR_MHCR, 0x7c1
++.set E907_CSR_MHINT, 0x7c5
++.set E907_CSR_MEXSTATUS, 0x7e1
++.set A27_CSR_MCACHE_CTL, 0x7ca
++.set A27_CSR_UCCTLCOMMAND, 0x80c
++.set A27_CCTL_L1D_WBINVAL_ALL, 6
++
++/* E907 timer and PRCM BootROM redirect registers. */
++.set SUNXI_E907_CLK_REG, 0x4a010584
++.set E907_SYSMAP_BASE, 0x3ffff000
++.set E907_SYSMAP_WORDS, 16
++.set E907_MTIMECMP_ADDR, 0x30004000
++.set SUNXI_PRCM_BOOT_MODE_REG, 0x4a0001c0
++.set SUNXI_PRCM_BOOT_ADDR_REG, 0x4a0001c4
++.set SUNXI_PRCM_BOOT_MODE_KEY, 0x429b0000
++
++/* Keep the MTIME read base page-aligned to preserve the single-LUI load. */
++.set E907_MTIME_ADDR, 0x3000bff8
++.set E907_MTIME_READ_BASE, E907_MTIME_ADDR + 8
++.set E907_MTIME_LO_OFFSET, E907_MTIME_ADDR - E907_MTIME_READ_BASE
++.set E907_MTIME_HI_OFFSET, E907_MTIME_LO_OFFSET + 4
++.set E907_CLIC_BASE, 0x30800000
++.set E907_CLIC_CFG_OFFSET, 0x0
++.set E907_CLIC_INFO_OFFSET, 0x4
++.set E907_CLIC_THRESH_OFFSET, 0x8
++.set E907_CLIC_INTIE_BASE, E907_CLIC_BASE + 0x1001
++.set E907_CLIC_INTIE_OFFSET, 0x0
++.set E907_CLIC_INTATTR_OFFSET, 0x1
++.set E907_CLIC_INTCTL_OFFSET, 0x2
++.set E907_CLIC_IRQ_STRIDE, 0x4
++.set SUNXI_E907_RESET_REG, 0x4200109c
++.set SUNXI_E907_RESET_KEY, 0xa5690000
++
++/* Interrupt, cache and ROM redirect control fields. */
++.set A27_MCACHE_CTL_ICACHE_ENABLE, 1 << 0
++.set A27_MCACHE_CTL_DCACHE_ENABLE, 1 << 1
++.set V821_MSTATUS_MIE, 1 << 3
++.set E907_MHCR_HANDOFF_DISABLE_MASK, 0x103f
++.set E907_CLIC_INFO_NUM_INTERRUPTS_MASK, (1 << 13) - 1
++.set E907_MINTSTATUS_MIL_SHIFT, 24
++.set E907_MCAUSE_MPIL_SHIFT, 16
++.set E907_MCAUSE_INTERRUPT, 1 << 31
++.set E907_MCAUSE_MPP_M, 3 << 28
++.set E907_MTIMECMP_LO_SAFE, -1
++.set SUNXI_PRCM_BOOT_MODE_KEY_SHIFT, 16
++.set SUNXI_PRCM_BOOT_MODE_MASK, 0xf
++.set SUNXI_PRCM_BOOT_MODE_RESUME, 1
++.set SUNXI_E907_RESET_DEASSERT, 1 << 0
++.set E907_INSN_DCACHE_CIALL, 0x0030000b
++.set E907_INSN_DCACHE_IALL, 0x0020000b
++.set E907_INSN_ICACHE_IALL, 0x0100000b
++.set E907_INSN_TH_SYNC, 0x0180000b
++
++/* A27 is hart0; both Andes L2 register layouts use these hart0 offsets. */
++.set A27_L2_BASE, 0x49000000
++.set A27_L2_CONTROL_OFFSET, 0x08
++.set A27_L2_COMMAND_HART0_OFFSET, 0x40
++.set A27_L2_STATUS_HART0_OFFSET, 0x80
++.set A27_L2_ENABLE, 1 << 0
++.set A27_L2_WBINVAL_ALL, 0x12
++.set A27_L2_STATUS_HART0_MASK, 0xf
++
++/* E907 state belongs to the interrupted BootROM call, not to A27. */
++.set FEL_STASH_MSTATUS, 64
++.set FEL_STASH_MIE, 68
++.set FEL_STASH_MTVEC, 72
++.set FEL_STASH_MTVT, 76
++.set FEL_STASH_MSCRATCH, 80
++.set FEL_STASH_MEPC, 84
++.set FEL_STASH_MCAUSE, 88
++.set FEL_STASH_MTVAL, 92
++.set FEL_STASH_MXSTATUS, 96
++.set FEL_STASH_MHCR, 100
++.set FEL_STASH_MHINT, 104
++.set FEL_STASH_MEXSTATUS, 108
++.set FEL_STASH_BOOT_MODE, 112
++.set FEL_STASH_BOOT_ADDR, 116
++.set FEL_STASH_CLIC_COUNT, 120
++.set FEL_STASH_CLIC_CFG, 124
++.set FEL_STASH_CLIC_THRESH, 128
++.set FEL_STASH_CLIC_IRQS, 132
++.set CLIC_MAX_IRQS, 256
++.set FEL_STASH_MINTSTATUS, FEL_STASH_CLIC_IRQS + 3 * CLIC_MAX_IRQS
++.set FEL_STASH_MTIME_LO, FEL_STASH_MINTSTATUS + 4
++.set FEL_STASH_MTIME_HI, FEL_STASH_MTIME_LO + 4
++.set FEL_STASH_MTIMECMP_LO, FEL_STASH_MTIME_HI + 4
++.set FEL_STASH_MTIMECMP_HI, FEL_STASH_MTIMECMP_LO + 4
++.set FEL_STASH_MTIME_RESUME_LO, FEL_STASH_MTIMECMP_HI + 4
++.set FEL_STASH_MTIME_RESUME_HI, FEL_STASH_MTIME_RESUME_LO + 4
++.set FEL_STASH_E907_CLK, FEL_STASH_MTIME_RESUME_HI + 4
++.set FEL_STASH_SYSMAP, FEL_STASH_E907_CLK + 4
++.set FEL_STASH_SIZE, FEL_STASH_SYSMAP + 4 * E907_SYSMAP_WORDS
++
++.macro save_csr csr, offset
++	csrr t1, \csr
++	sw t1, \offset(t0)
++.endm
++
++.macro restore_csr csr, offset
++	lw t1, \offset(t0)
++	csrw \csr, t1
++.endm
++
++.section .text.fel_stash, "ax"
++.option push
++.option norvc
++.option norelax
++.global save_boot_params
++save_boot_params:
++	/* Snapshot the caller's interrupt state before masking interrupts. */
++	csrrci t1, mstatus, V821_MSTATUS_MIE
++	lla t0, fel_stash
++	sw t1, FEL_STASH_MSTATUS(t0)
++	li t1, SUNXI_E907_CLK_REG
++	lw t1, 0(t1)
++	sw t1, FEL_STASH_E907_CLK(t0)
++	sw ra, 0(t0)
++	sw sp, 4(t0)
++	sw gp, 8(t0)
++	sw tp, 12(t0)
++	sw s0, 16(t0)
++	sw s1, 20(t0)
++	sw s2, 24(t0)
++	sw s3, 28(t0)
++	sw s4, 32(t0)
++	sw s5, 36(t0)
++	sw s6, 40(t0)
++	sw s7, 44(t0)
++	sw s8, 48(t0)
++	sw s9, 52(t0)
++	sw s10, 56(t0)
++	sw s11, 60(t0)
++	save_csr mie, FEL_STASH_MIE
++	save_csr mtvec, FEL_STASH_MTVEC
++	save_csr E907_CSR_MTVT, FEL_STASH_MTVT
++	save_csr E907_CSR_MINTSTATUS, FEL_STASH_MINTSTATUS
++	save_csr mscratch, FEL_STASH_MSCRATCH
++	save_csr mepc, FEL_STASH_MEPC
++	save_csr mcause, FEL_STASH_MCAUSE
++	save_csr mtval, FEL_STASH_MTVAL
++	/* MTIME is an external read-only counter; snapshot it without stopping it. */
++	li t2, E907_MTIME_READ_BASE
++.Lsave_mtime:
++	lw t3, E907_MTIME_HI_OFFSET(t2)
++	lw t1, E907_MTIME_LO_OFFSET(t2)
++	lw t4, E907_MTIME_HI_OFFSET(t2)
++	bne t3, t4, .Lsave_mtime
++	sw t1, FEL_STASH_MTIME_LO(t0)
++	sw t3, FEL_STASH_MTIME_HI(t0)
++	li t2, E907_MTIMECMP_ADDR
++	lw t1, 0(t2)
++	sw t1, FEL_STASH_MTIMECMP_LO(t0)
++	lw t1, 4(t2)
++	sw t1, FEL_STASH_MTIMECMP_HI(t0)
++	/* Documented E907 control CSRs; do not use the C906 CSR layout. */
++	save_csr E907_CSR_MXSTATUS, FEL_STASH_MXSTATUS
++	save_csr E907_CSR_MHCR, FEL_STASH_MHCR
++	save_csr E907_CSR_MHINT, FEL_STASH_MHINT
++	save_csr E907_CSR_MEXSTATUS, FEL_STASH_MEXSTATUS
++	/* Reset loses the BootROM's memory attributes, including ROM cacheability. */
++	li t2, E907_SYSMAP_BASE
++	addi t3, t0, FEL_STASH_SYSMAP
++	li t4, E907_SYSMAP_WORDS
++.Lsave_sysmap:
++	lw t1, 0(t2)
++	sw t1, 0(t3)
++	addi t2, t2, 4
++	addi t3, t3, 4
++	addi t4, t4, -1
++	bnez t4, .Lsave_sysmap
++	li t2, SUNXI_PRCM_BOOT_MODE_REG
++	lw t1, 0(t2)
++	sw t1, FEL_STASH_BOOT_MODE(t0)
++	lw t1, (SUNXI_PRCM_BOOT_ADDR_REG - SUNXI_PRCM_BOOT_MODE_REG)(t2)
++	sw t1, FEL_STASH_BOOT_ADDR(t0)
++	/* CLIC control registers can reset with the core. Never replay pending. */
++	li t2, E907_CLIC_BASE
++	lbu t1, E907_CLIC_CFG_OFFSET(t2)
++	sw t1, FEL_STASH_CLIC_CFG(t0)
++	lw t1, E907_CLIC_THRESH_OFFSET(t2)
++	sw t1, FEL_STASH_CLIC_THRESH(t0)
++	lw t1, E907_CLIC_INFO_OFFSET(t2)
++	li t6, E907_CLIC_INFO_NUM_INTERRUPTS_MASK
++	and t1, t1, t6
++	li t6, CLIC_MAX_IRQS
++	bgtu t1, t6, .Lclic_too_large
++	sw t1, FEL_STASH_CLIC_COUNT(t0)
++	mv t5, t1
++	addi t4, t0, FEL_STASH_CLIC_IRQS
++	li t3, E907_CLIC_INTIE_BASE
++	beqz t5, .Lclic_saved
++.Lsave_clic:
++	lbu t1, E907_CLIC_INTIE_OFFSET(t3)
++	sb t1, 0(t4)
++	lbu t1, E907_CLIC_INTATTR_OFFSET(t3)
++	sb t1, 1(t4)
++	lbu t1, E907_CLIC_INTCTL_OFFSET(t3)
++	sb t1, 2(t4)
++	addi t3, t3, E907_CLIC_IRQ_STRIDE
++	addi t4, t4, 3
++	addi t5, t5, -1
++	bnez t5, .Lsave_clic
++.Lclic_saved:
++	/* th.dcache.ciall: publish the stash before A27 resets this core. */
++	.long E907_INSN_DCACHE_CIALL
++	.long E907_INSN_TH_SYNC /* th.sync orders cache operations, unlike fence. */
++	fence iorw, iorw
++	j save_boot_params_ret
++.Lclic_too_large:
++	/* Unsupported controller: return without starting A27 or changing CLIC. */
++	lw t1, FEL_STASH_MSTATUS(t0)
++	li a0, 0
++	csrw mstatus, t1
++	ret
++
++/* A27 keeps DRAM alive while the restarted E907 resumes its ROM caller. */
++.global sunxi_unstash_fel
++sunxi_unstash_fel:
++	csrci mstatus, V821_MSTATUS_MIE
++	/* Publish L1 before disabling it, with no intervening stack writes. */
++	csrwi A27_CSR_UCCTLCOMMAND, A27_CCTL_L1D_WBINVAL_ALL
++	fence iorw, iorw
++	csrci A27_CSR_MCACHE_CTL, A27_MCACHE_CTL_ICACHE_ENABLE | A27_MCACHE_CTL_DCACHE_ENABLE
++	fence.i
++	/* L1 is off: drain L2 and leave no cache active during E907 FEL. */
++	li t0, A27_L2_BASE
++	lw t1, A27_L2_CONTROL_OFFSET(t0)
++	andi t2, t1, A27_L2_ENABLE
++	beqz t2, .Lfel_l2_disabled
++	li t2, A27_L2_WBINVAL_ALL
++	sw t2, A27_L2_COMMAND_HART0_OFFSET(t0)
++	fence iorw, iorw
++.Lfel_l2_wait:
++	lw t2, A27_L2_STATUS_HART0_OFFSET(t0)
++	andi t2, t2, A27_L2_STATUS_HART0_MASK
++	/* Only IDLE is safe; a rejected command must not resume E907. */
++	bnez t2, .Lfel_l2_wait
++	andi t1, t1, ~A27_L2_ENABLE
++	sw t1, A27_L2_CONTROL_OFFSET(t0)
++	fence iorw, iorw
++.Lfel_l2_disabled:
++	lla t0, fel_stash
++	li t2, SUNXI_PRCM_BOOT_MODE_REG
++	lla t1, fel_resume
++	sw t1, (SUNXI_PRCM_BOOT_ADDR_REG - SUNXI_PRCM_BOOT_MODE_REG)(t2)
++	lw t1, FEL_STASH_BOOT_MODE(t0)
++	slli t1, t1, SUNXI_PRCM_BOOT_MODE_KEY_SHIFT
++	srli t1, t1, SUNXI_PRCM_BOOT_MODE_KEY_SHIFT
++	li t3, SUNXI_PRCM_BOOT_MODE_KEY
++	or t1, t1, t3
++	andi t1, t1, ~SUNXI_PRCM_BOOT_MODE_MASK
++	ori t1, t1, SUNXI_PRCM_BOOT_MODE_RESUME
++	sw t1, 0(t2)
++	fence iorw, iorw
++	/* Restore the caller's clock while E907 is still held in reset. */
++	lw t1, FEL_STASH_E907_CLK(t0)
++	li t2, SUNXI_E907_CLK_REG
++	sw t1, 0(t2)
++	fence iorw, iorw
++	lw t1, 0(t2)
++	/* Keyed CPU-only reset release; ROM redirects before normal init. */
++	li t0, SUNXI_E907_RESET_REG
++	li t1, SUNXI_E907_RESET_KEY | SUNXI_E907_RESET_DEASSERT
++	sw t1, 0(t0)
++	fence iorw, iorw
++1:
++	wfi
++	j 1b
++
++/* ROM's reset prelude reaches this without touching the saved ROM stack. */
++.global fel_resume
++fel_resume:
++	csrci mstatus, V821_MSTATUS_MIE
++	li t1, E907_MHCR_HANDOFF_DISABLE_MASK
++	csrc E907_CSR_MHCR, t1
++	/* Same instruction/data invalidations as normal E907 ROM startup. */
++	.long E907_INSN_ICACHE_IALL
++	.long E907_INSN_DCACHE_IALL
++	.long E907_INSN_TH_SYNC /* th.sync */
++	fence iorw, iorw
++	lla t0, fel_stash
++	/* Restore the caller's map before re-enabling instruction caching. */
++	li t2, E907_SYSMAP_BASE
++	addi t3, t0, FEL_STASH_SYSMAP
++	li t4, E907_SYSMAP_WORDS
++.Lrestore_sysmap:
++	lw t1, 0(t3)
++	sw t1, 0(t2)
++	addi t2, t2, 4
++	addi t3, t3, 4
++	addi t4, t4, -1
++	bnez t4, .Lrestore_sysmap
++	fence iorw, iorw
++	.long E907_INSN_TH_SYNC
++	/* Consume the temporary redirect, preserving the original registers. */
++	li t2, SUNXI_PRCM_BOOT_MODE_REG
++	lw t1, FEL_STASH_BOOT_ADDR(t0)
++	sw t1, (SUNXI_PRCM_BOOT_ADDR_REG - SUNXI_PRCM_BOOT_MODE_REG)(t2)
++	lw t1, FEL_STASH_BOOT_MODE(t0)
++	slli t1, t1, SUNXI_PRCM_BOOT_MODE_KEY_SHIFT
++	srli t1, t1, SUNXI_PRCM_BOOT_MODE_KEY_SHIFT
++	li t3, SUNXI_PRCM_BOOT_MODE_KEY
++	or t1, t1, t3
++	sw t1, 0(t2)
++	fence iorw, iorw
++	/* Leave MTIME running; resetting this core must not rewind it. */
++	li t2, E907_MTIME_READ_BASE
++.Lresume_mtime:
++	lw t3, E907_MTIME_HI_OFFSET(t2)
++	lw t1, E907_MTIME_LO_OFFSET(t2)
++	lw t4, E907_MTIME_HI_OFFSET(t2)
++	bne t3, t4, .Lresume_mtime
++	sw t1, FEL_STASH_MTIME_RESUME_LO(t0)
++	sw t3, FEL_STASH_MTIME_RESUME_HI(t0)
++	/* Restore the actual compare value with the safe RV32 half-write order. */
++	li t2, E907_MTIMECMP_ADDR
++	li t1, E907_MTIMECMP_LO_SAFE
++	sw t1, 0(t2)
++	fence iorw, iorw
++	lw t1, FEL_STASH_MTIMECMP_HI(t0)
++	sw t1, 4(t2)
++	fence iorw, iorw
++	lw t1, FEL_STASH_MTIMECMP_LO(t0)
++	sw t1, 0(t2)
++	fence iorw, iorw
++	/* Restore actual interrupt routing before enabling interrupts. */
++	li t2, E907_CLIC_BASE
++	lw t1, FEL_STASH_CLIC_CFG(t0)
++	sb t1, E907_CLIC_CFG_OFFSET(t2)
++	lw t1, FEL_STASH_CLIC_THRESH(t0)
++	sw t1, E907_CLIC_THRESH_OFFSET(t2)
++	lw t5, FEL_STASH_CLIC_COUNT(t0)
++	addi t4, t0, FEL_STASH_CLIC_IRQS
++	li t3, E907_CLIC_INTIE_BASE
++	beqz t5, .Lclic_restored
++.Lrestore_clic:
++	lbu t1, 1(t4)
++	sb t1, E907_CLIC_INTATTR_OFFSET(t3)
++	lbu t1, 2(t4)
++	sb t1, E907_CLIC_INTCTL_OFFSET(t3)
++	lbu t1, 0(t4)
++	sb t1, E907_CLIC_INTIE_OFFSET(t3)
++	addi t3, t3, E907_CLIC_IRQ_STRIDE
++	addi t4, t4, 3
++	addi t5, t5, -1
++	bnez t5, .Lrestore_clic
++.Lclic_restored:
++	fence iorw, iorw
++	restore_csr E907_CSR_MXSTATUS, FEL_STASH_MXSTATUS
++	restore_csr E907_CSR_MHINT, FEL_STASH_MHINT
++	restore_csr E907_CSR_MEXSTATUS, FEL_STASH_MEXSTATUS
++	restore_csr E907_CSR_MTVT, FEL_STASH_MTVT
++	restore_csr mtvec, FEL_STASH_MTVEC
++	/* MIL is read-only. MRET restores it from MCAUSE.MPIL in CLIC mode. */
++	lw t1, FEL_STASH_MINTSTATUS(t0)
++	srli t1, t1, E907_MINTSTATUS_MIL_SHIFT
++	slli t1, t1, E907_MCAUSE_MPIL_SHIFT
++	/* Interrupt=1, MPP=M, MPIE=0: stay in M-mode with interrupts masked. */
++	li t2, E907_MCAUSE_INTERRUPT | E907_MCAUSE_MPP_M
++	or t1, t1, t2
++	csrw mcause, t1
++	lla t1, .Lmil_restored
++	csrw mepc, t1
++	mret
++.Lmil_restored:
++	restore_csr mscratch, FEL_STASH_MSCRATCH
++	restore_csr mepc, FEL_STASH_MEPC
++	restore_csr mcause, FEL_STASH_MCAUSE
++	restore_csr mtval, FEL_STASH_MTVAL
++	restore_csr mie, FEL_STASH_MIE
++	lw ra, 0(t0)
++	lw sp, 4(t0)
++	lw gp, 8(t0)
++	lw tp, 12(t0)
++	lw s0, 16(t0)
++	lw s1, 20(t0)
++	lw s2, 24(t0)
++	lw s3, 28(t0)
++	lw s4, 32(t0)
++	lw s5, 36(t0)
++	lw s6, 40(t0)
++	lw s7, 44(t0)
++	lw s8, 48(t0)
++	lw s9, 52(t0)
++	lw s10, 56(t0)
++	lw s11, 60(t0)
++	lw t2, FEL_STASH_MHCR(t0)
++	lw t1, FEL_STASH_MSTATUS(t0)
++	csrw E907_CSR_MHCR, t2
++	fence.i
++	li a0, 64
++	/* All caller state is ready before interrupts may become enabled. */
++	csrw mstatus, t1
++	ret
++.option pop
++
++/* Outside BSS: A27 clears BSS before initializing DRAM. */
++.section .data, "aw"
++.balign 16
++.global fel_stash
++.type fel_stash, @object
++fel_stash:
++	.zero FEL_STASH_SIZE
++.size fel_stash, . - fel_stash
++
++#endif
+diff --git a/arch/riscv/Kconfig b/arch/riscv/Kconfig
+--- a/arch/riscv/Kconfig
++++ b/arch/riscv/Kconfig
+@@ -4,1 +4,10 @@
++config SUNXI_FEL_STASH
++	bool "Save the BootROM context for SPL return to FEL"
++	depends on MACH_SUN300I_V821 && SPL
++	default y
++	help
++	  Save the BootROM caller context before the E907-to-A27 handoff.
++	  This allows the SPL FEL loader to return to the original ROM caller.
++	  Disable this to save SRAM when SPL never returns directly to FEL.
++
+ config SYS_ARCH
+diff --git a/arch/riscv/cpu/sunxi/Makefile b/arch/riscv/cpu/sunxi/Makefile
+new file mode 100644
+--- /dev/null
++++ b/arch/riscv/cpu/sunxi/Makefile
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: GPL-2.0+
++
++obj-y += fel.o

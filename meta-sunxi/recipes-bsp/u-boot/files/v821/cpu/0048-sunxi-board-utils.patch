@@ -1,0 +1,207 @@
+Subject: [PATCH] riscv: sunxi: add board setup helpers
+
+Upstream-Status: Inappropriate [CatPlay V821 port]
+
+diff --git a/arch/riscv/cpu/sunxi/Makefile b/arch/riscv/cpu/sunxi/Makefile
+--- a/arch/riscv/cpu/sunxi/Makefile
++++ b/arch/riscv/cpu/sunxi/Makefile
+@@ -5,1 +5,2 @@
+ obj-$(CONFIG_XPL_BUILD) += fel_spl.o
++obj-y += board_utils.o
+diff --git a/arch/riscv/cpu/sunxi/board_utils.c b/arch/riscv/cpu/sunxi/board_utils.c
+new file mode 100644
+--- /dev/null
++++ b/arch/riscv/cpu/sunxi/board_utils.c
+@@ -0,0 +1,177 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* V821 early SoC setup shared by SPL and U-Boot proper. */
++#include <asm/io.h>
++#include <asm/arch-sunxi/cpu.h>
++#include <asm/arch-sunxi/clock.h>
++#include <asm/arch-sunxi/sys_proto.h>
++#include <linux/bitops.h>
++#include <linux/bitfield.h>
++#include <linux/delay.h>
++#include <linux/errno.h>
++
++/*
++ * This utility is limited to boards with a 40 MHz DCXO.
++ *
++ * The boot ROM starts the A27 cluster from HOSC.  BSP boot0 raises PLL_CPU
++ * to 960 MHz before loading the next stage; do the same before entering
++ * OpenSBI so that firmware, U-Boot and Linux do not run at 40 MHz.
++ */
++void sunxi_raise_cpu_clock(void)
++{
++	void __iomem *pll = (void __iomem *)SUNXI_PLL_CPU_CTRL;
++	u32 val;
++	int i, locked;
++
++	val = readl(pll);
++	/* FEL SPL may already have selected this PLL before entering proper. */
++	if ((val & (SUNXI_PLL_CPU_EN | SUNXI_PLL_CPU_LOCK |
++		    SUNXI_PLL_CPU_N | SUNXI_PLL_CPU_INPUT_DIV)) ==
++	    (SUNXI_PLL_CPU_EN | SUNXI_PLL_CPU_LOCK |
++	     FIELD_PREP(SUNXI_PLL_CPU_N, 47) |
++	     FIELD_PREP(SUNXI_PLL_CPU_INPUT_DIV, 1)))
++		goto clock_ready;
++	val |= SUNXI_PLL_CPU_LDO_EN;
++	val &= ~(SUNXI_PLL_CPU_EN | SUNXI_PLL_CPU_LOCK_EN |
++		 SUNXI_PLL_CPU_OUTPUT_GATE);
++	writel(val, pll);
++
++	for (i = 0; i < 100; i++) {
++		if (!(readl(pll) & (SUNXI_PLL_CPU_EN | SUNXI_PLL_CPU_LOCK_EN |
++				    SUNXI_PLL_CPU_OUTPUT_GATE)))
++			break;
++		udelay(3);
++	}
++
++	val = readl(pll);
++	val &= ~(SUNXI_PLL_CPU_LOCK_TIME | SUNXI_PLL_CPU_INPUT_DIV |
++		 SUNXI_PLL_CPU_N);
++	val |= FIELD_PREP(SUNXI_PLL_CPU_LOCK_TIME, 3) |
++	       FIELD_PREP(SUNXI_PLL_CPU_INPUT_DIV, 1) |
++	       FIELD_PREP(SUNXI_PLL_CPU_N, 47);
++	writel(val, pll);
++
++	val |= SUNXI_PLL_CPU_EN | SUNXI_PLL_CPU_LOCK_EN;
++	writel(val, pll);
++
++	locked = 0;
++	for (i = 0; i < 100 && locked < 3; i++) {
++		if (readl(pll) & SUNXI_PLL_CPU_LOCK)
++			locked++;
++		else
++			locked = 0;
++		udelay(3);
++	}
++	if (locked < 3)
++		return;
++
++clock_ready:
++	udelay(20);
++	setbits_le32(pll, SUNXI_PLL_CPU_OUTPUT_GATE);
++
++	/* Keep L2 on the CPU PLL, matching the BSP clock topology. */
++	val = readl((void __iomem *)SUNXI_CPU_L2_CLK_REG);
++	val &= ~GENMASK(31, 24);
++	val |= BIT(31) | 4U << 24;
++	writel(val, (void __iomem *)SUNXI_CPU_L2_CLK_REG);
++
++	/* AHB = PLL_PERI 768 MHz / 4, APB = PLL_PERI 384 MHz / 4. */
++	if (readl((void __iomem *)SUNXI_PLL_PERI_CTRL) & SUNXI_PLL_CPU_LOCK) {
++		val = readl((void __iomem *)SUNXI_AHB_CLK_REG);
++		val &= ~(GENMASK(25, 24) | GENMASK(4, 0));
++		val |= 1U << 24 | 3U;
++		writel(val, (void __iomem *)SUNXI_AHB_CLK_REG);
++
++		val = readl((void __iomem *)SUNXI_APB_CLK_REG);
++		val &= ~(GENMASK(25, 24) | GENMASK(4, 0));
++		val |= 1U << 24 | 3U;
++		writel(val, (void __iomem *)SUNXI_APB_CLK_REG);
++	}
++}
++
++void sunxi_debug_uart_init(void)
++{
++	u32 val;
++	int i;
++
++	/* The board uses a 40 MHz DCXO. */
++	clrbits_le32((void __iomem *)(SUNXI_CCU_AON_BASE + 0x404), BIT(31));
++
++	/* Enable PLL_PERI / 16 as the 192 MHz UART module clock. */
++	val = readl((void __iomem *)(SUNXI_CCU_AON_BASE + 0x20));
++	if (!(val & BIT(31))) {
++		val &= ~(GENMASK(15, 8) | GENMASK(2, 0));
++		val &= ~BIT(27);
++		val |= 191U << 8 | 4U | BIT(31) | BIT(30) | BIT(29);
++		writel(val, (void __iomem *)(SUNXI_CCU_AON_BASE + 0x20));
++
++		for (i = 0; i < 0x10000; i++) {
++			if (readl((void __iomem *)(SUNXI_CCU_AON_BASE + 0x20)) & BIT(28))
++				break;
++		}
++
++		if (!(readl((void __iomem *)(SUNXI_CCU_AON_BASE + 0x20)) & BIT(28)))
++			return;
++
++		setbits_le32((void __iomem *)(SUNXI_CCU_AON_BASE + 0x20), BIT(27));
++	}
++	writel(0xffff, (void __iomem *)(SUNXI_CCU_AON_BASE + 0x24));
++
++	/* Select PLL_PERI 192 MHz on the APB special clock. */
++	val = readl((void __iomem *)(SUNXI_CCU_AON_BASE + 0x580));
++	val &= ~(GENMASK(4, 0) | GENMASK(26, 24));
++	val |= 0x3U << 24;
++	writel(val, (void __iomem *)(SUNXI_CCU_AON_BASE + 0x580));
++
++	/* PL4: UART0 TX, PL5: UART0 RX, function 3. */
++	val = readl((void __iomem *)SUNXI_R_PIO_BASE);
++	val &= ~(0xfU << 16 | 0xfU << 20);
++	val |= 3U << 16 | 3U << 20;
++	writel(val, (void __iomem *)SUNXI_R_PIO_BASE);
++
++	/* Pull up PL4/PL5. */
++	val = readl((void __iomem *)(SUNXI_R_PIO_BASE + 0x24));
++	val &= ~(3U << 8 | 3U << 10);
++	val |= 1U << 8 | 1U << 10;
++	writel(val, (void __iomem *)(SUNXI_R_PIO_BASE + 0x24));
++
++	/* Release UART0 reset and enable its bus clock. */
++	setbits_le32((void __iomem *)(SUNXI_CCU_APP_BASE + 0x90), BIT(15));
++	clrbits_le32((void __iomem *)(SUNXI_CCU_APP_BASE + 0x80), BIT(15));
++	for (i = 0; i < 100; i++)
++		;
++	setbits_le32((void __iomem *)(SUNXI_CCU_APP_BASE + 0x80), BIT(15));
++}
++
++void sunxi_reset_usb(void)
++{
++	/* FEL leaves USB endpoints active. Give Linux a reset controller. */
++	clrbits_le32((void __iomem *)(SUNXI_CCU_APP_BASE + 0x90),
++		     BIT(23) | BIT(20) | BIT(19));
++	/* Linux owns deassertion of the PHY, OTG and shared USB resets. */
++	asm volatile("fence iorw, iorw" ::: "memory");
++}
++
++int sunxi_spif_prepare(unsigned long rate)
++{
++	void __iomem *ccu = (void __iomem *)SUNXI_CCU_APP_BASE;
++	void __iomem *portc = (void __iomem *)SUNXI_PIO_C_BASE;
++	unsigned int pin;
++
++	for (pin = 6; pin <= 11; pin++) {
++		unsigned int shift = (pin % 8) * 4;
++
++		clrsetbits_le32(portc + (pin / 8) * 4, 0xfU << shift, 2U << shift);
++	}
++	/* Match Linux pinctrl drive-strength=20 mA for PC6..PC11. */
++	clrsetbits_le32(portc + 0x14, GENMASK(23, 12), 0x555U << 12);
++	clrsetbits_le32(portc + 0x24, (3U << 12) | (3U << 14) | (3U << 20),
++			(1U << 12) | (1U << 14) | (1U << 20));
++	setbits_le32(ccu + SUNXI_CCU_BUS_GATE1, CCM_BUS_GATE1_SPIF);
++	clrbits_le32(ccu + SUNXI_CCU_BUS_RST1, CCM_BUS_RST1_SPIF);
++	if (!clock_set_spif_rate(ccu, rate))
++		return -EINVAL;
++	setbits_le32(ccu + SUNXI_CCU_SPIF_CLK, CCM_SPIF_CTRL_ENABLE);
++	udelay(2);
++	setbits_le32(ccu + SUNXI_CCU_BUS_RST1, CCM_BUS_RST1_SPIF);
++	return 0;
++}
+diff --git a/arch/riscv/include/asm/arch-sunxi/sys_proto.h b/arch/riscv/include/asm/arch-sunxi/sys_proto.h
+new file mode 100644
+--- /dev/null
++++ b/arch/riscv/include/asm/arch-sunxi/sys_proto.h
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef _ASM_ARCH_SUNXI_SYS_PROTO_H
++#define _ASM_ARCH_SUNXI_SYS_PROTO_H
++
++void sunxi_reset_usb(void);
++void sunxi_debug_uart_init(void);
++void sunxi_raise_cpu_clock(void);
++int sunxi_spif_prepare(unsigned long rate);
++
++#endif

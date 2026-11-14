@@ -1,0 +1,29 @@
+Subject: [PATCH] spl: repair the cyclic list head after moving global data
+
+SPL may register cyclic callbacks before relocating its stack and global
+data to DRAM. Copying global data moves the hlist head but leaves the first
+callback's pprev pointing to the original head in SRAM. Removing that
+callback then updates the old head, leaving the new list with a stale
+entry; unregistering a watchdog before FEL exposes this.
+
+Repoint the first callback at the copied head, as required by the hlist
+layout. Subsequent callbacks already point at their predecessor nodes and
+need no adjustment.
+
+Upstream-Status: Pending
+
+diff --git a/common/spl/spl.c b/common/spl/spl.c
+--- a/common/spl/spl.c
++++ b/common/spl/spl.c
+@@ -953,6 +953,11 @@
+ #if CONFIG_IS_ENABLED(DM)
+ 	dm_fixup_for_gd_move(new_gd);
+ #endif
++#if CONFIG_IS_ENABLED(CYCLIC)
++	/* The first callback still points back to the old list head. */
++	if (new_gd->cyclic_list.first)
++		new_gd->cyclic_list.first->pprev = &new_gd->cyclic_list.first;
++#endif
+ #if CONFIG_IS_ENABLED(LOG)
+ 	log_fixup_for_gd_move(new_gd);
+ #endif

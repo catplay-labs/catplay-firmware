@@ -1,0 +1,111 @@
+Subject: [PATCH] sunxi: share SoC selection and V821 base definitions
+
+Upstream-Status: Inappropriate [CatPlay V821 port]
+
+diff --git a/arch/Kconfig b/arch/Kconfig
+index e28e4c4..c6efe79 100644
+--- a/arch/Kconfig
++++ b/arch/Kconfig
+@@ -389,6 +389,11 @@ config XTENSA
+ 
+ endchoice
+ 
++config SOC_SUNXI
++	bool
++	help
++	  Selected for Allwinner sunxi SoCs on any CPU architecture.
++
+ config SYS_ARCH
+ 	string
+ 	help
+diff --git a/arch/arm/Kconfig b/arch/arm/Kconfig
+index 514bf20..1e0fd94 100644
+--- a/arch/arm/Kconfig
++++ b/arch/arm/Kconfig
+@@ -1208,6 +1208,7 @@ config ARCH_SOCFPGA
+ 
+ config ARCH_SUNXI
+ 	bool "Support sunxi (Allwinner) SoCs"
++	select SOC_SUNXI
+ 	select BINMAN
+ 	select CMD_GPIO
+ 	select CMD_MMC if MMC
+diff --git a/arch/riscv/include/asm/arch-sunxi/bootrom.h b/arch/riscv/include/asm/arch-sunxi/bootrom.h
+new file mode 100644
+index 0000000..01f965d
+--- /dev/null
++++ b/arch/riscv/include/asm/arch-sunxi/bootrom.h
+@@ -0,0 +1,7 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef _ASM_ARCH_SUNXI_BOOTROM_H
++#define _ASM_ARCH_SUNXI_BOOTROM_H
++
++#define SUNXI_SPL_EGON_ADDR	(CONFIG_SPL_TEXT_BASE - 0x60)
++
++#endif
+diff --git a/arch/riscv/include/asm/arch-sunxi/cpu.h b/arch/riscv/include/asm/arch-sunxi/cpu.h
+new file mode 100644
+index 0000000..15dbd2c
+--- /dev/null
++++ b/arch/riscv/include/asm/arch-sunxi/cpu.h
+@@ -0,0 +1,60 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef _ASM_ARCH_SUNXI_CPU_H
++#define _ASM_ARCH_SUNXI_CPU_H
++
++#include <linux/bitops.h>
++
++#define SUNXI_CCU_APP_BASE	0x42001000UL
++#define SUNXI_CCU_AON_BASE	0x4a010000UL
++#define SUNXI_MMC0_BASE		0x44020000UL
++#define SUNXI_SPI0_BASE		0x44025000UL
++#define SUNXI_SPI1_BASE		0x44026000UL
++#define SUNXI_SPIF_BASE		0x44f00000UL
++#define SUNXI_PIO_BASE		0x42000000UL
++#define SUNXI_PIO_C_BASE		(SUNXI_PIO_BASE + 0x60)
++#define SUNXI_PLMT_BASE		0x48400000UL
++
++#define SUNXI_DRAM_COM_BASE 0x43102000UL
++#define SUNXI_DRAM_PHY_BASE ((void __iomem *)0x43103000UL)
++#define SUNXI_SRAMC_BASE 0x43000000UL
++#define SUNXI_SID_BASE 0x43006000UL
++#define SUNXI_SIDC_BASE (SUNXI_SID_BASE + 0x200)
++#define SUNXI_PRCM_BASE 0x4a000000UL
++#define SUNXI_CHIP_VERSION_REG	(SUNXI_PRCM_BASE + 0x40)
++#define SUNXI_CHIP_VERSION_V821	0x2
++
++#define SUNXI_WDT_RESET_CTRL      ((void __iomem *)(SUNXI_PRCM_BASE + 0x1c))
++#define SUNXI_WDT_RESET_DEASSERT  BIT(3)
++#define SUNXI_WDT_BASE            ((void __iomem *)(SUNXI_PRCM_BASE + 0x1000))
++#define SUNXI_WDT_SOFT_RESET      (SUNXI_WDT_BASE + 0x08)
++#define SUNXI_WDT_MODE            (SUNXI_WDT_BASE + 0x18)
++#define SUNXI_WDT_KEY             0x16aa0000U
++
++#define SUNXI_R_PIO_BASE		0x42000540UL
++
++#define SUNXI_PLL_CPU_CTRL	(SUNXI_CCU_AON_BASE + 0x000)
++#define SUNXI_PLL_PERI_CTRL	(SUNXI_CCU_AON_BASE + 0x020)
++#define SUNXI_AHB_CLK_REG		(SUNXI_CCU_AON_BASE + 0x500)
++#define SUNXI_APB_CLK_REG		(SUNXI_CCU_AON_BASE + 0x504)
++#define SUNXI_CPU_L2_CLK_REG	(SUNXI_CCU_AON_BASE + 0x588)
++
++#define SUNXI_PLL_CPU_LDO_EN	BIT(30)
++#define SUNXI_PLL_CPU_EN		BIT(31)
++#define SUNXI_PLL_CPU_LOCK_EN	BIT(29)
++#define SUNXI_PLL_CPU_LOCK	BIT(28)
++#define SUNXI_PLL_CPU_OUTPUT_GATE	BIT(27)
++#define SUNXI_PLL_CPU_LOCK_TIME	GENMASK(26, 24)
++#define SUNXI_PLL_CPU_N		GENMASK(15, 8)
++#define SUNXI_PLL_CPU_INPUT_DIV	GENMASK(3, 2)
++
++/* Register layout and keyed FEL requests follow Brandy sun300iw1p1. */
++#define SUNXI_RTC_DATA_BASE	(SUNXI_PRCM_BASE + 0x200)
++#define SUNXI_FEL_REQUEST_REG	((void __iomem *)(SUNXI_PRCM_BASE + 0x1d0))
++#define SUNXI_FEL_REQUEST_SET	0x429b0001U
++#define SUNXI_FEL_REQUEST_CLEAR	0x429b0000U
++#define SUNXI_RTC_FEL_INDEX	2
++#define SUNXI_RTC_FEL_MAGIC	0x5aa5a55aU
++#define SUNXI_RTC_FEL_FLAG	((void __iomem *)(SUNXI_RTC_DATA_BASE + \
++					 SUNXI_RTC_FEL_INDEX * 4))
++
++#endif

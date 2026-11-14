@@ -1,0 +1,53 @@
+Subject: [PATCH] riscv: sunxi: keep V821 emergency watchdog reset independent of DM
+
+Upstream-Status: Inappropriate [CatPlay V821 port]
+
+diff --git a/arch/riscv/cpu/sunxi/watchdog.c b/arch/riscv/cpu/sunxi/watchdog.c
+new file mode 100644
+--- /dev/null
++++ b/arch/riscv/cpu/sunxi/watchdog.c
+@@ -0,0 +1,23 @@
++// SPDX-License-Identifier: GPL-2.0+
++
++#include <asm/io.h>
++#include <asm/arch-sunxi/cpu.h>
++#include <asm/arch-sunxi/watchdog.h>
++#include <linux/bitops.h>
++
++/* Until a PRCM reset provider is available, release the peripheral early. */
++void sunxi_watchdog_init(void)
++{
++	setbits_le32(SUNXI_WDT_RESET_CTRL, SUNXI_WDT_RESET_DEASSERT);
++}
++
++void __noreturn sunxi_watchdog_reset(void)
++{
++	/* Release the peripheral reset before requesting a system reset. */
++	setbits_le32(SUNXI_WDT_RESET_CTRL, SUNXI_WDT_RESET_DEASSERT);
++	writel(SUNXI_WDT_KEY, SUNXI_WDT_MODE);
++	writel(SUNXI_WDT_KEY | BIT(0), SUNXI_WDT_SOFT_RESET);
++	for (;;)
++		asm volatile("wfi");
++}
++
+diff --git a/arch/riscv/include/asm/arch-sunxi/watchdog.h b/arch/riscv/include/asm/arch-sunxi/watchdog.h
+new file mode 100644
+--- /dev/null
++++ b/arch/riscv/include/asm/arch-sunxi/watchdog.h
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef __V821_WATCHDOG_H
++#define __V821_WATCHDOG_H
++
++#include <linux/compiler.h>
++
++void sunxi_watchdog_init(void);
++void __noreturn sunxi_watchdog_reset(void);
++
++#endif
+diff --git a/arch/riscv/cpu/sunxi/Makefile b/arch/riscv/cpu/sunxi/Makefile
+--- a/arch/riscv/cpu/sunxi/Makefile
++++ b/arch/riscv/cpu/sunxi/Makefile
+@@ -6,1 +6,2 @@
+ obj-y += board_utils.o
++obj-y += watchdog.o
