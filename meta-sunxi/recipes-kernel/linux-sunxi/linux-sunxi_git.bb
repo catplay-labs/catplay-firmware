@@ -61,6 +61,7 @@ SRC_URI:append = " file://drivers/mtd/0001-mtd-add-read-only-bad-block-aware-mtd
 SRC_URI:append = " file://drivers/mtd/spi-nand/0001-mtd-spi-nand-add-GigaDevice-clone-VID-D8.patch"
 SRC_URI:append = " file://drivers/mtd/spi-nand/0002-mtd-spi-nand-enable-DTR-read-for-GD5F1GM7RE.patch"
 SRC_URI:append = " file://drivers/mtd/spi-nand/0003-mtd-spinand-add-Foresee-FS35ND01G-S1F1.patch"
+SRC_URI:append = " file://drivers/mtd/0002-mtd-log-SPI-NOR-and-SPI-NAND-chip-IDs.patch"
 SRC_URI:append = " file://drivers/spi/0002-spi-sun6i-add-V851-half-cycle-sample-mode.patch"
 SRC_URI:append = " file://drivers/spi/0003-spi-sun6i-add-V851-sample-delay.patch"
 SRC_URI:append = " file://drivers/crypto/allwinner/sun8i-ce/0001-crypto-sun8i-ce-add-native-AES-CTR.patch"

@@ -1,0 +1,33 @@
+Subject: [PATCH] mtd: log SPI NOR and SPI NAND IDs at info level
+Upstream-Status: Pending
+
+Make manufacturer and device IDs visible in ordinary boot logs for both
+SPI flash types. Promote the existing SPI NOR debug message and report
+the matched SPI NAND ID after successful detection. For NAND, include
+only the manufacturer and device bytes covered by the matched ID length.
+
+diff --git a/drivers/mtd/spi-nor/core.c b/drivers/mtd/spi-nor/core.c
+--- a/drivers/mtd/spi-nor/core.c
++++ b/drivers/mtd/spi-nor/core.c
+@@ -3702,7 +3702,7 @@
+ 	if (ret)
+ 		return ret;
+ 
+-	dev_dbg(dev, "Manufacturer and device ID: %*phN\n",
++	dev_info(dev, "Manufacturer and device ID: %*phN\n",
+ 		SPI_NOR_MAX_ID_LEN, nor->id);
+ 
+ 	return 0;
+diff --git a/drivers/mtd/nand/spi/core.c b/drivers/mtd/nand/spi/core.c
+--- a/drivers/mtd/nand/spi/core.c
++++ b/drivers/mtd/nand/spi/core.c
+@@ -1762,6 +1762,9 @@
+ 		return ret;
+ 	}
+ 
++	dev_info(dev, "Manufacturer and device ID: %*phN\n",
++		 spinand->id.len, spinand->id.data);
++
+ 	if (nand->memorg.ntargets > 1 && !spinand->select_target) {
+ 		dev_err(dev,
+ 			"SPI NANDs with more than one die must implement ->select_target()\n");
