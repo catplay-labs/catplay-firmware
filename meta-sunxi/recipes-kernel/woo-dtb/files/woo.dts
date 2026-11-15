@@ -11,7 +11,7 @@
 	compatible = "allwinner,v821b", "allwinner,v821", "allwinner,sun300iw1p1";
 
 	chosen {
-		bootargs = C2A_APPEND;
+		bootargs = C2A_BOOTARGS;
 	};
 
 	reg_vcc_wifi: regulator-vcc-wifi {
