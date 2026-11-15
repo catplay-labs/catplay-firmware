@@ -19,7 +19,7 @@ from ci_network import Network, command, wireguard_debug
 HERE = Path(__file__).resolve().parent
 SERVER = '10.193.78.1'
 PORT = 8686
-BOOT_TIMEOUT = 180
+BOOT_TIMEOUT = 15 * 60
 HEARTBEAT_TIMEOUT = 90
 PROTOCOL_FAILURE_GRACE = 90
 
