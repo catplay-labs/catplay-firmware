@@ -1209,7 +1209,7 @@ index 000000000000..8eb91cf630a6
 +		SUNXI_FUNCTION(0x4, "uart1"),         /* uart1_tx */
 +		SUNXI_FUNCTION(0x5, "pwm0_10"),       /* pwm0_10 */
 +		SUNXI_FUNCTION(0x8, "lcd"),           /* lcd_d16 */
-+		SUNXI_FUNCTION_IRQ_BANK(0xe, 1, 16),  /* eint */
++		SUNXI_FUNCTION_IRQ_BANK(0xe, 1, 17),  /* eint */
 +		SUNXI_FUNCTION(0xf, "io_disabled")),  /* io_disable */
 +	SUNXI_PIN(SUNXI_PINCTRL_PIN(C, 18),
 +		SUNXI_FUNCTION(0x0, "gpio_in"),       /* gpio_in */
@@ -1218,7 +1218,7 @@ index 000000000000..8eb91cf630a6
 +		SUNXI_FUNCTION(0x4, "uart1"),         /* uart1_rx */
 +		SUNXI_FUNCTION(0x5, "pwm0_11"),       /* pwm0_11 */
 +		SUNXI_FUNCTION(0x8, "lcd"),           /* lcd_d17 */
-+		SUNXI_FUNCTION_IRQ_BANK(0xe, 1, 16),  /* eint */
++		SUNXI_FUNCTION_IRQ_BANK(0xe, 1, 18),  /* eint */
 +		SUNXI_FUNCTION(0xf, "io_disabled")),  /* io_disable */
 +	/* bank D */
 +	SUNXI_PIN(SUNXI_PINCTRL_PIN(D, 0),
