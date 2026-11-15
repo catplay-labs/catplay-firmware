@@ -11,7 +11,7 @@ SRC_URI:append = " file://drivers/leds/0001-leds-add-SPI-driven-WS2812B-RGB-driv
 
 SRC_URI = "git://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git;branch=${KBRANCH};protocol=https"
 SRC_URI:append = " file://crypto/0001-crypto-remove-forced-entropy-collection-that-adds-0.5s-lag-to-system-boot.patch"
-SRC_URI:append = " file://drivers/net/usb/0001-cdc-ncm-fix-linking-with-generic-CarPlay-Headunits.patch"
+SRC_URI:append = " file://carplay/0001-cdc-ncm-fix-linking-with-generic-CarPlay-Headunits.patch"
 SRC_URI:append = " file://drivers/phy/allwinner/0001-phy-sun4i-usb-add-new-PHY-register-map.patch"
 SRC_URI:append = " file://drivers/phy/allwinner/0002-phy-sun4i-usb-guard-PHY_CTL_VBUSVLDEXT.patch"
 SRC_URI:append = " file://drivers/phy/allwinner/0003-phy-sun4i-usb-skip-squelch-detection-for-VCBUS.patch"
@@ -40,7 +40,19 @@ SRC_URI:append = " file://drivers/usb/musb/0001-usb-musb-sunxi-support-optional-
 SRC_URI:append = " file://drivers/usb/musb/0002-usb-musb-sunxi-add-V821-platform-support.patch"
 SRC_URI:append = " file://drivers/usb/musb/0003-usb-musb-sunxi-expose-userspace-role-switch.patch"
 SRC_URI:append = " file://drivers/usb/musb/0004-usb-musb-sunxi-hand-off-V821-PHY-to-linked-host-HCDs.patch"
-SRC_URI:append = " file://drivers/usb/0003-usb-log-host-enumeration-failures-to-dmesg.patch"
+# CarPlay USB role switching and enumeration (USB core and DWC2).
+SRC_URI:append = " \
+    file://carplay/dwc2/0021-dwc2-actually-communicate-requested-usb-role-switch-to-the-PHY.patch \
+    file://carplay/dwc2/0022-dwc2-remove-3x100ms-overhead-when-booting-with-USB_DR_MODE_OTG-and-Ingenic-X1600.patch \
+    file://carplay/dwc2/0023-dwc2-log-failed-dwc2_hsotg_core_connect-when-binding-gadget.patch \
+    file://carplay/dwc2/0030-dwc2-drop-dwc2_hcd_start-50ms-delay.patch \
+    file://carplay/usb/0031-usb-core-set-USB_PORT_QUIRK_OLD_SCHEME-and-USB_PORT_QUIRK_FAST_ENUM-quirks-on-dwc2-root-hub.patch \
+    file://carplay/dwc2/0038-dwc2-log-port-connect-enable-overcurrent-interrupts.patch \
+    file://carplay/usb/0003-usb-log-host-enumeration-failures-to-dmesg.patch \
+    file://carplay/dwc2/0040-dwc2-kick-the-root-hub-status-poll-on-port-interrupts.patch \
+    file://carplay/usb/0041-usb-core-use-1ms-reset-waits-for-fast-enum-ports.patch \
+    file://carplay/usb/0042-usb-hub-run-the-hub-workqueue-at-high-priority.patch \
+"
 SRC_URI:append = " file://drivers/usb/host/0003-usb-host-quiesce-platform-HCDs-before-remove.patch"
 SRC_URI:append = " file://drivers/nvmem/0001-nvmem-sunxi-sid-add-V821-USB-PHY-calibration.patch"
 SRC_URI:append = " file://arch/riscv/boot/dts/allwinner/sun300i-v821b.dtsi;subdir=."

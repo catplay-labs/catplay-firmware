@@ -1,0 +1,16 @@
+Subject: [PATCH] dwc2: drop dwc2_hcd_start 50ms delay
+Upstream-Status: Pending
+
+diff --git a/drivers/usb/dwc2/hcd.c b/drivers/usb/dwc2/hcd.c
+index cd0dc87..abb060b 100644
+--- a/drivers/usb/dwc2/hcd.c
++++ b/drivers/usb/dwc2/hcd.c
+@@ -1657,7 +1657,7 @@ void dwc2_hcd_start(struct dwc2_hsotg *hsotg)
+ 	}
+ 
+ 	queue_delayed_work(hsotg->wq_otg, &hsotg->start_work,
+-			   msecs_to_jiffies(50));
++			   0);
+ }
+ 
+ /* Must be called with interrupt disabled and spinlock held */

@@ -1,0 +1,71 @@
+Subject: [PATCH] dwc2: actually communicate requested usb-role-switch to the PHY
+Upstream-Status: Pending
+
+Soft-disconnect the gadget before moving from device to host mode, so the
+peripheral pull-up is disabled before the PHY and ID state change.
+
+diff --git a/drivers/usb/dwc2/drd.c b/drivers/usb/dwc2/drd.c
+index 1ad8fa3..8f2b3a9 100644
+--- a/drivers/usb/dwc2/drd.c
++++ b/drivers/usb/dwc2/drd.c
+@@ -86,6 +86,7 @@ static int dwc2_ovr_bvalid(struct dwc2_hsotg *hsotg, bool valid)
+ static int dwc2_drd_role_sw_set(struct usb_role_switch *sw, enum usb_role role)
+ {
+ 	struct dwc2_hsotg *hsotg = usb_role_switch_get_drvdata(sw);
++	enum phy_mode phy_mode;
+ 	unsigned long flags;
+ 	int already = 0;
+ 
+@@ -117,7 +118,20 @@ static int dwc2_drd_role_sw_set(struct usb_role_switch *sw, enum usb_role role)
+ 			return ret;
+ 	}
+ 
+-	spin_lock_irqsave(&hsotg->lock, flags);
++	switch (role) {
++	case USB_ROLE_HOST:
++		phy_mode = PHY_MODE_USB_HOST;
++		break;
++	case USB_ROLE_DEVICE:
++		phy_mode = PHY_MODE_USB_DEVICE;
++		break;
++	case USB_ROLE_NONE:
++		phy_mode = PHY_MODE_USB_OTG;
++		break;
++	default:
++		phy_mode = PHY_MODE_INVALID;
++		break;
++	}
+ 
+ 	if (role == USB_ROLE_NONE) {
+ 		/* default operation mode when usb role is USB_ROLE_NONE */
+@@ -127,6 +141,17 @@ static int dwc2_drd_role_sw_set(struct usb_role_switch *sw, enum usb_role role)
+ 			role = USB_ROLE_DEVICE;
+ 	}
+ 
++	dev_info(hsotg->dev, "drd role_sw_set: requested role=%d phy_mode=%d\n",
++		 role, phy_mode);
++
++	spin_lock_irqsave(&hsotg->lock, flags);
++
++	/* Drop the peripheral pull-up before switching the PHY or ID state. */
++	if (role == USB_ROLE_HOST && dwc2_is_device_mode(hsotg))
++		dwc2_hsotg_core_disconnect(hsotg);
++
++	phy_set_mode(hsotg->phy, phy_mode);
++
+ 	if ((IS_ENABLED(CONFIG_USB_DWC2_PERIPHERAL) ||
+ 	     IS_ENABLED(CONFIG_USB_DWC2_DUAL_ROLE)) &&
+ 	     dwc2_is_device_mode(hsotg) &&
+@@ -138,8 +163,12 @@ static int dwc2_drd_role_sw_set(struct usb_role_switch *sw, enum usb_role role)
+ 
+ 	if (role == USB_ROLE_HOST) {
+ 		already = dwc2_ovr_avalid(hsotg, true);
++		dev_info(hsotg->dev, "drd role_sw_set: ovr_avalid ret=%d\n",
++			 already);
+ 	} else if (role == USB_ROLE_DEVICE) {
+ 		already = dwc2_ovr_bvalid(hsotg, true);
++		dev_info(hsotg->dev, "drd role_sw_set: ovr_bvalid ret=%d\n",
++			 already);
+ 		if (dwc2_is_device_enabled(hsotg)) {
+ 			/* This clear DCTL.SFTDISCON bit */
+ 			dwc2_hsotg_core_connect(hsotg);

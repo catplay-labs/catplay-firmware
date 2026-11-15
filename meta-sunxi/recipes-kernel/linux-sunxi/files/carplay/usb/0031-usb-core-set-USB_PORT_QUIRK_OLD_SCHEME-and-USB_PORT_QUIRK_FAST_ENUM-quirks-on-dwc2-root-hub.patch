@@ -1,0 +1,74 @@
+Subject: [PATCH] usb: core: use old enumeration on downstream hubs and fast enumeration on dwc2 root hub
+Upstream-Status: Pending
+
+Set USB_PORT_QUIRK_OLD_SCHEME on non-root hub ports.  Keep
+USB_PORT_QUIRK_FAST_ENUM limited to DWC2 root-hub ports, where both quirks
+remain enabled.
+
+diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
+index b119f5b..2d57e28 100644
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -2946,6 +2946,9 @@ static bool use_new_scheme(struct usb_device *udev, int retry,
+ 	 */
+ 	if (use_both_schemes && retry >= (PORT_INIT_TRIES + 1) / 2)
+ 		return old_scheme_first_port;	/* Second half */
++	if (port_dev->quirks & USB_PORT_QUIRK_OLD_SCHEME)
++		dev_info(&port_dev->dev, "using old enumeration scheme fast path\n");
++
+ 	return !old_scheme_first_port;		/* First half or all */
+ }
+ 
+@@ -3170,9 +3173,11 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
+ 
+ done:
+ 	if (status == 0) {
+-		if (port_dev->quirks & USB_PORT_QUIRK_FAST_ENUM)
++		if (port_dev->quirks & USB_PORT_QUIRK_FAST_ENUM) {
++			dev_info(&port_dev->dev,
++				 "fast enumeration: using 10-12ms reset recovery\n");
+ 			usleep_range(10000, 12000);
+-		else {
++		} else {
+ 			/* TRSTRCY = 10 ms; plus some extra */
+ 			reset_recovery_time = 10 + 40;
+ 
+diff --git a/drivers/usb/core/port.c b/drivers/usb/core/port.c
+index b4452b6..bba7eae 100644
+--- a/drivers/usb/core/port.c
++++ b/drivers/usb/core/port.c
+@@ -9,6 +9,7 @@
+ 
+ #include <linux/kstrtox.h>
+ #include <linux/slab.h>
++#include <linux/string.h>
+ #include <linux/string_choices.h>
+ #include <linux/sysfs.h>
+ #include <linux/pm_qos.h>
+@@ -21,6 +22,14 @@ static int usb_port_block_power_off;
+ 
+ static const struct attribute_group *port_dev_group[];
+ 
++static bool usb_port_is_dwc2_root_hub(struct usb_device *hdev)
++{
++	struct usb_hcd *hcd = bus_to_hcd(hdev->bus);
++
++	return !hdev->parent && hcd && hcd->driver &&
++	       !strcmp(hcd->driver->description, "dwc2_hsotg");
++}
++
+ static bool usb_port_allow_power_off(struct usb_device *hdev,
+ 				     struct usb_hub *hub,
+ 				     struct usb_port *port_dev)
+@@ -767,6 +776,11 @@ int usb_hub_create_port_device(struct usb_hub *hub, int port1)
+ 	}
+ 
+ 	port_dev->connect_type = usb_of_get_connect_type(hdev, port1);
++	if (usb_port_is_dwc2_root_hub(hdev))
++		port_dev->quirks |= USB_PORT_QUIRK_OLD_SCHEME |
++				    USB_PORT_QUIRK_FAST_ENUM;
++	else if (hdev->parent)
++		port_dev->quirks |= USB_PORT_QUIRK_OLD_SCHEME;
+ 	hub->ports[port1 - 1] = port_dev;
+ 	port_dev->portnum = port1;
+ 	set_bit(port1, hub->power_bits);

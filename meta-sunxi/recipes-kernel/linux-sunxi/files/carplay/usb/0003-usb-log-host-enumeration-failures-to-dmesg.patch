@@ -5,17 +5,12 @@ Make the port connection, debounce and reset state visible without dynamic
 debug or usbmon. Promote OHCI transfer condition codes to warnings so V821
 host-role failures can be diagnosed from a captured kernel log.
 Upstream-Status: Pending
----
- drivers/usb/core/hub.c     | 10 ++++++++--
- drivers/usb/core/message.c | 12 ++++++++++++
- drivers/usb/host/ohci-q.c  |  2 +-
- 3 files changed, 21 insertions(+), 3 deletions(-)
 
 diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
-index 5262e11c12cd..edc7d8e8f2c3 100644
+index 2d57e28..ef8ce6b 100644
 --- a/drivers/usb/core/hub.c
 +++ b/drivers/usb/core/hub.c
-@@ -2976,6 +2976,10 @@ static int hub_port_wait_reset(struct usb_hub *hub, int port1,
+@@ -2997,6 +2997,10 @@ static int hub_port_wait_reset(struct usb_hub *hub, int port1,
  		if (ret < 0)
  			return ret;
  
@@ -26,7 +21,7 @@ index 5262e11c12cd..edc7d8e8f2c3 100644
  		/*
  		 * The port state is unknown until the reset completes.
  		 *
-@@ -4728,7 +4732,7 @@ int hub_port_debounce(struct usb_hub *hub, int port1, bool must_be_connected)
+@@ -4751,7 +4755,7 @@ int hub_port_debounce(struct usb_hub *hub, int port1, bool must_be_connected)
  		msleep(HUB_DEBOUNCE_STEP);
  	}
  
@@ -35,7 +30,7 @@ index 5262e11c12cd..edc7d8e8f2c3 100644
  			total_time, stable_time, portstatus);
  
  	if (stable_time < HUB_DEBOUNCE_STABLE)
-@@ -5028,6 +5032,8 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
+@@ -5051,6 +5055,8 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
  	 * value.
  	 */
  	do_new_scheme = use_new_scheme(udev, retry_counter, port_dev);
@@ -44,7 +39,7 @@ index 5262e11c12cd..edc7d8e8f2c3 100644
  
  	for (retries = 0; retries < GET_DESCRIPTOR_TRIES; (++retries, msleep(100))) {
  		if (hub_port_stop_enumerate(hub, port1, retries)) {
-@@ -5643,7 +5649,7 @@ static void hub_port_connect_change(struct usb_hub *hub, int port1,
+@@ -5666,7 +5672,7 @@ static void hub_port_connect_change(struct usb_hub *hub, int port1,
  	struct usb_device_descriptor *descr;
  	int status = -ENODEV;
  
@@ -54,6 +49,7 @@ index 5262e11c12cd..edc7d8e8f2c3 100644
  
  	if (hub->has_indicators) {
 diff --git a/drivers/usb/core/message.c b/drivers/usb/core/message.c
+index 0cd6dd2..6195690 100644
 --- a/drivers/usb/core/message.c
 +++ b/drivers/usb/core/message.c
 @@ -79,6 +79,18 @@ static int usb_start_wait_urb(struct urb *urb, int timeout, int *actual_length,
@@ -76,7 +72,7 @@ diff --git a/drivers/usb/core/message.c b/drivers/usb/core/message.c
  			"%s timed out or killed on ep%d%s len=%u/%u\n",
  			current->comm,
 diff --git a/drivers/usb/host/ohci-q.c b/drivers/usb/host/ohci-q.c
-index 3b445312beea..b9080a9de2ec 100644
+index 3b44531..b9080a9 100644
 --- a/drivers/usb/host/ohci-q.c
 +++ b/drivers/usb/host/ohci-q.c
 @@ -819,7 +819,7 @@ static int td_done(struct ohci_hcd *ohci, struct urb *urb, struct td *td)
@@ -88,5 +84,3 @@ index 3b445312beea..b9080a9de2ec 100644
  				"urb %p td %p (%d) cc %d, len=%d/%d\n",
  				urb, td, 1 + td->index, cc,
  				urb->actual_length,
--- 
-2.55.0
