@@ -8,6 +8,11 @@
 	compatible = "catplay,v851s3-aic8800d80", "allwinner,v851s", "allwinner,sun8i-v853";
 	/delete-node/ thermal-zones;
 
+	boot-params {
+		compatible = "catplay,boot-params";
+		boot-delay = <4>; /* seconds, added to the persist startup delay */
+	};
+
 	reg_vcc_3v3: vcc-3v3 {
 		compatible = "regulator-fixed";
 		regulator-name = "vcc-3v3";
