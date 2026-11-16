@@ -121,10 +121,10 @@ do_install_v853_dtsi() {
 addtask install_v853_dtsi after do_kernel_checkout before do_patch
 
 # PV is defined in kernel-c2a-base and uses LINUX_VERSION.
-LINUX_VERSION = "7.2.13"
+LINUX_VERSION = "7.2.15"
 
 KBRANCH = "linux-7.2.y"
-SRCREV = "3c172eede0d6b889ead876f45cc843070209208f"
+SRCREV = "497791a0a96b866d90add64041c47acdff49cae6"
 
 # The Yocto kconfiglib shipped with this layer stack may not understand newer
 # Kconfig syntax used by current mainline kernels.
