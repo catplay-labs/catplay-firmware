@@ -411,6 +411,8 @@ def monitor_usb(args: argparse.Namespace, started: float) -> int:
         ) or "none"
         if fel_present and FEL_USB_ID not in ids:
             print("[*] Observed FEL USB disconnect", flush=True)
+        elif not fel_present and FEL_USB_ID in ids:
+            print("[*] Observed FEL USB reappearance after disconnect", flush=True)
         fel_present = FEL_USB_ID in ids
         if current != last:
             print(f"{time.strftime('%H:%M:%S')} USB: {current}")
