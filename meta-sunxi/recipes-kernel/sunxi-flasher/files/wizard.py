@@ -38,9 +38,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--platform", choices=("v821", "v851"),
                    help="Boot platform (default: v821 for v821* machines, otherwise v851)")
     firmware = p.add_mutually_exclusive_group()
-    firmware.add_argument("--fw", help="Local c2aflash firmware (default: <machine>.c2aflash in bundle)")
+    firmware.add_argument("--fw", help="Local c2aflash firmware (default: <machine>.c2aflash in bundle, if present)")
     firmware.add_argument("--ota", nargs="?", const="", metavar="FILE",
-                   help="Flash OTA instead of --fw (default: <machine>.c2aota in bundle; used by default)")
+                   help="Flash OTA instead of --fw (default: <machine>.c2aota in bundle, if present)")
     p.add_argument("--already-fel", action="store_true", help="Skip entering FEL")
     p.add_argument("--already-recov", action="store_true", help="Skip entering FEL and booting recovery")
     p.add_argument("--refresh", action="store_true", help="Enter FEL via USB vendor request")
@@ -55,9 +55,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--staging-uboot", help="Staging U-Boot (default: <machine>-u-boot-staging-proper.bin in bundle)")
     p.add_argument("--extra-bootargs", default="", help="Append kernel arguments to the recovery FIT")
     args = p.parse_args(argv)
+    if args.already_recov and (args.staging or args.staging_proper):
+        p.error("--already-recov cannot be combined with --staging or --staging-proper")
     if args.platform is None:
         args.platform = "v821" if args.machine.startswith("v821") else "v851"
-    args.flash_format = "fw" if args.fw is not None else "ota"
+    requested_format = "fw" if args.fw is not None else "ota" if args.ota is not None else None
     for field, suffix in (
         ("spl", "-u-boot-fel.egon.bin"),
         ("kernel", "-recov.fitImage"),
@@ -68,7 +70,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ("ota", ".c2aota"),
     ):
         if getattr(args, field) is None or (field == "ota" and args.ota == ""):
-            setattr(args, field, str(bundle_dir / (args.machine + suffix)))
+            path = bundle_dir / (args.machine + suffix)
+            if field in ("fw", "ota") and not path.is_file():
+                setattr(args, field, None)
+            else:
+                setattr(args, field, str(path))
+    args.flash_format = requested_format or ("ota" if args.ota else "fw" if args.fw else None)
+    if requested_format and not getattr(args, requested_format) and not args.no_flash:
+        p.error(f"No default {requested_format} image found; supply --{requested_format} FILE")
     if args.platform == "v851" and args.preset:
         p.error("V851 does not use a device preset; power-cycle it into FEL first")
     return args
@@ -132,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             rc = run_step("recov.py", argv)
             if rc != 0:
                 return rc
-        if not args.no_flash:
+        if not args.no_flash and args.flash_format:
             firmware = ["--" + args.flash_format, getattr(args, args.flash_format)]
             return run_step("flash.py", ["--host", "192.168.51.2", *firmware])
         return 0
