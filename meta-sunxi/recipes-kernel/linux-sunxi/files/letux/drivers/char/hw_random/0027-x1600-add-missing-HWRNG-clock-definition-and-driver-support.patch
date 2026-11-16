@@ -1,0 +1,32 @@
+Subject: [PATCH] hwrng: ingenic: add X1600 TRNG driver support
+Upstream-Status: Pending
+
+Enable the existing TRNG driver for X1600 and match its compatible.
+Clock definitions and DTS references are folded into the X1600 CGU and
+SoC description patches in letux-upstream.
+
+diff --git a/drivers/char/hw_random/Kconfig b/drivers/char/hw_random/Kconfig
+index f0dde77f5..ec237e3cd 100644
+--- a/drivers/char/hw_random/Kconfig
++++ b/drivers/char/hw_random/Kconfig
+@@ -272,7 +272,7 @@ config HW_RANDOM_INGENIC_RNG
+ 
+ config HW_RANDOM_INGENIC_TRNG
+ 	tristate "Ingenic True Random Number Generator support"
+-	depends on MACH_X1830 || COMPILE_TEST
++	depends on MACH_X1830 || MACH_X1600 || COMPILE_TEST
+ 	default HW_RANDOM
+ 	help
+ 	  This driver provides kernel-side support for the True Random Number Generator
+diff --git a/drivers/char/hw_random/ingenic-trng.c b/drivers/char/hw_random/ingenic-trng.c
+index 1672320e7..d19ef61eb 100644
+--- a/drivers/char/hw_random/ingenic-trng.c
++++ b/drivers/char/hw_random/ingenic-trng.c
+@@ -110,6 +110,7 @@ static int ingenic_trng_probe(struct platform_device *pdev)
+ 
+ static const struct of_device_id ingenic_trng_of_match[] = {
+ 	{ .compatible = "ingenic,x1830-dtrng" },
++	{ .compatible = "ingenic,x1600-dtrng" },
+ 	{ /* sentinel */ }
+ };
+ MODULE_DEVICE_TABLE(of, ingenic_trng_of_match);

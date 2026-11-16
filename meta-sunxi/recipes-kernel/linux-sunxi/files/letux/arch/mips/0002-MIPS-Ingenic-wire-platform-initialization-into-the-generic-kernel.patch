@@ -1,0 +1,85 @@
+Subject: [PATCH] MIPS: Ingenic: wire platform initialization into the generic kernel
+Upstream-Status: Pending
+
+Link the Ingenic platform directory into generic MIPS kernels and match
+X1600/X1600E device trees to their machine IDs. Initialize Ingenic SMP after
+device-tree setup and condition CPU interrupt initialization on IRQ_MIPS_CPU.
+
+diff --git a/arch/mips/Kbuild.platforms b/arch/mips/Kbuild.platforms
+index 41a00fa860c18d5c8a3f20e921c949302022960d..2f1622aa524cd0d618955da68390c805577136ec 100644
+--- a/arch/mips/Kbuild.platforms
++++ b/arch/mips/Kbuild.platforms
+@@ -13,6 +13,7 @@ platform-$(CONFIG_MIPS_COBALT)		+= cobalt/
+ platform-$(CONFIG_MACH_DECSTATION)	+= dec/
+ platform-$(CONFIG_ECONET)		+= econet/
+ platform-$(CONFIG_MIPS_GENERIC)		+= generic/
++platform-$(CONFIG_MACH_INGENIC)		+= ingenic/
+ platform-$(CONFIG_MACH_JAZZ)		+= jazz/
+ platform-$(CONFIG_LANTIQ)		+= lantiq/
+ platform-$(CONFIG_MACH_LOONGSON2EF)	+= loongson2ef/
+diff --git a/arch/mips/generic/board-ingenic.c b/arch/mips/generic/board-ingenic.c
+index 1f4906875e7bc2ce5644438f7bd417261f4f1ed9..cc2e31ad96491c3f90553c4bdf1a9d59889f72a7 100644
+--- a/arch/mips/generic/board-ingenic.c
++++ b/arch/mips/generic/board-ingenic.c
+@@ -34,6 +34,8 @@ static __init char *ingenic_get_system_type(unsigned long machtype)
+ 		return "X2000";
+ 	case MACH_INGENIC_X1830:
+ 		return "X1830";
++	case MACH_INGENIC_X1600:
++		return "X1600";
+ 	case MACH_INGENIC_X1000E:
+ 		return "X1000E";
+ 	case MACH_INGENIC_X1000:
+@@ -146,6 +148,8 @@ static const struct of_device_id ingenic_of_match[] __initconst = {
+ 	{ .compatible = "ingenic,jz4780", .data = (void *)MACH_INGENIC_JZ4780 },
+ 	{ .compatible = "ingenic,x1000", .data = (void *)MACH_INGENIC_X1000 },
+ 	{ .compatible = "ingenic,x1000e", .data = (void *)MACH_INGENIC_X1000E },
++	{ .compatible = "ingenic,x1600", .data = (void *)MACH_INGENIC_X1600 },
++	{ .compatible = "ingenic,x1600e", .data = (void *)MACH_INGENIC_X1600E },
+ 	{ .compatible = "ingenic,x1830", .data = (void *)MACH_INGENIC_X1830 },
+ 	{ .compatible = "ingenic,x2000", .data = (void *)MACH_INGENIC_X2000 },
+ 	{ .compatible = "ingenic,x2000e", .data = (void *)MACH_INGENIC_X2000E },
+diff --git a/arch/mips/generic/init.c b/arch/mips/generic/init.c
+index 1d712eac161711b9fb043610c553e69004533600..cc8310695aff7c2a7f23c96e8ae306843836bf83 100644
+--- a/arch/mips/generic/init.c
++++ b/arch/mips/generic/init.c
+@@ -15,11 +15,14 @@
+ #include <asm/fw/fw.h>
+ #include <asm/irq_cpu.h>
+ #include <asm/machine.h>
++#include <asm/mach-ingenic/smp.h>
+ #include <asm/mips-cps.h>
+ #include <asm/prom.h>
+ #include <asm/smp-ops.h>
+ #include <asm/time.h>
+ 
++#define IF_ENABLED(cfg, ptr)	PTR_IF(IS_ENABLED(cfg), (ptr))
++
+ static __initconst const void *fdt;
+ static __initconst const struct mips_machine *mach;
+ static __initconst const void *mach_match_data;
+@@ -106,6 +109,9 @@ void __init plat_mem_setup(void)
+ 
+ 	fw_init_cmdline();
+ 	__dt_setup_arch((void *)fdt);
++
++	if (IS_ENABLED(CONFIG_MACH_INGENIC) && IS_ENABLED(CONFIG_SMP))
++		ingenic_smp_init();
+ }
+ 
+ void __init device_tree_init(void)
+@@ -194,10 +200,11 @@ void __init arch_init_irq(void)
+ {
+ 	struct device_node *intc_node;
+ 
+-	intc_node = of_find_compatible_node(NULL, NULL,
+-					    "mti,cpu-interrupt-controller");
++	intc_node = of_find_compatible_node(NULL, NULL, "mti,cpu-interrupt-controller");
++
+ 	if (!cpu_has_veic && !intc_node)
+-		mips_cpu_irq_init();
++		IF_ENABLED(CONFIG_IRQ_MIPS_CPU, mips_cpu_irq_init());
++
+ 	of_node_put(intc_node);
+ 
+ 	irqchip_init();

@@ -1,0 +1,35 @@
+Subject: [PATCH] spi: ingenic: adjust the source clock before choosing the divider
+Upstream-Status: Pending
+
+Request a source clock up to 300 MHz while targeting the available SSI
+divider range. Read back the actual source rate and round the divider up
+to avoid exceeding the requested SPI transfer speed.
+
+diff --git a/drivers/spi/spi-ingenic.c b/drivers/spi/spi-ingenic.c
+index adcf85bccbcc012e07cea8779abe4ae99990a0c8..f9d402daf8590ea3434890ff945a1f1a557613c2 100644
+--- a/drivers/spi/spi-ingenic.c
++++ b/drivers/spi/spi-ingenic.c
+@@ -101,11 +101,21 @@ static void spi_ingenic_prepare_transfer(struct ingenic_spi *priv,
+ 					 struct spi_device *spi,
+ 					 struct spi_transfer *xfer)
+ {
+-	unsigned long clk_hz = clk_get_rate(priv->clk);
++	unsigned long clk_hz;
++	u64 wanted_clk_hz;
+ 	u32 cdiv, speed_hz = xfer->speed_hz ?: spi->max_speed_hz,
+ 	    bits_per_word = xfer->bits_per_word ?: spi->bits_per_word;
+ 
+-	cdiv = clk_hz / (speed_hz * 2);
++	/* try to raise as high as possible while keeping cdiv in unclamped range */
++	wanted_clk_hz = 256 * (u64) speed_hz * 2;
++	clk_hz = MIN(wanted_clk_hz, 300000000);	/* upper limit */
++
++	clk_set_rate(priv->clk, clk_hz);
++
++	/* read back frequency that is really divided */
++	clk_hz = clk_get_rate(priv->clk);
++
++	cdiv = (clk_hz + speed_hz * 2 - 1) / (speed_hz * 2);
+ 	cdiv = clamp(cdiv, 1u, 0x100u) - 1;
+ 
+ 	regmap_write(priv->map, REG_SSIGR, cdiv);

@@ -1,0 +1,74 @@
+Subject: [PATCH] phy-ingenic-usb: switch forced roles only with IDDIG override
+Upstream-Status: Pending
+
+
+Vendor firmware keeps USBPCR stable while switching between device and host
+roles, and only changes USBRDT.IDDIG_REG with USBRDT.IDDIG_EN asserted. Mirror
+that behavior instead of also forcing VBUS/session/OTG-disable flags.
+
+---
+ drivers/phy/ingenic/phy-ingenic-usb.c | 37 ++++++++++----------------
+ 1 file changed, 14 insertions(+), 23 deletions(-)
+
+diff --git a/drivers/phy/ingenic/phy-ingenic-usb.c b/drivers/phy/ingenic/phy-ingenic-usb.c
+index 670c49fb32ad..111111111111 100644
+--- a/drivers/phy/ingenic/phy-ingenic-usb.c
++++ b/drivers/phy/ingenic/phy-ingenic-usb.c
+@@ -181,43 +181,34 @@ static int ingenic_usb_phy_power_off(struct phy *phy)
+ }
+ 
+ static int ingenic_usb_phy_set_mode(struct phy *phy,
+-				  enum phy_mode mode, int submode)
++				    enum phy_mode mode, int submode)
+ {
+ 	struct ingenic_usb_phy *priv = phy_get_drvdata(phy);
+-	u32 reg;
++	u32 rdt;
++
++	rdt = readl(priv->base + REG_USBRDT_OFFSET);
+ 
+ 	switch (mode) {
+ 	case PHY_MODE_USB_HOST:
+-		reg = readl(priv->base + REG_USBPCR_OFFSET);
+-		u32p_replace_bits(&reg, 1, USBPCR_USB_MODE);
+-		u32p_replace_bits(&reg, 0, USBPCR_VBUSVLDEXT);
+-		u32p_replace_bits(&reg, 0, USBPCR_VBUSVLDEXTSEL);
+-		u32p_replace_bits(&reg, 0, USBPCR_OTG_DISABLE);
+-		writel(reg, priv->base + REG_USBPCR_OFFSET);
+-
++		u32p_replace_bits(&rdt, 1, USBRDT_IDDIG_EN);
++		u32p_replace_bits(&rdt, 0, USBRDT_IDDIG_REG);
+ 		break;
+-	case PHY_MODE_USB_DEVICE:
+-		reg = readl(priv->base + REG_USBPCR_OFFSET);
+-		u32p_replace_bits(&reg, 0, USBPCR_USB_MODE);
+-		u32p_replace_bits(&reg, 1, USBPCR_VBUSVLDEXT);
+-		u32p_replace_bits(&reg, 1, USBPCR_VBUSVLDEXTSEL);
+-		u32p_replace_bits(&reg, 1, USBPCR_OTG_DISABLE);
+-		writel(reg, priv->base + REG_USBPCR_OFFSET);
+ 
++	case PHY_MODE_USB_DEVICE:
++		u32p_replace_bits(&rdt, 1, USBRDT_IDDIG_EN);
++		u32p_replace_bits(&rdt, 1, USBRDT_IDDIG_REG);
+ 		break;
+-	case PHY_MODE_USB_OTG:
+-		reg = readl(priv->base + REG_USBPCR_OFFSET);
+-		u32p_replace_bits(&reg, 1, USBPCR_USB_MODE);
+-		u32p_replace_bits(&reg, 1, USBPCR_VBUSVLDEXT);
+-		u32p_replace_bits(&reg, 1, USBPCR_VBUSVLDEXTSEL);
+-		u32p_replace_bits(&reg, 0, USBPCR_OTG_DISABLE);
+-		writel(reg, priv->base + REG_USBPCR_OFFSET);
+ 
++	case PHY_MODE_USB_OTG:
++		u32p_replace_bits(&rdt, 0, USBRDT_IDDIG_EN);
+ 		break;
++
+ 	default:
+ 		return -EINVAL;
+ 	}
+ 
++	writel(rdt, priv->base + REG_USBRDT_OFFSET);
++
+ 	return 0;
+ }
+ 

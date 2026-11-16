@@ -1,0 +1,30 @@
+Subject: [PATCH] spi: ingenic: match the X1600 SSI controller
+Upstream-Status: Pending
+
+Document ingenic,x1600-spi and match it to the existing X1000 controller
+data so X1600 device-tree nodes can bind to the SSI driver.
+
+diff --git a/Documentation/devicetree/bindings/spi/ingenic,spi.yaml b/Documentation/devicetree/bindings/spi/ingenic,spi.yaml
+index c08d55b900bbc02dfb10887c8150dfd406c4b6d9..4fc62cf1b33a6c5ef844d17cf9bad927cc27af76 100644
+--- a/Documentation/devicetree/bindings/spi/ingenic,spi.yaml
++++ b/Documentation/devicetree/bindings/spi/ingenic,spi.yaml
+@@ -21,6 +21,7 @@ properties:
+           - ingenic,jz4775-spi
+           - ingenic,jz4780-spi
+           - ingenic,x1000-spi
++          - ingenic,x1600-spi
+           - ingenic,x2000-spi
+       - items:
+           - enum:
+diff --git a/drivers/spi/spi-ingenic.c b/drivers/spi/spi-ingenic.c
+index 851022215eb0a5848f3fd867980593d8c5aa01c9..dc3e417da538df44d1dd77fcbbfead775a0d2fad 100644
+--- a/drivers/spi/spi-ingenic.c
++++ b/drivers/spi/spi-ingenic.c
+@@ -513,6 +513,7 @@ static const struct of_device_id spi_ingenic_of_match[] = {
+ 	{ .compatible = "ingenic,jz4775-spi", .data = &jz4780_soc_info },
+ 	{ .compatible = "ingenic,jz4780-spi", .data = &jz4780_soc_info },
+ 	{ .compatible = "ingenic,x1000-spi", .data = &x1000_soc_info },
++	{ .compatible = "ingenic,x1600-spi", .data = &x1000_soc_info },
+ 	{ .compatible = "ingenic,x2000-spi", .data = &x2000_soc_info },
+ 	{}
+ };

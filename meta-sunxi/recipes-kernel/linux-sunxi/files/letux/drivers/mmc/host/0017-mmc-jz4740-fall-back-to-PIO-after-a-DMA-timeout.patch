@@ -1,0 +1,35 @@
+Subject: [PATCH] mmc: jz4740: fall back to PIO after a DMA timeout
+Upstream-Status: Pending
+
+Run the PIO read or write path when DMA is disabled or its wait times out.
+Previously, choosing DMA excluded the PIO path even after a timeout.
+
+diff --git a/drivers/mmc/host/jz4740_mmc.c b/drivers/mmc/host/jz4740_mmc.c
+index 6a3c26b7c82d803aeccaecd557f7770b43abf5b7..a0e2afb6cfdc50fbf851a5feb30c5ebaafaf5b09 100644
+--- a/drivers/mmc/host/jz4740_mmc.c
++++ b/drivers/mmc/host/jz4740_mmc.c
+@@ -786,15 +786,19 @@ static irqreturn_t jz_mmc_irq_worker(int irq, void *devid)
+ 			 */
+ 			timeout = jz4740_mmc_start_dma_transfer(host, data);
+ 			data->bytes_xfered = data->blocks * data->blksz;
+-		} else if (data->flags & MMC_DATA_READ)
+-			/* Use PIO if DMA is not enabled.
++		}
++
++		if (!host->use_dma || timeout) {
++			/* Use PIO if DMA is not enabled or failed.
+ 			 * Data transfer direction was defined before
+ 			 * by relying on data flags in
+ 			 * jz_mmc_prepare_data_transfer().
+ 			 */
+-			timeout = jz4740_mmc_read_data(host, data);
+-		else
+-			timeout = jz4740_mmc_write_data(host, data);
++			if (data->flags & MMC_DATA_READ)
++				timeout = jz4740_mmc_read_data(host, data);
++			else
++				timeout = jz4740_mmc_write_data(host, data);
++		}
+ 
+ 		if (unlikely(timeout)) {
+ 			host->state = JZ4740_MMC_STATE_TRANSFER_DATA;

@@ -1,0 +1,19 @@
+Subject: [PATCH] spi: ingenic: complete DMA transfers from the transmit callback
+Upstream-Status: Pending
+
+Attach spi_ingenic_finalize_transfer to the DMA_MEM_TO_DEV descriptor
+instead of the DMA_DEV_TO_MEM descriptor.
+
+diff --git a/drivers/spi/spi-ingenic.c b/drivers/spi/spi-ingenic.c
+index f9d402daf8590ea3434890ff945a1f1a557613c2..44535539f1e1497098401415edc7bf5e58d7d4e5 100644
+--- a/drivers/spi/spi-ingenic.c
++++ b/drivers/spi/spi-ingenic.c
+@@ -166,7 +166,7 @@ spi_ingenic_prepare_dma(struct spi_controller *ctlr, struct dma_chan *chan,
+ 	if (!desc)
+ 		return ERR_PTR(-ENOMEM);
+ 
+-	if (dir == DMA_DEV_TO_MEM) {
++	if (dir == DMA_MEM_TO_DEV) {
+ 		desc->callback = spi_ingenic_finalize_transfer;
+ 		desc->callback_param = ctlr;
+ 	}

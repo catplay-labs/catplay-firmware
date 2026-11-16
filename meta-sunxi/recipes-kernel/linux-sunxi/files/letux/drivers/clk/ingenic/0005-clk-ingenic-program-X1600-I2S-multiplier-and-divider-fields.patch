@@ -1,0 +1,111 @@
+Subject: [PATCH] clk: ingenic: program X1600 I2S multiplier and divider fields
+Upstream-Status: Pending
+
+Describe the additional M, N and D fields used by X1600 audio clocks.
+Program M to one and select automatic D calculation, rejecting divisors
+below two so these clocks can use the common integer-divider operations.
+
+diff --git a/drivers/clk/ingenic/cgu.c b/drivers/clk/ingenic/cgu.c
+index 20f03576227e7c7cfa1779024ad8dbd7bb094f79..d2f0963275402aa50618c6fab9118c88914b65e4 100644
+--- a/drivers/clk/ingenic/cgu.c
++++ b/drivers/clk/ingenic/cgu.c
+@@ -591,7 +591,7 @@ ingenic_clk_set_rate(struct clk_hw *hw, unsigned long req_rate,
+ 	struct ingenic_cgu *cgu = ingenic_clk->cgu;
+ 	unsigned long rate, flags;
+ 	unsigned int hw_div, div;
+-	u32 reg, mask;
++	u32 reg, mask, d_reg;
+ 	int ret = 0;
+ 
+ 	if (clk_info->type & CGU_CLK_DIV) {
+@@ -614,6 +614,30 @@ ingenic_clk_set_rate(struct clk_hw *hw, unsigned long req_rate,
+ 		reg &= ~(mask << clk_info->div.shift);
+ 		reg |= hw_div << clk_info->div.shift;
+ 
++		/*
++		 * NOTE: Special treatment for the I2S dividers in the X1600.
++		 * Set the multiplier to 1, imposing an N >= M*2 constraint,
++		 * also setting D to "automatic" calculation. This permits the
++		 * treatment of these dividers as normal dividers, although
++		 * they are configured more similarly to PLLs.
++		 */
++		if (clk_info->mdiv.reg) {
++			if (div < 2) {
++				spin_unlock_irqrestore(&cgu->lock, flags);
++				return -EINVAL;
++			}
++
++			mask = GENMASK(clk_info->mdiv.bits - 1, 0);
++			reg &= ~(mask << clk_info->mdiv.shift);
++			reg |= 1 << clk_info->mdiv.shift;
++
++			if (clk_info->nddiv.reg) {
++				d_reg = readl(cgu->base + clk_info->nddiv.reg);
++				d_reg &= ~(1 << clk_info->nddiv.explicit_d_bit);
++				d_reg |= 1 << clk_info->nddiv.explicit_n_bit;
++			}
++		}
++
+ 		/* clear the stop bit */
+ 		if (clk_info->div.stop_bit != -1)
+ 			reg &= ~BIT(clk_info->div.stop_bit);
+@@ -625,6 +649,9 @@ ingenic_clk_set_rate(struct clk_hw *hw, unsigned long req_rate,
+ 		/* update the hardware */
+ 		writel(reg, cgu->base + clk_info->div.reg);
+ 
++		if (clk_info->nddiv.reg)
++			writel(d_reg, cgu->base + clk_info->nddiv.reg);
++
+ 		/* wait for the change to take effect */
+ 		if (clk_info->div.busy_bit != -1)
+ 			ret = ingenic_clk_check_stable(cgu, clk_info);
+diff --git a/drivers/clk/ingenic/cgu.h b/drivers/clk/ingenic/cgu.h
+index 8351cfb82951047ee81aa6830c5f04d75e1a29d3..d5bdd7084b201a070ca0ac2383231a5dbce5d710 100644
+--- a/drivers/clk/ingenic/cgu.h
++++ b/drivers/clk/ingenic/cgu.h
+@@ -117,6 +117,36 @@ struct ingenic_cgu_div_info {
+ 	const u8 *div_table;
+ };
+ 
++/**
++ * struct ingenic_cgu_mdiv_info - information about a divider M parameter
++ * @reg: offset of the divider control register within the CGU
++ * @shift: number of bits to left shift the M divide value by (ie. the index
++ *         of the lowest bit of the divide value within its control
++ *         register)
++ * @div: number to divide the M divider value by (i.e. if the
++ *       effective divider value is the value written to the register
++ *       multiplied by some constant)
++ * @bits: the size of the M divide value in bits
++ */
++struct ingenic_cgu_mdiv_info {
++	unsigned reg;
++	u8 shift;
++	u8 div;
++	u8 bits;
++};
++
++/**
++ * struct ingenic_cgu_nddiv_info - information about divider N and D parameters
++ * @reg: offset of the D divider control register within the CGU
++ * @explicit_n_bit: the bit providing the explicit N divider flag
++ * @explicit_d_bit: the bit providing the explicit D divider flag
++ */
++struct ingenic_cgu_nddiv_info {
++	unsigned reg;
++	u8 explicit_n_bit;
++	u8 explicit_d_bit;
++};
++
+ /**
+  * struct ingenic_cgu_fixdiv_info - information about a fixed divider
+  * @div: the divider applied to the parent clock
+@@ -188,6 +218,8 @@ struct ingenic_cgu_clk_info {
+ 			struct ingenic_cgu_gate_info gate;
+ 			struct ingenic_cgu_mux_info mux;
+ 			struct ingenic_cgu_div_info div;
++			struct ingenic_cgu_mdiv_info mdiv;
++			struct ingenic_cgu_nddiv_info nddiv;
+ 			struct ingenic_cgu_fixdiv_info fixdiv;
+ 		};
+ 

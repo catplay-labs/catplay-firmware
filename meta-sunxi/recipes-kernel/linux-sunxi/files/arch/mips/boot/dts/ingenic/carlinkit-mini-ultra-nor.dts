@@ -1,0 +1,515 @@
+/dts-v1/;
+
+#include "x1600.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+	compatible = "carlinkit,mini-ultra", "ingenic,x1600";
+
+	model = "Carlinkit Mini Ultra (AX1800M)";
+
+	cpu_opp_table: opp-table {
+		compatible = "operating-points-v2";
+
+		opp-1104000000 {
+			opp-hz = /bits/ 64 <1104000000>;
+		};
+
+		opp-552000000 {
+			opp-hz = /bits/ 64 <552000000>;
+		};
+
+		opp-368000000 {
+			opp-hz = /bits/ 64 <368000000>;
+		};
+
+		opp-276000000 {
+			opp-hz = /bits/ 64 <276000000>;
+		};
+
+		opp-220800000 {
+			opp-hz = /bits/ 64 <220800000>;
+		};
+
+		opp-184000000 {
+			opp-hz = /bits/ 64 <184000000>;
+		};
+	};
+
+	/* As a gadget we are unlikely to detect VBUS, because it goes directly to voltage regulator and powers the entire device.
+	   Pretend it's always there */
+	vbus_otg: regulator-vbus {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-vbus";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+
+		enable-active-high;
+		regulator-type = "voltage";
+	};
+
+	/* As a host (fake iPhone), don't provide power, iPhone doesn't do that either because it wants to be charged by the other end. */
+	usb_phy_vcc: regulator-usb-phy {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-phy-vcc";
+		regulator-always-on;
+		regulator-boot-on;
+
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+
+		enable-active-high;
+		regulator-type = "voltage";
+
+	};
+
+	/* Fix Letux limiting baudrate to 1.5M, breaking our 3M preferred baudrate during boot */
+	uart_baud_48m: uart-baud-48m {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-output-names = "uart-baud-48m";
+		clock-frequency = <48000000>;
+	};
+
+	aliases {
+		i2c0 = &i2c0;
+		i2c1 = &i2c1;
+		uart0 = &uart0;
+		uart1 = &uart1;
+		uart2 = &uart2;
+		uart3 = &uart3;
+		mac0 = &mac0;
+		spi0 = &spi0;
+		spi-slv0 = &spi_slv0;
+		pwm = &pwm;
+		can0 = &can0;
+		can1 = &can1;
+		mmc0 = &mmc0;
+		mmc1 = &mmc1;
+
+		serial2 = &uart2;
+	};
+
+	chosen {
+		stdout-path = "serial2:3000000n8";
+#if 0	// u-boot and optionally CONFIG_CMDLINE should provide something application specific
+		bootargs = "mem=64M@0x0 rootfstype=ext4 root=/dev/mmcblk0p2 rw earlycon console=ttyS2,115200 ignore_loglevel rootwait";
+#endif
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges =<>;
+
+		reserved_memory: reserved_mem@2000000{
+		      compatible = "shared-dma-pool";
+		      reg = <0x02000000 0x20000>;
+		};
+	};
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x04000000>; /* 64MB */
+	};
+
+	wifi_pwrseq: wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		reset-gpios = <&gpa 30 GPIO_ACTIVE_LOW>; /* PA30 = WL_REG_ON */
+		post-power-on-delay-ms = <100>; /* 200 */
+		power-off-delay-us = <5000000>;
+	};
+
+	reg_vcc_wifi: regulator-vcc-wifi {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_wifi";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+
+		gpio = <&gpa 29 GPIO_ACTIVE_HIGH>; /* PA29 = WLAN_POWER_ON */
+		enable-active-high;
+		/* startup-delay-us = <100000>; */ /* 100 ms */
+	};
+
+	leds {
+    	compatible = "gpio-leds";
+
+		green {
+			gpios = <&gpc 1 GPIO_ACTIVE_LOW>;
+		};
+
+		blue {
+			gpios = <&gpc 2 GPIO_ACTIVE_LOW>;
+		};
+	};
+};
+
+&pinctrl {
+	uart0_pb: uart0-pb {
+		function = "uart0";
+		groups = "uart0-data";
+		bias-pull-up;
+	};
+
+	uart0_pb_flow: uart0-pb-flow {
+		function = "uart0";
+		groups = "uart0-hwflow";
+		bias-pull-up;
+	};
+
+	uart1_pb: uart1-pb {
+		function = "uart1";
+		groups = "uart1-data";
+		bias-pull-up;
+	};
+
+	uart1_pb_flow: uart1-pb-flow {
+		function = "uart1";
+		groups = "uart1-hwflow";
+		bias-pull-up;
+	};
+
+	uart2_pb: uart2-pb {
+		function = "uart2";
+		groups = "uart2-data-b";
+		bias-pull-up;
+	};
+
+	uart3_pb: uart3-pb {
+		function = "uart3";
+		groups = "uart3-data-b";
+		bias-pull-up;
+	};
+
+	spi0_pa: spi0-pa {
+		function = "ssi";
+		groups = "ssi-dt-a", "ssi-dr-a", "ssi-clk-a", "ssi-ce0-a", "ssi-ce1-b";
+		bias-disable;
+	};
+
+	spi0_pb: spi0-pb {
+		function = "ssi";
+		groups = "ssi-dt-b", "ssi-dr-b", "ssi-clk-b";
+		bias-disable;
+	};
+
+	msc0_4bit_f1: msc0 {
+		function = "mmc0";
+		groups = "mmc0-1bit-c", "mmc0-4bit-c";
+		bias-disable;
+	};
+
+	msc1_4bit: msc1 {
+		function = "mmc1";
+		groups = "mmc1-1bit", "mmc1-4bit";
+		bias-disable;
+	};
+
+	i2c0_pa: i2c0 {
+		function = "i2c0";
+		groups = "i2c0-data-a";
+		bias-pull-up;
+	};
+
+	i2c0_pb: i2c0 {
+		function = "i2c0";
+		groups = "i2c0-data-b";
+		bias-pull-up;
+	};
+
+	i2c1_pb: i2c1 {
+		function = "i2c1";
+		groups = "i2c1-data-b-19";
+		bias-pull-up;
+	};
+
+	sfc_pc: sfc-pc {
+		function = "sfc";
+		groups = "sfc";
+		bias-disable;
+	};
+
+// FIXME:
+	spi_slv_pa: fixme {
+		ingenic,pinmux = <&gpa 28 31>;
+//		ingenic,pinmux-funcsel = <PINCTL_FUNCTION1>;
+		bias-disable;
+	};
+};
+
+&cgu {
+	assigned-clocks = <&cgu X1600_CLK_EPLL>,
+			  <&cgu X1600_CLK_I2S0>,
+			  <&cgu X1600_CLK_I2S1>;
+
+	assigned-clock-parents = <&cgu X1600_CLK_EXCLK>,
+				 <&cgu X1600_CLK_EPLL>,
+				 <&cgu X1600_CLK_EPLL>;
+
+	assigned-clock-rates = <200000000>,
+			       <100000000>,
+			       <100000000>;
+};
+
+&rtc_dev {
+	system-power-controller;
+};
+
+&uart0 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_pb &uart0_pb_flow>;
+	uart-has-rtscts;
+
+	bluetooth {
+		compatible = "aic,aic-bt";
+		max-speed = <1500000>;
+		uart-has-rtscts;
+	};
+};
+
+&uart1 {
+	status = "disabled";
+};
+
+&uart2 {
+	status = "okay";
+	clocks = <&uart_baud_48m>, <&cgu X1600_CLK_UART2>;
+	clock-names = "baud", "module";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart2_pb>;
+};
+
+&uart3 {
+	status = "disabled";
+};
+
+&cpu0 {
+	operating-points-v2 = <&cpu_opp_table>;
+};
+
+&cpufreq {
+	status = "disabled";
+};
+
+&dma {
+	status = "okay";
+};
+
+&i2c0 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c0_pb>;
+};
+
+&i2c1 {
+	status = "disabled";
+};
+
+&mmc0 {
+	status = "disabled";
+};
+
+&mmc1 {
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&msc1_4bit>;
+
+	bus-width = <4>;
+	max-frequency = <50000000>;
+	broken-cd;
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	cap-sd-highspeed;
+	vmmc-supply = <&reg_vcc_wifi>;
+	mmc-pwrseq = <&wifi_pwrseq>;
+
+	c2a,btmode_pin = <89>;
+	c2a,iopad_tune;
+	c2a,iopad_delay1 = <0x80>;
+};
+
+&sfc {
+	pinctrl-names = "default";
+	pinctrl-0 = <&sfc_pc>;
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	status = "okay";
+
+	nand@0 {
+		// compatible = "spi-nand";
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		// spi-max-frequency = <50000000>;
+		spi-max-frequency = <70000000>;
+        spi-rx-bus-width = <4>;
+        spi-tx-bus-width = <1>;
+
+		/* Ingenic SFC NAND */
+		nand-ecc-mode = "hw";
+		nand-on-flash-bbt;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			uboot@0 {
+				label = "uboot";
+				reg = <0x00000000 0x00020000>; /* 128KB */
+			};
+
+			kernel@20000 {
+				label = "kernel";
+				reg = <0x00020000 0x00380000>; /* 3.5MB */
+			};
+
+			rootfs@3a0000 {
+				label = "rootfs";
+				reg = <0x003a0000 0x00b80000>; /* 11.5MB */
+			};
+
+			persist@f20000 {
+				label = "persist";
+				reg = <0x00f20000 0x000E0000>; /* 896KB */
+			};
+
+			/*kernel@100000 {
+				label = "kernel";
+				reg = <0x00100000 0x00400000>;
+			};
+
+			rootfs@500000 {
+				label = "rootfs";
+				reg = <0x00500000 0x01000000>;
+			};
+
+			kernel2@1500000 {
+				label = "kernel2";
+				reg = <0x01500000 0x00400000>;
+			};
+
+			rootfs2@1900000 {
+				label = "rootfs2";
+				reg = <0x01900000 0x01000000>;
+			};
+
+			ota@2900000 {
+				label = "ota";
+				reg = <0x02900000 0x00100000>;
+			};
+
+			persist@2a00000 {
+				label = "persist";
+				reg = <0x02A00000 0x05300000>;
+			};*/
+		};
+	};
+};
+
+&spi0 {
+	/* LED driver */
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi0_pb>;
+	status = "okay";
+
+	cs-gpios = <&gpc 16 GPIO_ACTIVE_LOW>;
+
+	spidev@0 {
+        compatible = "rohm,dh2228fv";
+        reg = <0>;
+        spi-max-frequency = <6250000>;
+		spi-cpol;
+		spi-cpha;
+    };
+	/*
+		led-controller@0 {
+		compatible = "worldsemi,ws2812b";
+		reg = <0>;
+		spi-max-frequency = <2500000>;
+		spi-cpol;
+		spi-cpha;
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		led@0 {
+			reg = <0>;
+			label = "status:rgb:0";
+		};
+
+		led@1 {
+			reg = <1>;
+			label = "status:rgb:1";
+		};
+
+		led@2 {
+			reg = <2>;
+			label = "status:rgb:2";
+		};
+	};
+	*/
+};
+
+&spi_slv0 {
+	status = "disabled";
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi_slv_pa>;
+	ingenic,has_dma_support = <1>;
+};
+
+&dtrng {
+	status = "okay";
+};
+
+&pwm {
+	status = "disabled";
+};
+
+&otg {
+	dr_mode = "otg";
+	usb-role-switch;
+
+	vbus-supply = <&vbus_otg>;
+	g-use-dma;
+	device-using-dma = <1>;
+	status = "okay";
+};
+
+
+&otg_phy {
+	/* PHY tuning used by the Carlinkit firmware. Values are field encodings. */
+	ingenic,preemphasis-half-bit = <1>;
+	ingenic,preemphasis-amplitude = <4>;
+	ingenic,disconnect-threshold-msb = <3>;
+	ingenic,disconnect-threshold-middle = <1>;
+	ingenic,rx-squelch-tune = <10>;
+	ingenic,disconnect-threshold-lsb = <0>;
+	ingenic,hs-receiver-bias = <1>;
+	ingenic,disconnect-bias = <1>;
+	ingenic,hs-output-impedance = <21>;
+	ingenic,a-session-valid-tune = <4>;
+	ingenic,vbus-valid-tune = <1>;
+
+	status = "okay";
+	vcc-supply = <&usb_phy_vcc>;
+//	ingenic,vbus-dete-gpio = <&gpc 24 GPIO_ACTIVE_LOW>;
+};
+
+&aic {
+	status = "disabled";
+};
+
+&efuse {
+	status = "enabled";
+};

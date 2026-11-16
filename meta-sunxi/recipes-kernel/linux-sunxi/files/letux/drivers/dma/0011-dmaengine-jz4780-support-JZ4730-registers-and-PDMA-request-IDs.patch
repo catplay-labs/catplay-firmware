@@ -1,0 +1,629 @@
+Subject: [PATCH] dmaengine: jz4780: support JZ4730 registers and PDMA request IDs
+Upstream-Status: Pending
+
+Add JZ4730 DMA register offsets, pending-bit handling and a transfer path
+without descriptor fetching. Provide PDMA request IDs for X1600 and other
+Ingenic variants, and manage the controller clock with devm_clk_get_enabled.
+
+diff --git a/Documentation/devicetree/bindings/dma/ingenic,dma.yaml b/Documentation/devicetree/bindings/dma/ingenic,dma.yaml
+index d9cca3006e7374850c21db3529cde476f457d615..200a553dd2893811e8b94c9c10233e9bcdbca915 100644
+--- a/Documentation/devicetree/bindings/dma/ingenic,dma.yaml
++++ b/Documentation/devicetree/bindings/dma/ingenic,dma.yaml
+@@ -16,6 +16,7 @@ properties:
+   compatible:
+     oneOf:
+       - enum:
++          - ingenic,jz4730-dma
+           - ingenic,jz4740-dma
+           - ingenic,jz4725b-dma
+           - ingenic,jz4755-dma
+diff --git a/drivers/dma/dma-jz4780.c b/drivers/dma/dma-jz4780.c
+index 6070dfdb7114cedd087da3b6d693a1a5d6619e37..edcc94bbdbcc26bbc4a5d20a2fc7d9247fab58a3 100644
+--- a/drivers/dma/dma-jz4780.c
++++ b/drivers/dma/dma-jz4780.c
+@@ -4,6 +4,8 @@
+  *
+  * Copyright (c) 2015 Imagination Technologies
+  * Author: Alex Smith <alex@alex-smith.me.uk>
++ *
++ * Copyright (C) 2020 Paul Boddie <paul@boddie.org.uk>  JZ4730 customisations
+  */
+ 
+ #include <linux/clk.h>
+@@ -34,6 +36,9 @@
+ #define JZ_DMA_REG_DCIRQP	0x28
+ #define JZ_DMA_REG_DCIRQM	0x2c
+ 
++#define JZ4730_DMA_REG_DIRQP	0x00
++#define JZ4730_DMA_REG_DMAC	0x04
++
+ /* Per-channel registers. */
+ #define JZ_DMA_REG_CHAN(n)	(n * 0x20)
+ #define JZ_DMA_REG_DSA		0x00
+@@ -85,9 +90,23 @@
+ 				 BIT(DMA_SLAVE_BUSWIDTH_2_BYTES) | \
+ 				 BIT(DMA_SLAVE_BUSWIDTH_4_BYTES))
+ 
++/* Explicit JZ4730 control/status register macros. */
++#define JZ4730_DMA_REG_DCCSR	0x10
++
++#define JZ4730_DMA_DCCSR_CHDE	BIT(0)
++#define JZ4730_DMA_DCCSR_TIE	BIT(1)
++#define JZ4730_DMA_DCCSR_EACKM	BIT(30)
++
++/* Macro used to select descriptor command (DCM) fields for the JZ4730. */
++#define JZ4730_DMA_DCCSR_MASK	(JZ_DMA_DCM_SAI | JZ_DMA_DCM_DAI | \
++				(0x3 << JZ_DMA_DCM_SP_SHIFT)     | \
++				(0x3 << JZ_DMA_DCM_DP_SHIFT)     | \
++				JZ_DMA_DCM_TSZ_MASK)
++
++/* Offset of control registers from jz4780 peripheral base address */
+ #define JZ4780_DMA_CTRL_OFFSET	0x1000
+ 
+-/* macros for use with jz4780_dma_soc_data.flags */
++/* Macros for use with jz4780_dma_soc_data.flags */
+ #define JZ_SOC_DATA_ALLOW_LEGACY_DT	BIT(0)
+ #define JZ_SOC_DATA_PROGRAMMABLE_DMA	BIT(1)
+ #define JZ_SOC_DATA_PER_CHAN_PM		BIT(2)
+@@ -143,6 +162,7 @@ struct jz4780_dma_soc_data {
+ 	unsigned int nb_channels;
+ 	unsigned int transfer_ord_max;
+ 	unsigned long flags;
++	unsigned long control, pending, descaddr;
+ };
+ 
+ struct jz4780_dma_dev {
+@@ -489,6 +509,7 @@ static void jz4780_dma_begin(struct jz4780_dma_chan *jzchan)
+ 	struct virt_dma_desc *vdesc;
+ 	unsigned int i;
+ 	dma_addr_t desc_phys;
++	u32 dcm;
+ 
+ 	if (!jzchan->desc) {
+ 		vdesc = vchan_next_desc(&jzchan->vchan);
+@@ -531,7 +552,7 @@ static void jz4780_dma_begin(struct jz4780_dma_chan *jzchan)
+ 	/* Enable the channel's clock. */
+ 	jz4780_dma_chan_enable(jzdma, jzchan->id);
+ 
+-	/* Use 4-word descriptors. */
++	/* Use 4-word descriptors (and also reset the channel). */
+ 	jz4780_dma_chn_writel(jzdma, jzchan->id, JZ_DMA_REG_DCS, 0);
+ 
+ 	/* Set transfer type. */
+@@ -547,15 +568,37 @@ static void jz4780_dma_begin(struct jz4780_dma_chan *jzchan)
+ 	jz4780_dma_chn_writel(jzdma, jzchan->id, JZ_DMA_REG_DTC,
+ 				jzchan->desc->desc[jzchan->curr_hwdesc].dtc);
+ 
+-	/* Write descriptor address and initiate descriptor fetch. */
+-	desc_phys = jzchan->desc->desc_phys +
+-		    (jzchan->curr_hwdesc * sizeof(*jzchan->desc->desc));
+-	jz4780_dma_chn_writel(jzdma, jzchan->id, JZ_DMA_REG_DDA, desc_phys);
+-	jz4780_dma_ctrl_writel(jzdma, JZ_DMA_REG_DDRS, BIT(jzchan->id));
++	/* Test for descriptor transfer availability (absent in the JZ4730). */
++	if (!jzdma->soc_data->descaddr) {
++		/* Obtain and augment relevant descriptor command details. */
++		dcm = jzchan->desc->desc[jzchan->curr_hwdesc].dcm &
++			JZ4730_DMA_DCCSR_MASK;
++
++		dcm |= JZ4730_DMA_DCCSR_CHDE | JZ4730_DMA_DCCSR_TIE;
++
++		/* Detect peripheral writes, setting an extra flag. */
++		if (!(dcm & JZ_DMA_DCM_DAI))
++			dcm |= JZ4730_DMA_DCCSR_EACKM;
+ 
+-	/* Enable the channel. */
+-	jz4780_dma_chn_writel(jzdma, jzchan->id, JZ_DMA_REG_DCS,
+-			      JZ_DMA_DCS_CTE);
++		jz4780_dma_chn_writel(jzdma, jzchan->id, JZ_DMA_REG_DSA,
++					jzchan->desc->desc[jzchan->curr_hwdesc].dsa);
++		jz4780_dma_chn_writel(jzdma, jzchan->id, JZ_DMA_REG_DTA,
++					jzchan->desc->desc[jzchan->curr_hwdesc].dta);
++
++		/* Transfer command fields to the control/status register. */
++		jz4780_dma_chn_writel(jzdma, jzchan->id, JZ4730_DMA_REG_DCCSR, dcm);
++	} else {
++		/* Write descriptor address and initiate descriptor fetch. */
++		desc_phys = jzchan->desc->desc_phys +
++			    (jzchan->curr_hwdesc * sizeof(*jzchan->desc->desc));
++		jz4780_dma_chn_writel(jzdma, jzchan->id, jzdma->soc_data->descaddr,
++					desc_phys);
++		jz4780_dma_ctrl_writel(jzdma, JZ_DMA_REG_DDRS, BIT(jzchan->id));
++
++		/* Enable the channel. */
++		jz4780_dma_chn_writel(jzdma, jzchan->id, JZ_DMA_REG_DCS,
++				      JZ_DMA_DCS_CTE);
++	}
+ }
+ 
+ static void jz4780_dma_issue_pending(struct dma_chan *chan)
+@@ -738,7 +781,7 @@ static irqreturn_t jz4780_dma_irq_handler(int irq, void *data)
+ 	u32 dmac;
+ 	int i;
+ 
+-	pending = jz4780_dma_ctrl_readl(jzdma, JZ_DMA_REG_DIRQP);
++	pending = jz4780_dma_ctrl_readl(jzdma, jzdma->soc_data->pending);
+ 
+ 	for_each_set_bit(i, &pending, nb_channels) {
+ 		if (jz4780_dma_chan_irq(jzdma, &jzdma->chan[i]))
+@@ -746,12 +789,12 @@ static irqreturn_t jz4780_dma_irq_handler(int irq, void *data)
+ 	}
+ 
+ 	/* Clear halt and address error status of all channels. */
+-	dmac = jz4780_dma_ctrl_readl(jzdma, JZ_DMA_REG_DMAC);
++	dmac = jz4780_dma_ctrl_readl(jzdma, jzdma->soc_data->control);
+ 	dmac &= ~(JZ_DMA_DMAC_HLT | JZ_DMA_DMAC_AR);
+-	jz4780_dma_ctrl_writel(jzdma, JZ_DMA_REG_DMAC, dmac);
++	jz4780_dma_ctrl_writel(jzdma, jzdma->soc_data->control, dmac);
+ 
+ 	/* Clear interrupt pending status. */
+-	jz4780_dma_ctrl_writel(jzdma, JZ_DMA_REG_DIRQP, pending);
++	jz4780_dma_ctrl_writel(jzdma, jzdma->soc_data->pending, pending);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -896,15 +939,13 @@ static int jz4780_dma_probe(struct platform_device *pdev)
+ 		return -EINVAL;
+ 	}
+ 
+-	jzdma->clk = devm_clk_get(dev, NULL);
++	jzdma->clk = devm_clk_get_enabled(dev, NULL);
+ 	if (IS_ERR(jzdma->clk)) {
+-		dev_err(dev, "failed to get clock\n");
++		dev_err(dev, "failed to get and enable clock\n");
+ 		ret = PTR_ERR(jzdma->clk);
+ 		return ret;
+ 	}
+ 
+-	clk_prepare_enable(jzdma->clk);
+-
+ 	/* Property is optional, if it doesn't exist the value will remain 0. */
+ 	of_property_read_u32_index(dev->of_node, "ingenic,reserved-channels",
+ 				   0, &jzdma->chan_reserved);
+@@ -946,7 +987,7 @@ static int jz4780_dma_probe(struct platform_device *pdev)
+ 	 * Also set the FMSC bit - it increases MSC performance, so it makes
+ 	 * little sense not to enable it.
+ 	 */
+-	jz4780_dma_ctrl_writel(jzdma, JZ_DMA_REG_DMAC, JZ_DMA_DMAC_DMAE |
++	jz4780_dma_ctrl_writel(jzdma, soc_data->control, JZ_DMA_DMAC_DMAE |
+ 			       JZ_DMA_DMAC_FAIC | JZ_DMA_DMAC_FMSC);
+ 
+ 	if (soc_data->flags & JZ_SOC_DATA_PROGRAMMABLE_DMA)
+@@ -972,7 +1013,7 @@ static int jz4780_dma_probe(struct platform_device *pdev)
+ 
+ 	ret = platform_get_irq(pdev, 0);
+ 	if (ret < 0)
+-		goto err_disable_clk;
++		return ret;
+ 
+ 	jzdma->irq = ret;
+ 
+@@ -980,7 +1021,7 @@ static int jz4780_dma_probe(struct platform_device *pdev)
+ 			  jzdma);
+ 	if (ret) {
+ 		dev_err(dev, "failed to request IRQ %u!\n", jzdma->irq);
+-		goto err_disable_clk;
++		return ret;
+ 	}
+ 
+ 	ret = dmaenginem_async_device_register(dd);
+@@ -1002,9 +1043,6 @@ static int jz4780_dma_probe(struct platform_device *pdev)
+ 
+ err_free_irq:
+ 	free_irq(jzdma->irq, jzdma);
+-
+-err_disable_clk:
+-	clk_disable_unprepare(jzdma->clk);
+ 	return ret;
+ }
+ 
+@@ -1015,7 +1053,6 @@ static void jz4780_dma_remove(struct platform_device *pdev)
+ 
+ 	of_dma_controller_free(pdev->dev.of_node);
+ 
+-	clk_disable_unprepare(jzdma->clk);
+ 	free_irq(jzdma->irq, jzdma);
+ 
+ 	for (i = 0; i < jzdma->soc_data->nb_channels; i++)
+@@ -1026,6 +1063,9 @@ static const struct jz4780_dma_soc_data jz4740_dma_soc_data = {
+ 	.nb_channels = 6,
+ 	.transfer_ord_max = 5,
+ 	.flags = JZ_SOC_DATA_BREAK_LINKS,
++	.control = JZ_DMA_REG_DMAC,
++	.pending = JZ_DMA_REG_DIRQP,
++	.descaddr = JZ_DMA_REG_DDA,
+ };
+ 
+ static const struct jz4780_dma_soc_data jz4725b_dma_soc_data = {
+@@ -1033,6 +1073,18 @@ static const struct jz4780_dma_soc_data jz4725b_dma_soc_data = {
+ 	.transfer_ord_max = 5,
+ 	.flags = JZ_SOC_DATA_PER_CHAN_PM | JZ_SOC_DATA_NO_DCKES_DCKEC |
+ 		 JZ_SOC_DATA_BREAK_LINKS,
++	.control = JZ_DMA_REG_DMAC,
++	.pending = JZ_DMA_REG_DIRQP,
++	.descaddr = JZ_DMA_REG_DDA,
++};
++
++static const struct jz4780_dma_soc_data jz4730_dma_soc_data = {
++	.nb_channels = 6,
++	.transfer_ord_max = 5,
++	.flags = JZ_SOC_DATA_BREAK_LINKS,
++	.control = JZ4730_DMA_REG_DMAC,
++	.pending = JZ4730_DMA_REG_DIRQP,
++	.descaddr = 0,
+ };
+ 
+ static const struct jz4780_dma_soc_data jz4755_dma_soc_data = {
+@@ -1082,29 +1134,42 @@ static const struct jz4780_dma_soc_data jz4770_dma_soc_data = {
+ 	.nb_channels = 6,
+ 	.transfer_ord_max = 6,
+ 	.flags = JZ_SOC_DATA_PER_CHAN_PM,
++	.control = JZ_DMA_REG_DMAC,
++	.pending = JZ_DMA_REG_DIRQP,
++	.descaddr = JZ_DMA_REG_DDA,
+ };
+ 
+ static const struct jz4780_dma_soc_data jz4780_dma_soc_data = {
+ 	.nb_channels = 32,
+ 	.transfer_ord_max = 7,
+ 	.flags = JZ_SOC_DATA_ALLOW_LEGACY_DT | JZ_SOC_DATA_PROGRAMMABLE_DMA,
++	.control = JZ_DMA_REG_DMAC,
++	.pending = JZ_DMA_REG_DIRQP,
++	.descaddr = JZ_DMA_REG_DDA,
+ };
+ 
+ static const struct jz4780_dma_soc_data x1000_dma_soc_data = {
+ 	.nb_channels = 8,
+ 	.transfer_ord_max = 7,
+ 	.flags = JZ_SOC_DATA_PROGRAMMABLE_DMA,
++	.control = JZ_DMA_REG_DMAC,
++	.pending = JZ_DMA_REG_DIRQP,
++	.descaddr = JZ_DMA_REG_DDA,
+ };
+ 
+ static const struct jz4780_dma_soc_data x1830_dma_soc_data = {
+ 	.nb_channels = 32,
+ 	.transfer_ord_max = 7,
+ 	.flags = JZ_SOC_DATA_PROGRAMMABLE_DMA,
++	.control = JZ_DMA_REG_DMAC,
++	.pending = JZ_DMA_REG_DIRQP,
++	.descaddr = JZ_DMA_REG_DDA,
+ };
+ 
+ static const struct of_device_id jz4780_dma_dt_match[] = {
+ 	{ .compatible = "ingenic,jz4740-dma", .data = &jz4740_dma_soc_data },
+ 	{ .compatible = "ingenic,jz4725b-dma", .data = &jz4725b_dma_soc_data },
++	{ .compatible = "ingenic,jz4730-dma", .data = &jz4730_dma_soc_data },
+ 	{ .compatible = "ingenic,jz4755-dma", .data = &jz4755_dma_soc_data },
+ 	{ .compatible = "ingenic,jz4760-dma", .data = &jz4760_dma_soc_data },
+ 	{ .compatible = "ingenic,jz4760-mdma", .data = &jz4760_mdma_soc_data },
+diff --git a/include/dt-bindings/dma/ingenic-pdma-x2600.h b/include/dt-bindings/dma/ingenic-pdma-x2600.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..c0f4e893510045c993dbe22de9a2bd72a77ac0f1
+--- /dev/null
++++ b/include/dt-bindings/dma/ingenic-pdma-x2600.h
+@@ -0,0 +1,118 @@
++#ifndef __INGENIC_PDMA_X2600_H__
++#define __INGENIC_PDMA_X2600_H__
++//#include<generated/autoconf.h>
++
++/* #define INGENIC_DMA_REQ_DMIC_RX      0x5 */
++/* #define INGENIC_DMA_REQ_I2S_TX       0x6 */
++/* #define INGENIC_DMA_REQ_I2S_RX       0x7 */
++/* #define INGENIC_DMA_REQ_SADC_RX      0x9 */
++
++/* #define INGENIC_DMA_REQ_MSC1_TX      0x1c */
++/* #define INGENIC_DMA_REQ_MSC1_RX      0x1d */
++/* #define INGENIC_DMA_REQ_MSC2_TX      0x1e */
++/* #define INGENIC_DMA_REQ_MSC2_RX      0x1f */
++
++/* #define INGENIC_DMA_REQ_I2C4_TX      0x2c */
++/* #define INGENIC_DMA_REQ_I2C4_RX      0x2d */
++/* #define INGENIC_DMA_REQ_DES_TX       0x2e */
++/* #define INGENIC_DMA_REQ_DES_RX       0x2f */
++
++#define INGENIC_DMA_REQ_AUTO_TX     0x8
++// X2600 PDMA TYPE
++#define INGENIC_DMA_REQ_PCM_TX      0X6
++#define INGENIC_DMA_REQ_PCM_RX      0X7
++#define INGENIC_DMA_REQ_UART5_TX    0xa
++#define INGENIC_DMA_REQ_UART5_RX    0xb
++#define INGENIC_DMA_REQ_UART4_TX    0xc
++#define INGENIC_DMA_REQ_UART4_RX    0xd
++#define INGENIC_DMA_REQ_UART3_TX    0xe
++#define INGENIC_DMA_REQ_UART3_RX    0xf
++#define INGENIC_DMA_REQ_UART2_TX    0x10
++#define INGENIC_DMA_REQ_UART2_RX    0x11
++#define INGENIC_DMA_REQ_UART1_TX    0x12
++#define INGENIC_DMA_REQ_UART1_RX    0x13
++#define INGENIC_DMA_REQ_UART0_TX    0x14
++#define INGENIC_DMA_REQ_UART0_RX    0x15
++#define INGENIC_DMA_REQ_SSI0_TX     0x16
++#define INGENIC_DMA_REQ_SSI0_RX     0x17
++#define INGENIC_DMA_REQ_SSI1_TX     0x18
++#define INGENIC_DMA_REQ_SSI1_RX     0x19
++#define INGENIC_DMA_REQ_SLV0_TX     0x1a
++#define INGENIC_DMA_REQ_SLV0_RX     0x1b
++
++#define INGENIC_DMA_REQ_CAN0_TX     0x20
++#define INGENIC_DMA_REQ_CAN0_RX     0x21
++#define INGENIC_DMA_REQ_CAN1_TX     0x22
++#define INGENIC_DMA_REQ_CAN1_RX     0x23
++#define INGENIC_DMA_REQ_I2C0_TX     0x24
++#define INGENIC_DMA_REQ_I2C0_RX     0x25
++#define INGENIC_DMA_REQ_I2C1_TX     0x26
++#define INGENIC_DMA_REQ_I2C1_RX     0x27
++#define INGENIC_DMA_REQ_I2C2_TX     0x28
++#define INGENIC_DMA_REQ_I2C2_RX     0x29
++#define INGENIC_DMA_REQ_I2C3_TX     0x2a
++#define INGENIC_DMA_REQ_I2C3_RX     0x2b
++
++#define INGENIC_DMA_REQ_UART6_TX    0x30
++#define INGENIC_DMA_REQ_UART6_RX    0x31
++#define INGENIC_DMA_REQ_UART7_TX    0x32
++#define INGENIC_DMA_REQ_UART7_RX    0x33
++
++#define INGENIC_DMA_REQ_AIC_LOOP_RX 0x3d
++#define INGENIC_DMA_REQ_AIC_TX      0x3e
++#define INGENIC_DMA_REQ_AIC_RX      0x3f
++
++/* define for x2600 PDMA_MCU*/
++#define INGENIC_DMA_REQ_PWM0_TX         0x2c
++#define INGENIC_DMA_REQ_PWM1_TX         0x2d
++#define INGENIC_DMA_REQ_PWM2_TX         0x2e
++#define INGENIC_DMA_REQ_PWM3_TX         0x2f
++#define INGENIC_DMA_REQ_PWM4_TX         0x30
++#define INGENIC_DMA_REQ_PWM5_TX         0x31
++#define INGENIC_DMA_REQ_PWM6_TX         0x32
++#define INGENIC_DMA_REQ_PWM7_TX         0x33
++#define INGENIC_DMA_REQ_PWM8_TX         0x34
++#define INGENIC_DMA_REQ_PWM9_TX         0x35
++#define INGENIC_DMA_REQ_PWM10_TX         0x36
++#define INGENIC_DMA_REQ_PWM11_TX         0x37
++#define INGENIC_DMA_REQ_PWM12_TX         0x38
++#define INGENIC_DMA_REQ_PWM13_TX         0x39
++#define INGENIC_DMA_REQ_PWM14_TX         0x3a
++#define INGENIC_DMA_REQ_PWM15_TX         0x3b
++#define INGENIC_DMA_REQ_SADC_SEQ1_RX    0x00
++#define INGENIC_DMA_REQ_SADC_SEQ2_RX    0x01
++
++#define INGENIC_DMA_TYPE_REQ_MSK	0xff
++#define INGENIC_DMA_TYPE_CH_SFT		8
++#define INGENIC_DMA_TYPE_CH_MSK		(0xff << INGENIC_DMA_TYPE_CH_SFT)
++#define INGENIC_DMA_TYPE_CH_EN		(1 << 16)
++#define INGENIC_DMA_TYPE_PROG		(1 << 17)
++#define INGENIC_DMA_TYPE_SPEC		(1 << 18)
++
++#define INGENIC_DMA_TYPE_REQ_MSK    0xff
++#define INGENIC_DMA_TYPE_CH_SFT     8
++#define INGENIC_DMA_TYPE_CH_MSK     (0xff << INGENIC_DMA_TYPE_CH_SFT)
++#define INGENIC_DMA_TYPE_CH_EN      (1 << 16)
++#define INGENIC_DMA_TYPE_PROG       (1 << 17)
++#define INGENIC_DMA_TYPE_SPEC       (1 << 18)
++
++#define INGENIC_DMA_CTRL_BUS_SFT    19
++#define INGENIC_DMA_CTRL_BUS_MSK    (3 << INGENIC_DMA_CTRL_BUS_SFT)
++#define INGENIC_DMA_AHB2_CONTROL    (0 << 19)
++#define INGENIC_DMA_AHB_MCU_CONTROL (1 << 19)
++
++// BUS CTRL
++#define INGENIC_DMA_CTRL_AHB2_BUS   0
++#define INGENIC_DMA_CTRL_AHB_MCU_BUS    1
++#define INGENIC_GET_CTRL_BUS(bus)   (bus >> INGENIC_DMA_CTRL_BUS_SFT)
++#define INGENIC_DMA_AHB_MCU_TYPE(type)  (INGENIC_DMA_TYPE(type) | INGENIC_DMA_AHB_MCU_CONTROL)
++
++#define INGENIC_DMA_CH(ch)		((((ch) << INGENIC_DMA_TYPE_CH_SFT) & INGENIC_DMA_TYPE_CH_MSK) | INGENIC_DMA_TYPE_CH_EN)
++#define INGENIC_DMA_TYPE(type)	((type) & INGENIC_DMA_TYPE_REQ_MSK)
++#define INGENIC_DMA_TYPE_CH(type, ch)	(INGENIC_DMA_TYPE((type)) | INGENIC_DMA_CH((ch)))
++#define INGENIC_DMA_PG_CH(type, ch)	(INGENIC_DMA_TYPE_CH((type), (ch)) | INGENIC_DMA_TYPE_PROG_MSK)
++#define INGENIC_DMA_SP_CH(type, ch)	(INGENIC_DMA_PG_CH(type, id) | INGENIC_DMA_TYPE_SPEC_MSK)
++
++
++
++#endif  /* __INGENIC_PDMA_X2600_H__ */
+diff --git a/include/dt-bindings/dma/ingenic-pdma.h b/include/dt-bindings/dma/ingenic-pdma.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..17679aef63756ba1403a08b350e8c92d68736b23
+--- /dev/null
++++ b/include/dt-bindings/dma/ingenic-pdma.h
+@@ -0,0 +1,89 @@
++#ifndef __INGENIC_PDMA_H__
++#define __INGENIC_PDMA_H__
++// #include <generated/autoconf.h>
++
++#ifndef CONFIG_SOC_X2500
++#define INGENIC_DMA_REQ_DMIC_RX		0x5
++#else
++#define INGENIC_DMA_REQ_DMIC_RX		0xd
++#endif
++#define INGENIC_DMA_REQ_I2S_TX		0x6
++#define INGENIC_DMA_REQ_I2S_RX		0x7
++#define INGENIC_DMA_REQ_AUTO_TX		0x8
++#define INGENIC_DMA_REQ_SADC_RX		0x9
++#define INGENIC_DMA_REQ_UART4_TX	0xc
++#define INGENIC_DMA_REQ_UART4_RX	0xd
++#define INGENIC_DMA_REQ_UART3_TX	0xe
++#define INGENIC_DMA_REQ_UART3_RX	0xf
++#define INGENIC_DMA_REQ_UART2_TX	0x10
++#define INGENIC_DMA_REQ_UART2_RX	0x11
++#define INGENIC_DMA_REQ_UART1_TX	0x12
++#define INGENIC_DMA_REQ_UART1_RX	0x13
++#define INGENIC_DMA_REQ_UART0_TX	0x14
++#define INGENIC_DMA_REQ_UART0_RX	0x15
++#define INGENIC_DMA_REQ_SSI0_TX		0x16
++#define INGENIC_DMA_REQ_SSI0_RX		0x17
++#define INGENIC_DMA_REQ_SSI1_TX		0x18
++#define INGENIC_DMA_REQ_SSI1_RX		0x19
++#define INGENIC_DMA_REQ_MSC0_TX		0x1a
++#define INGENIC_DMA_REQ_MSC0_RX		0x1b
++#define INGENIC_DMA_REQ_MSC1_TX		0x1c
++#define INGENIC_DMA_REQ_MSC1_RX		0x1d
++#define INGENIC_DMA_REQ_MSC2_TX		0x1e
++#define INGENIC_DMA_REQ_MSC2_RX		0x1f
++#define INGENIC_DMA_REQ_PCM_TX		0X20
++#define INGENIC_DMA_REQ_PCM_RX		0X21
++#define INGENIC_DMA_REQ_I2C0_TX		0x24
++#define INGENIC_DMA_REQ_I2C0_RX		0x25
++#define INGENIC_DMA_REQ_I2C1_TX		0x26
++#define INGENIC_DMA_REQ_I2C1_RX		0x27
++#define INGENIC_DMA_REQ_I2C2_TX		0x28
++#define INGENIC_DMA_REQ_I2C2_RX		0x29
++#define INGENIC_DMA_REQ_I2C3_TX		0x2a
++#define INGENIC_DMA_REQ_I2C3_RX		0x2b
++#define INGENIC_DMA_REQ_I2C4_TX		0x2c
++#define INGENIC_DMA_REQ_I2C4_RX		0x2d
++#define INGENIC_DMA_REQ_DES_TX		0x2e
++#define INGENIC_DMA_REQ_DES_RX		0x2f
++
++
++/* define for x1600 */
++
++#define INGENIC_DMA_REQ_CAN0_TX		0xa
++#define INGENIC_DMA_REQ_CAN0_RX		0xb
++#define INGENIC_DMA_REQ_CAN1_TX		0xc
++#define INGENIC_DMA_REQ_CAN1_RX		0xd
++#define INGENIC_DMA_REQ_SLV0_TX		0x2a
++#define INGENIC_DMA_REQ_SLV0_RX		0x2b
++#define INGENIC_DMA_REQ_PWM0_TX		0x2c
++#define INGENIC_DMA_REQ_PWM1_TX		0x2d
++#define INGENIC_DMA_REQ_PWM2_TX		0x2e
++#define INGENIC_DMA_REQ_PWM3_TX		0x2f
++#define INGENIC_DMA_REQ_PWM4_TX		0x30
++#define INGENIC_DMA_REQ_PWM5_TX		0x31
++#define INGENIC_DMA_REQ_PWM6_TX		0x32
++#define INGENIC_DMA_REQ_PWM7_TX		0x33
++#define INGENIC_DMA_REQ_ASOC_AIC_LOOP	0x3d
++#define INGENIC_DMA_REQ_ASOC_AIC_TX	0x3e
++#define INGENIC_DMA_REQ_ASOC_AIC_RX	0x3f
++
++/* define for x2500 */
++#define INGENIC_DMA_REQ_AIC_LOOP_RX	0x5
++#define INGENIC_DMA_REQ_AIC_TX	    	0x6
++#define INGENIC_DMA_REQ_AIC_F_RX	0x7
++#define INGENIC_DMA_REQ_SLV_TX		0x1a
++#define INGENIC_DMA_REQ_SLV_RX		0x1b
++
++#define INGENIC_DMA_TYPE_REQ_MSK	0xff
++#define INGENIC_DMA_TYPE_CH_SFT		8
++#define INGENIC_DMA_TYPE_CH_MSK		(0xff << INGENIC_DMA_TYPE_CH_SFT)
++#define INGENIC_DMA_TYPE_CH_EN		(1 << 16)
++#define INGENIC_DMA_TYPE_PROG		(1 << 17)
++#define INGENIC_DMA_TYPE_SPEC		(1 << 18)
++
++#define INGENIC_DMA_CH(ch)		((((ch) << INGENIC_DMA_TYPE_CH_SFT) & INGENIC_DMA_TYPE_CH_MSK) | INGENIC_DMA_TYPE_CH_EN)
++#define INGENIC_DMA_TYPE(type)	((type) & INGENIC_DMA_TYPE_REQ_MSK)
++#define INGENIC_DMA_TYPE_CH(type, ch)	(INGENIC_DMA_TYPE((type)) | INGENIC_DMA_CH((ch)))
++#define INGENIC_DMA_PG_CH(type, ch)	(INGENIC_DMA_TYPE_CH((type), (ch)) | INGENIC_DMA_TYPE_PROG_MSK)
++#define INGENIC_DMA_SP_CH(type, ch)	(INGENIC_DMA_PG_CH(type, id) | INGENIC_DMA_TYPE_SPEC_MSK)
++#endif	/* __INGENIC_PDMA_H__ */
+diff --git a/include/dt-bindings/dma/x1600-dma.h b/include/dt-bindings/dma/x1600-dma.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb85434f5cd2fd6798ceb5941fb08300e1efe533
+--- /dev/null
++++ b/include/dt-bindings/dma/x1600-dma.h
+@@ -0,0 +1,46 @@
++#ifndef __DT_BINDINGS_DMA_X1600_DMA_H__
++#define __DT_BINDINGS_DMA_X1600_DMA_H__
++
++/*
++ * Request type numbers for the X1600 DMA controller (written to the DRTn
++ * register for the channel).
++ */
++#define X1600_DMA_AUTO		0x8
++#define X1600_DMA_CAN0_TX	0xa
++#define X1600_DMA_CAN0_RX	0xb
++#define X1600_DMA_CAN1_TX	0xc
++#define X1600_DMA_CAN1_RX	0xd
++#define X1600_DMA_UART3_TX	0xe
++#define X1600_DMA_UART3_RX	0xf
++#define X1600_DMA_UART2_TX	0x10
++#define X1600_DMA_UART2_RX	0x11
++#define X1600_DMA_UART1_TX	0x12
++#define X1600_DMA_UART1_RX	0x13
++#define X1600_DMA_UART0_TX	0x14
++#define X1600_DMA_UART0_RX	0x15
++#define X1600_DMA_SSI0_TX	0x16
++#define X1600_DMA_SSI0_RX	0x17
++#define X1600_DMA_SMB0_TX	0x24
++#define X1600_DMA_SMB0_RX	0x25
++#define X1600_DMA_SMB1_TX	0x26
++#define X1600_DMA_SMB1_RX	0x27
++#define X1600_DMA_SSI_SLV_TX	0x2a
++#define X1600_DMA_SSI_SLV_RX	0x2b
++#define X1600_DMA_PWM0_TX	0x2c
++#define X1600_DMA_PWM1_TX	0x2d
++#define X1600_DMA_PWM2_TX	0x2e
++#define X1600_DMA_PWM3_TX	0x2f
++#define X1600_DMA_PWM4_TX	0x30
++#define X1600_DMA_PWM5_TX	0x31
++#define X1600_DMA_PWM6_TX	0x32
++#define X1600_DMA_PWM7_TX	0x33
++#define X1600_DMA_MSC0_TX	0x34
++#define X1600_DMA_MSC0_RX	0x35
++#define X1600_DMA_MSC1_TX	0x36
++#define X1600_DMA_MSC1_RX	0x37
++#define X1600_DMA_SADC_RX	0x38
++#define X1600_DMA_AIC_LOOP	0x3d
++#define X1600_DMA_AIC_TX	0x3e
++#define X1600_DMA_AIC_RX	0x3f
++
++#endif /* __DT_BINDINGS_DMA_X1600_DMA_H__ */
+diff --git a/include/dt-bindings/dma/x2000-dma.h b/include/dt-bindings/dma/x2000-dma.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..db2cd4830b0097b96238b834a9cd07c32560f842
+--- /dev/null
++++ b/include/dt-bindings/dma/x2000-dma.h
+@@ -0,0 +1,54 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * This header provides macros for X2000 DMA bindings.
++ *
++ * Copyright (c) 2020 周琰杰 (Zhou Yanjie) <zhouyanjie@wanyeetech.com>
++ */
++
++#ifndef __DT_BINDINGS_DMA_X2000_DMA_H__
++#define __DT_BINDINGS_DMA_X2000_DMA_H__
++
++/*
++ * Request type numbers for the X2000 DMA controller (written to the DRTn
++ * register for the channel).
++ */
++#define X2000_DMA_AUTO		0x8
++#define X2000_DMA_UART5_TX	0xa
++#define X2000_DMA_UART5_RX	0xb
++#define X2000_DMA_UART4_TX	0xc
++#define X2000_DMA_UART4_RX	0xd
++#define X2000_DMA_UART3_TX	0xe
++#define X2000_DMA_UART3_RX	0xf
++#define X2000_DMA_UART2_TX	0x10
++#define X2000_DMA_UART2_RX	0x11
++#define X2000_DMA_UART1_TX	0x12
++#define X2000_DMA_UART1_RX	0x13
++#define X2000_DMA_UART0_TX	0x14
++#define X2000_DMA_UART0_RX	0x15
++#define X2000_DMA_SSI0_TX	0x16
++#define X2000_DMA_SSI0_RX	0x17
++#define X2000_DMA_SSI1_TX	0x18
++#define X2000_DMA_SSI1_RX	0x19
++#define X2000_DMA_I2C0_TX	0x24
++#define X2000_DMA_I2C0_RX	0x25
++#define X2000_DMA_I2C1_TX	0x26
++#define X2000_DMA_I2C1_RX	0x27
++#define X2000_DMA_I2C2_TX	0x28
++#define X2000_DMA_I2C2_RX	0x29
++#define X2000_DMA_I2C3_TX	0x2a
++#define X2000_DMA_I2C3_RX	0x2b
++#define X2000_DMA_I2C4_TX	0x2c
++#define X2000_DMA_I2C4_RX	0x2d
++#define X2000_DMA_I2C5_TX	0x2e
++#define X2000_DMA_I2C5_RX	0x2f
++#define X2000_DMA_UART6_TX	0x30
++#define X2000_DMA_UART6_RX	0x31
++#define X2000_DMA_UART7_TX	0x32
++#define X2000_DMA_UART7_RX	0x33
++#define X2000_DMA_UART8_TX	0x34
++#define X2000_DMA_UART8_RX	0x35
++#define X2000_DMA_UART9_TX	0x36
++#define X2000_DMA_UART9_RX	0x37
++#define X2000_DMA_SADC_RX	0x38
++
++#endif /* __DT_BINDINGS_DMA_X2000_DMA_H__ */

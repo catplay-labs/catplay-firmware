@@ -1,0 +1,658 @@
+Subject: [PATCH] irqchip: ingenic: support per-CPU controllers and SoC variants
+Upstream-Status: Pending
+
+Add interrupt-controller variant matching, register access and interrupt
+IDs for additional Ingenic SoCs, including X1600. Set up per-CPU irqchips
+and cascaded interrupts for SMP systems while retaining a single-CPU path.
+
+diff --git a/Documentation/devicetree/bindings/interrupt-controller/ingenic,intc.yaml b/Documentation/devicetree/bindings/interrupt-controller/ingenic,intc.yaml
+index 609308a5f91d84a643f93d4d8941346665ebb33f..e426b9bb67b191aa6e879c0bfbdb6691c68631c8 100644
+--- a/Documentation/devicetree/bindings/interrupt-controller/ingenic,intc.yaml
++++ b/Documentation/devicetree/bindings/interrupt-controller/ingenic,intc.yaml
+@@ -16,9 +16,11 @@ properties:
+   compatible:
+     oneOf:
+       - enum:
++          - ingenic,jz4730-intc
+           - ingenic,jz4740-intc
+           - ingenic,jz4760-intc
+           - ingenic,jz4780-intc
++          - ingenic,x1600-intc
+       - items:
+           - enum:
+               - ingenic,jz4775-intc
+diff --git a/drivers/irqchip/irq-ingenic.c b/drivers/irqchip/irq-ingenic.c
+index 27d8c7f87dadecce65eec4a9424edc6c732127b2..349ad050060d15731f9501fbd06384e0a0825918 100644
+--- a/drivers/irqchip/irq-ingenic.c
++++ b/drivers/irqchip/irq-ingenic.c
+@@ -1,7 +1,8 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ /*
++ *  Ingenic XBurst SoCs IRQ support
+  *  Copyright (C) 2009-2010, Lars-Peter Clausen <lars@metafoo.de>
+- *  Ingenic XBurst platform IRQ support
++ *  Copyright (C) 2021, 周琰杰 (Zhou Yanjie) <zhouyanjie@wanyeetech.com>
+  */
+ 
+ #include <linux/errno.h>
+@@ -12,149 +13,312 @@
+ #include <linux/irqchip.h>
+ #include <linux/of_address.h>
+ #include <linux/of_irq.h>
++#include <linux/of_platform.h>
+ #include <linux/timex.h>
+ #include <linux/slab.h>
+ #include <linux/delay.h>
++#include <linux/cpuhotplug.h>
+ 
+ #include <asm/io.h>
++#include <asm/mach-ingenic/smp.h>
+ 
+-struct ingenic_intc_data {
+-	void __iomem *base;
++#define JZ_REG_INTC_STATUS		0x00
++#define JZ_REG_INTC_MASK		0x04
++#define JZ_REG_INTC_SET_MASK	0x08
++#define JZ_REG_INTC_CLEAR_MASK	0x0c
++#define JZ_REG_INTC_PENDING		0x10
++#define CHIP_SIZE				0x20
++
++#define IF_ENABLED(cfg, ptr)	PTR_IF(IS_ENABLED(cfg), (ptr))
++
++enum ingenic_intc_version {
++	ID_JZ4730,
++	ID_JZ4740,
++	ID_JZ4725B,
++	ID_JZ4760,
++	ID_JZ4770,
++	ID_JZ4775,
++	ID_JZ4780,
++	ID_X1600,
++	ID_X2000,
++	ID_X2600,
++};
++
++struct ingenic_intc_irqchip {
+ 	struct irq_domain *domain;
++	void __iomem *base;
+ 	unsigned num_chips;
++
++	struct irq_chip_generic *gc[];
+ };
+ 
+-#define JZ_REG_INTC_STATUS	0x00
+-#define JZ_REG_INTC_MASK	0x04
+-#define JZ_REG_INTC_SET_MASK	0x08
+-#define JZ_REG_INTC_CLEAR_MASK	0x0c
+-#define JZ_REG_INTC_PENDING	0x10
+-#define CHIP_SIZE		0x20
++struct ingenic_intc {
++	enum ingenic_intc_version version;
++	struct irq_domain *domain;
++	struct ingenic_intc_irqchip __percpu *irqchips;
+ 
+-static irqreturn_t intc_cascade(int irq, void *data)
++	int irq;
++};
++
++struct ingenic_intc *ingenic_intc;
++
++asmlinkage void plat_irq_dispatch(void)
+ {
+-	struct ingenic_intc_data *intc = irq_get_handler_data(irq);
+-	struct irq_domain *domain = intc->domain;
+-	struct irq_chip_generic *gc;
++	unsigned long pending = read_c0_cause() & read_c0_status() & ST0_IM;
++
++	if (!pending) {
++		spurious_interrupt();
++		return;
++	}
++
++	if (pending & CAUSEF_IP3)
++		do_IRQ(MIPS_CPU_IRQ_BASE + 3);
++	else if (pending & CAUSEF_IP4)
++		do_IRQ(MIPS_CPU_IRQ_BASE + 4);
++	else if (pending & CAUSEF_IP2)
++		do_IRQ(MIPS_CPU_IRQ_BASE + 2);
++	else
++		do_IRQ(MIPS_CPU_IRQ_BASE + __ffs(pending));
++}
++
++static irqreturn_t ingenic_intc_cascade(int irq, void *data)
++{
++	struct ingenic_intc *intc = ingenic_intc;
++	struct ingenic_intc_irqchip *irqchip = data;
+ 	uint32_t pending;
+ 	unsigned i;
+ 
+-	for (i = 0; i < intc->num_chips; i++) {
+-		gc = irq_get_domain_generic_chip(domain, i * 32);
+-
+-		pending = irq_reg_readl(gc, JZ_REG_INTC_PENDING);
++	for (i = 0; i < irqchip->num_chips; i++) {
++		pending = irq_reg_readl(irqchip->gc[i], JZ_REG_INTC_PENDING);
+ 		if (!pending)
+ 			continue;
+ 
+ 		while (pending) {
+ 			int bit = __fls(pending);
+ 
+-			generic_handle_domain_irq(domain, bit + (i * 32));
++			irq = irq_find_mapping(intc->domain, bit + (i * 32));
++			generic_handle_irq(irq);
+ 			pending &= ~BIT(bit);
+ 		}
+ 	}
+ 
++	if (intc->version == ID_JZ4780)
++		IF_ENABLED(CONFIG_SMP, jz4780_smp_switch_irqcpu(smp_processor_id()));
++
+ 	return IRQ_HANDLED;
+ }
+ 
+-static int __init ingenic_intc_of_init(struct device_node *node,
+-				       unsigned num_chips)
++static int __init ingenic_intc_setup_irqchip(unsigned int cpu)
+ {
+-	struct ingenic_intc_data *intc;
+-	struct irq_chip_generic *gc;
++	struct ingenic_intc *intc = ingenic_intc;
++	struct ingenic_intc_irqchip *irqchip;
+ 	struct irq_chip_type *ct;
+-	struct irq_domain *domain;
+-	int parent_irq, err = 0;
+-	unsigned i;
++	unsigned int i;
+ 
+-	intc = kzalloc_obj(*intc);
+-	if (!intc) {
+-		err = -ENOMEM;
+-		goto out_err;
++	if (intc->version >= ID_X2000)
++		irqchip = per_cpu_ptr(intc->irqchips, cpu);
++	else
++		irqchip = intc->irqchips;
++
++	for (i = 0; i < irqchip->num_chips; i++) {
++		irqchip->gc[i] = irq_get_domain_generic_chip(intc->domain, i * 32);
++
++		irqchip->gc[i]->wake_enabled = IRQ_MSK(32);
++		irqchip->gc[i]->reg_base = irqchip->base + (i * CHIP_SIZE);
++
++		ct = irqchip->gc[i]->chip_types;
++		ct->regs.enable = JZ_REG_INTC_CLEAR_MASK;
++		ct->regs.disable = JZ_REG_INTC_SET_MASK;
++		ct->chip.irq_unmask = irq_gc_unmask_enable_reg;
++		ct->chip.irq_mask = irq_gc_mask_disable_reg;
++		ct->chip.irq_mask_ack = irq_gc_mask_disable_reg;
++		ct->chip.irq_set_wake = irq_gc_set_wake;
++		ct->chip.flags = IRQCHIP_MASK_ON_SUSPEND;
++
++		/* Mask all irqs */
++		irq_reg_writel(irqchip->gc[i], IRQ_MSK(32), JZ_REG_INTC_SET_MASK);
+ 	}
+ 
+-	parent_irq = irq_of_parse_and_map(node, 0);
+-	if (!parent_irq) {
+-		err = -EINVAL;
++	if (intc->version >= ID_X2000)
++		enable_percpu_irq(intc->irq, IRQ_TYPE_NONE);
++
++	return 0;
++}
++
++static const struct of_device_id __maybe_unused ingenic_intc_of_matches[] __initconst = {
++	{ .compatible = "ingenic,jz4730-intc", .data = (void *) ID_JZ4730 },
++	{ .compatible = "ingenic,jz4740-intc", .data = (void *) ID_JZ4730 },
++	{ .compatible = "ingenic,jz4725b-intc", .data = (void *) ID_JZ4730 },
++	{ .compatible = "ingenic,jz4760-intc", .data = (void *) ID_JZ4730 },
++	{ .compatible = "ingenic,jz4770-intc", .data = (void *) ID_JZ4730 },
++	{ .compatible = "ingenic,jz4775-intc", .data = (void *) ID_JZ4730 },
++	{ .compatible = "ingenic,jz4780-intc", .data = (void *) ID_JZ4780 },
++	{ .compatible = "ingenic,x1000-intc", .data = (void *) ID_JZ4730 },
++	{ .compatible = "ingenic,x1600-intc", .data = (void *) ID_JZ4730 },
++	{ .compatible = "ingenic,x1830-intc", .data = (void *) ID_JZ4730 },
++	{ .compatible = "ingenic,x2000-intc", .data = (void *) ID_X2000 },
++	{ .compatible = "ingenic,x2500-intc", .data = (void *) ID_X2000 },
++	{ .compatible = "ingenic,x2600-intc", .data = (void *) ID_X2600 },
++	{ /* sentinel */ }
++};
++
++static int __init ingenic_intc_probe(struct device_node *np, unsigned num_chips)
++{
++	const struct of_device_id *id = of_match_node(ingenic_intc_of_matches, np);
++	struct ingenic_intc_irqchip *irqchip;
++	struct ingenic_intc *intc;
++	void __iomem *base;
++	unsigned int cpu;
++	int ret;
++
++	intc = kzalloc_obj(*intc);
++	if (!intc)
++		return -ENOMEM;
++
++	intc->version = (enum ingenic_intc_version)id->data;
++
++	if (intc->version >= ID_X2000)
++		intc->irqchips = __alloc_percpu(struct_size(irqchip, gc, num_chips), 1);
++	else
++		intc->irqchips = kzalloc(struct_size(irqchip, gc, num_chips), GFP_KERNEL);
++
++	if (!intc->irqchips) {
++		ret = -ENOMEM;
+ 		goto out_free;
+ 	}
+ 
+-	err = irq_set_handler_data(parent_irq, intc);
+-	if (err)
+-		goto out_unmap_irq;
++	base = of_io_request_and_map(np, 0, of_node_full_name(np));
++	if (!base) {
++		pr_err("%s: Failed to map INTC registers\n", __func__);
++		ret = PTR_ERR(base);
++		goto out_free_percpu;
++	}
+ 
+-	intc->num_chips = num_chips;
+-	intc->base = of_iomap(node, 0);
+-	if (!intc->base) {
+-		err = -ENODEV;
+-		goto out_unmap_irq;
++	intc->irq = irq_of_parse_and_map(np, 0);
++	if (!intc->irq) {
++		pr_crit("%s: Cannot to get INTC IRQ\n", __func__);
++		ret = -EINVAL;
++		goto out_unmap_base;
+ 	}
+ 
+-	domain = irq_domain_create_linear(of_fwnode_handle(node), num_chips * 32,
+-					  &irq_generic_chip_ops, NULL);
++	for (cpu = 0; cpu < num_possible_cpus(); cpu++) {
++		if (intc->version >= ID_X2000) {
++			irqchip = per_cpu_ptr(intc->irqchips, cpu);
++			irqchip->base = base + 0x1000 * cpu;
++		} else {
++			irqchip = intc->irqchips;
++			irqchip->base = base;
++		}
++
++		irqchip->num_chips = num_chips;
++	}
++
++	ingenic_intc = intc;
++
++	return 0;
++
++out_unmap_base:
++	iounmap(base);
++out_free_percpu:
++	free_percpu(intc->irqchips);
++out_free:
++	kfree(intc);
++	return ret;
++}
++
++static int __init ingenic_intc_of_init(struct device_node *np,
++				       unsigned num_chips)
++{
++	struct ingenic_intc *intc;
++	struct irq_domain *domain;
++	int ret;
++
++	ret = ingenic_intc_probe(np, num_chips);
++	if (ret) {
++		pr_crit("%s: Failed to initialize INTC clocks: %d\n", __func__, ret);
++		return ret;
++	}
++
++	intc = ingenic_intc;
++	if (IS_ERR(intc))
++		return PTR_ERR(intc);
++
++	domain = irq_domain_add_linear(np, num_chips * 32, &irq_generic_chip_ops, NULL);
+ 	if (!domain) {
+-		err = -ENOMEM;
+-		goto out_unmap_base;
++		ret = -ENOMEM;
++		goto out_unmap_irq;
+ 	}
+ 
+ 	intc->domain = domain;
+ 
+-	err = irq_alloc_domain_generic_chips(domain, 32, 1, "INTC",
+-					     handle_level_irq, 0,
+-					     IRQ_NOPROBE | IRQ_LEVEL, 0);
+-	if (err)
++	ret = irq_alloc_domain_generic_chips(domain, 32, 1, "INTC",
++					     handle_level_irq, 0, IRQ_NOPROBE | IRQ_LEVEL, 0);
++	if (ret)
+ 		goto out_domain_remove;
+ 
+-	for (i = 0; i < num_chips; i++) {
+-		gc = irq_get_domain_generic_chip(domain, i * 32);
++	if (intc->version >= ID_X2000) {
++		ret = request_percpu_irq(intc->irq, ingenic_intc_cascade,
++				"SoC intc cascade interrupt", intc->irqchips);
++		if (ret) {
++			pr_err("Failed to register SoC intc cascade interrupt\n");
++			goto out_domain_remove;
++		}
+ 
+-		gc->wake_enabled = IRQ_MSK(32);
+-		gc->reg_base = intc->base + (i * CHIP_SIZE);
++		/* Setup irqchips on each CPU core */
++		ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "Ingenic XBurst: online",
++					ingenic_intc_setup_irqchip, NULL);
++		if (ret < 0) {
++			pr_crit("%s: Unable to init percpu irqchips: %x\n", __func__, ret);
++			goto out_domain_remove;
++		}
+ 
+-		ct = gc->chip_types;
+-		ct->regs.enable = JZ_REG_INTC_CLEAR_MASK;
+-		ct->regs.disable = JZ_REG_INTC_SET_MASK;
+-		ct->chip.irq_unmask = irq_gc_unmask_enable_reg;
+-		ct->chip.irq_mask = irq_gc_mask_disable_reg;
+-		ct->chip.irq_mask_ack = irq_gc_mask_disable_reg;
+-		ct->chip.irq_set_wake = irq_gc_set_wake;
+-		ct->chip.flags = IRQCHIP_MASK_ON_SUSPEND;
++	} else {
++		ret = request_irq(intc->irq, ingenic_intc_cascade, IRQF_NO_SUSPEND,
++				"SoC intc cascade interrupt", intc->irqchips);
++		if (ret) {
++			pr_err("Failed to register SoC intc cascade interrupt\n");
++			goto out_domain_remove;
++		}
+ 
+-		/* Mask all irqs */
+-		irq_reg_writel(gc, IRQ_MSK(32), JZ_REG_INTC_SET_MASK);
++		ret = ingenic_intc_setup_irqchip(0);
++		if (ret < 0) {
++			pr_crit("%s: Unable to init percpu irqchips: %x\n", __func__, ret);
++			goto out_domain_remove;
++		}
+ 	}
+ 
+-	if (request_irq(parent_irq, intc_cascade, IRQF_NO_SUSPEND,
+-			"SoC intc cascade interrupt", NULL))
+-		pr_err("Failed to register SoC intc cascade interrupt\n");
+ 	return 0;
+ 
+ out_domain_remove:
+ 	irq_domain_remove(domain);
+-out_unmap_base:
+-	iounmap(intc->base);
+ out_unmap_irq:
+-	irq_dispose_mapping(parent_irq);
+-out_free:
++	irq_dispose_mapping(intc->irq);
++	free_percpu(intc->irqchips);
+ 	kfree(intc);
+-out_err:
+-	return err;
++	return ret;
+ }
+ 
+-static int __init intc_1chip_of_init(struct device_node *node,
++static int __init intc_1chip_of_init(struct device_node *np,
+ 				     struct device_node *parent)
+ {
+-	return ingenic_intc_of_init(node, 1);
++	return ingenic_intc_of_init(np, 1);
+ }
++IRQCHIP_DECLARE(jz4730_intc, "ingenic,jz4730-intc", intc_1chip_of_init);
+ IRQCHIP_DECLARE(jz4740_intc, "ingenic,jz4740-intc", intc_1chip_of_init);
+ IRQCHIP_DECLARE(jz4725b_intc, "ingenic,jz4725b-intc", intc_1chip_of_init);
+ 
+-static int __init intc_2chip_of_init(struct device_node *node,
++static int __init intc_2chip_of_init(struct device_node *np,
+ 	struct device_node *parent)
+ {
+-	return ingenic_intc_of_init(node, 2);
++	return ingenic_intc_of_init(np, 2);
+ }
+ IRQCHIP_DECLARE(jz4760_intc, "ingenic,jz4760-intc", intc_2chip_of_init);
+ IRQCHIP_DECLARE(jz4770_intc, "ingenic,jz4770-intc", intc_2chip_of_init);
+ IRQCHIP_DECLARE(jz4775_intc, "ingenic,jz4775-intc", intc_2chip_of_init);
+ IRQCHIP_DECLARE(jz4780_intc, "ingenic,jz4780-intc", intc_2chip_of_init);
++IRQCHIP_DECLARE(x1000_intc, "ingenic,x1000-intc", intc_2chip_of_init);
++IRQCHIP_DECLARE(x1600_intc, "ingenic,x1600-intc", intc_2chip_of_init);
++IRQCHIP_DECLARE(x1830_intc, "ingenic,x1830-intc", intc_2chip_of_init);
++IRQCHIP_DECLARE(x2000_intc, "ingenic,x2000-intc", intc_2chip_of_init);
++IRQCHIP_DECLARE(x2500_intc, "ingenic,x2500-intc", intc_2chip_of_init);
++IRQCHIP_DECLARE(x2600_intc, "ingenic,x2600-intc", intc_2chip_of_init);
+diff --git a/include/dt-bindings/interrupt-controller/x1600-irq.h b/include/dt-bindings/interrupt-controller/x1600-irq.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d313dc283d6e836ed8cc79a7743941a8585bfcb
+--- /dev/null
++++ b/include/dt-bindings/interrupt-controller/x1600-irq.h
+@@ -0,0 +1,72 @@
++#ifndef _DT_BINDINGS_INTERRUPT_CONTROLLER_X1600_IRQ_H
++#define _DT_BINDINGS_INTERRUPT_CONTROLLER_X1600_IRQ_H
++
++#include <dt-bindings/interrupt-controller/mips-irq.h>
++
++#define IRQ_AUDIO			(0)
++#define IRQ_OTG				(1)
++#define IRQ_RESERVED0_2			(2)
++#define IRQ_PDMA			(3)
++#define IRQ_PDMAD			(4)
++#define IRQ_PDMAM			(5)
++#define IRQ_PWM				(6)
++#define IRQ_SFC				(7)
++#define IRQ_RESERVED0_8			(8)
++#define IRQ_SSI0			(9)
++#define IRQ_RESERVED0_10		(10)
++#define IRQ_SADC			(11)
++#define IRQ_RESERVED0_12		(12)
++#define IRQ_RESERVED0_13		(13)
++#define IRQ_GPIO3			(14)
++#define IRQ_GPIO2			(15)
++#define IRQ_GPIO1			(16)
++#define IRQ_GPIO0			(17)
++#define IRQ_RESERVED0_18		(18)
++#define IRQ_RESERVED0_19		(19)
++#define IRQ_RESERVED0_20		(20)
++#define IRQ_RESERVED0_21		(21)
++#define IRQ_HASH			(22)
++#define IRQ_AES				(23)
++#define IRQ_RESERVED0_14		(24)
++#define IRQ_TCU2			(25)
++#define IRQ_TCU1			(26)
++#define IRQ_TCU0			(27)
++#define IRQ_MIPI_CSI_2			(28)
++#define IRQ_RESERVED0_29		(29)
++#define IRQ_CIM				(30)
++#define IRQ_LCD				(31)
++
++#define IRQ_RTC				(32 + 0)
++#define IRQ_SOFT			(32 + 1)
++#define IRQ_DTRNG			(32 + 2)
++#define IRQ_RESERVED1_3			(32 + 3)
++#define IRQ_MSC1			(32 + 4)
++#define IRQ_MSC0			(32 + 5)
++#define IRQ_RESERVED1_6			(32 + 6)
++#define IRQ_RESERVED1_7			(32 + 7)
++#define IRQ_CAN0			(32 + 8)
++#define IRQ_CAN1			(32 + 9)
++#define IRQ_CDBUS			(32 + 10)
++#define IRQ_RESERVED1_11		(32 + 11)
++#define IRQ_UART3			(32 + 12)
++#define IRQ_UART2			(32 + 13)
++#define IRQ_UART1			(32 + 14)
++#define IRQ_UART0			(32 + 15)
++#define IRQ_RESERVED1_16		(32 + 16)
++#define IRQ_HARB2			(32 + 17)
++#define IRQ_HARB0			(32 + 18)
++#define IRQ_CPM				(32 + 19)
++#define IRQ_DDR				(32 + 20)
++#define IRQ_RESERVED1_21		(32 + 21)
++#define IRQ_EFUSE			(32 + 22)
++#define IRQ_GMAC0			(32 + 23)
++#define IRQ_RESERVED1_24		(32 + 24)
++#define IRQ_RESERVED1_25		(32 + 25)
++#define IRQ_RESERVED1_26		(32 + 26)
++#define IRQ_RESERVED1_27		(32 + 27)
++#define IRQ_I2C1			(32 + 28)
++#define IRQ_I2C0			(32 + 29)
++#define IRQ_SSI_SLV			(32 + 30)
++#define IRQ_RESERVED1_31		(32 + 31)
++
++#endif
+diff --git a/include/dt-bindings/interrupt-controller/x2000-irq.h b/include/dt-bindings/interrupt-controller/x2000-irq.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3c096138d29dafbd3c554507033b50ab5ebd8007
+--- /dev/null
++++ b/include/dt-bindings/interrupt-controller/x2000-irq.h
+@@ -0,0 +1,72 @@
++#ifndef _DT_BINDINGS_INTERRUPT_CONTROLLER_X1600_IRQ_H
++#define _DT_BINDINGS_INTERRUPT_CONTROLLER_X1600_IRQ_H
++
++#include <dt-bindings/interrupt-controller/mips-irq.h>
++
++#define IRQ_AUDIO			(0)
++#define IRQ_OTG				(1)
++#define IRQ_RESERVED0_2			(2)
++#define IRQ_PDMA			(3)
++#define IRQ_PDMAD			(4)
++#define IRQ_PDMAM			(5)
++#define IRQ_PWM				(6)
++#define IRQ_SFC				(7)
++#define IRQ_SSI1			(8)
++#define IRQ_SSI0			(9)
++#define IRQ_MIPI_DSI			(10)
++#define IRQ_SADC			(11)
++#define IRQ_MIPI_CSI			(12)
++#define IRQ_GPIO4			(13)
++#define IRQ_GPIO3			(14)
++#define IRQ_GPIO2			(15)
++#define IRQ_GPIO1			(16)
++#define IRQ_GPIO0			(17)
++#define IRQ_VIC1			(18)
++#define IRQ_VIC0			(19)
++#define IRQ_ISP1			(20)
++#define IRQ_ISP0			(21)
++#define IRQ_HASH			(22)
++#define IRQ_AES				(23)
++#define IRQ_RSA				(24)
++#define IRQ_TCU2			(25)
++#define IRQ_TCU1			(26)
++#define IRQ_TCU0			(27)
++#define IRQ_MIPI_CSI_2			(28)
++#define IRQ_ROTATE			(29)
++#define IRQ_CIM				(30)
++#define IRQ_LCD				(31)
++
++#define IRQ_RTC				(32 + 0)
++#define IRQ_SOFT			(32 + 1)
++#define IRQ_DTRNG			(32 + 2)
++#define IRQ_SCC				(32 + 3)
++#define IRQ_MSC1			(32 + 4)
++#define IRQ_MSC0			(32 + 5)
++#define IRQ_UART9			(32 + 6)
++#define IRQ_UART8			(32 + 7)
++#define IRQ_UART7			(32 + 8)
++#define IRQ_UART6			(32 + 9)
++#define IRQ_UART5			(32 + 10)
++#define IRQ_UART4			(32 + 11)
++#define IRQ_UART3			(32 + 12)
++#define IRQ_UART2			(32 + 13)
++#define IRQ_UART1			(32 + 14)
++#define IRQ_UART0			(32 + 15)
++#define IRQ_MSC2			(32 + 16)
++#define IRQ_HARB2			(32 + 17)
++#define IRQ_HARB0			(32 + 18)
++#define IRQ_CPM				(32 + 19)
++#define IRQ_DDR				(32 + 20)
++#define IRQ_GMAC1			(32 + 21)
++#define IRQ_EFUSE			(32 + 22)
++#define IRQ_GMAC0			(32 + 23)
++#define IRQ_I2C5			(32 + 24)
++#define IRQ_I2C4			(32 + 25)
++#define IRQ_I2C3			(32 + 26)
++#define IRQ_I2C2			(32 + 27)
++#define IRQ_I2C1			(32 + 28)
++#define IRQ_I2C0			(32 + 29)
++#define IRQ_HELIX			(32 + 30)
++#define IRQ_FELIX			(32 + 31)
++
++#endif
+diff --git a/include/dt-bindings/interrupt-controller/x2600-irq.h b/include/dt-bindings/interrupt-controller/x2600-irq.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..5dd12c1e01a5996b7f2f04bbc3395adc8618410a
+--- /dev/null
++++ b/include/dt-bindings/interrupt-controller/x2600-irq.h
+@@ -0,0 +1,72 @@
++#ifndef _DT_BINDINGS_INTERRUPT_CONTROLLER_X2600_IRQ_H
++#define _DT_BINDINGS_INTERRUPT_CONTROLLER_X2600_IRQ_H
++
++#include <dt-bindings/interrupt-controller/mips-irq.h>
++
++#define IRQ_AUDIO           (0)
++#define IRQ_OTG             (1)
++#define IRQ_USB             (2)
++#define IRQ_PDMA            (3)
++#define IRQ_PDMAD           (4)
++#define IRQ_PDMAM           (5)
++#define IRQ_SSI_SLAVE       (6)
++#define IRQ_SFC             (7)
++#define IRQ_SSI1            (8)
++#define IRQ_SSI0            (9)
++#define IRQ_MIPI_DSI        (10)
++#define IRQ_SADC            (11)
++#define IRQ_DMIC            (12)
++#define IRQ_GPIO4           (13)
++#define IRQ_GPIO3           (14)
++#define IRQ_GPIO2           (15)
++#define IRQ_GPIO1           (16)
++#define IRQ_GPIO0           (17)
++#define IRQ_SYS_LEP         (18)
++#define IRQ_PRINTC          (19)
++#define IRQ_PWM0            (20)
++#define IRQ_DTRNG           (21)
++#define IRQ_HASH            (22)
++#define IRQ_AES             (23)
++#define IRQ_WDT             (24)
++#define IRQ_TCU1            (25)
++#define IRQ_TCU0            (26)
++#define IRQ_FELIX           (27)
++#define IRQ_G2D             (28)
++#define IRQ_ROTATE          (29)
++#define IRQ_CIM             (30)
++#define IRQ_LCD             (31)
++
++#define IRQ_RTC             (32 + 0)
++#define IRQ_SOFT            (32 + 1)
++#define IRQ_CPM             (32 + 2)
++#define IRQ_RESERVED0       (32 + 3)
++#define IRQ_MSC1            (32 + 4)
++#define IRQ_MSC0            (32 + 5)
++#define IRQ_CAN1            (32 + 6)
++#define IRQ_CAN0            (32 + 7)
++#define IRQ_UART7           (32 + 8)
++#define IRQ_UART6           (32 + 9)
++#define IRQ_UART5           (32 + 10)
++#define IRQ_UART4           (32 + 11)
++#define IRQ_UART3           (32 + 12)
++#define IRQ_UART2           (32 + 13)
++#define IRQ_UART1           (32 + 14)
++#define IRQ_UART0           (32 + 15)
++#define IRQ_HMAN_MCU        (32 + 16)
++#define IRQ_HMAN2           (32 + 17)
++#define IRQ_HMAN0           (32 + 18)
++#define IRQ_DDRC            (32 + 19)
++#define IRQ_PCM             (32 + 20)
++#define IRQ_RESERVED1       (32 + 21)
++#define IRQ_EFUSE           (32 + 22)
++#define IRQ_MAC             (32 + 23)
++#define IRQ_I2C3            (32 + 24)
++#define IRQ_I2C2            (32 + 25)
++#define IRQ_I2C1            (32 + 26)
++#define IRQ_I2C0            (32 + 27)
++#define IRQ_MCU_PDMA        (32 + 28)
++#define IRQ_MCU_PDMAD       (32 + 29)
++#define IRQ_JPEGE           (32 + 30)
++#define IRQ_JPEGD           (32 + 31)
++
++#endif

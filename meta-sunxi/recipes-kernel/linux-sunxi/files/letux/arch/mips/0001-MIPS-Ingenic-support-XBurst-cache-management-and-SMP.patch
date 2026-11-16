@@ -1,0 +1,2364 @@
+Subject: [PATCH] MIPS: Ingenic: support XBurst cache management and SMP
+Upstream-Status: Pending
+
+Add XBurst and XBurst2 CPU detection, cache operations, TLB handling,
+instruction emulation and idle support. Provide the Ingenic SMP startup,
+mailbox and CPU hotplug implementation with its shared register definitions.
+
+Use the Ingenic cache backend instead of the generic R4K backend. Drain the
+external write buffer after DMA writeback/invalidate and XBurst receive
+invalidation so subsequent device accesses see completed cache operations.
+
+diff --git a/arch/mips/Kconfig b/arch/mips/Kconfig
+index 1f8bdfd7e9a63a13c594b7905cd7d5cb9b9a753b..d3fe2e9164d31ea941a30510765f604f808c8d15 100644
+--- a/arch/mips/Kconfig
++++ b/arch/mips/Kconfig
+@@ -2196,7 +2196,7 @@ config CPU_R4K_FPU
+ 
+ config CPU_R4K_CACHE_TLB
+ 	bool
+-	default y if !(CPU_R3K_TLB || CPU_SB1 || CPU_CAVIUM_OCTEON)
++	default y if !(CPU_R3K_TLB || CPU_SB1 || CPU_CAVIUM_OCTEON || MACH_INGENIC)
+ 
+ config MIPS_MT_SMP
+ 	bool "MIPS MT SMP support (1 TC on each available VPE)"
+diff --git a/arch/mips/include/asm/bootinfo.h b/arch/mips/include/asm/bootinfo.h
+index 2128ba9033911794029e420f8c412bd0885cb827..fd79c1a3b807e4f29eb8f204c0debe5cebefb0bf 100644
+--- a/arch/mips/include/asm/bootinfo.h
++++ b/arch/mips/include/asm/bootinfo.h
+@@ -81,6 +81,8 @@ enum ingenic_machine_type {
+ 	MACH_INGENIC_JZ4780,
+ 	MACH_INGENIC_X1000,
+ 	MACH_INGENIC_X1000E,
++	MACH_INGENIC_X1600,
++	MACH_INGENIC_X1600E,
+ 	MACH_INGENIC_X1830,
+ 	MACH_INGENIC_X2000,
+ 	MACH_INGENIC_X2000E,
+diff --git a/arch/mips/include/asm/cache.h b/arch/mips/include/asm/cache.h
+index 8b08db3fb17aae4f0987092414f9b8ffe59fd8df..1614c7ac537e3a6e554c9c6a4dbc05edd1a17ff3 100644
+--- a/arch/mips/include/asm/cache.h
++++ b/arch/mips/include/asm/cache.h
+@@ -22,6 +22,7 @@ extern unsigned long r3k_cache_size(unsigned long);
+ extern unsigned long r3k_cache_lsize(unsigned long);
+ extern void r4k_cache_init(void);
+ extern void octeon_cache_init(void);
++extern void ingenic_cache_init(void);
+ extern void au1x00_fixup_config_od(void);
+ 
+ #endif /* _ASM_CACHE_H */
+diff --git a/arch/mips/include/asm/cpu-features.h b/arch/mips/include/asm/cpu-features.h
+index 3f11e5218e6c65759cc5442e87c514e5139e4d01..3162f4aff27a360b1fb50ad5ca18ad786fe502fb 100644
+--- a/arch/mips/include/asm/cpu-features.h
++++ b/arch/mips/include/asm/cpu-features.h
+@@ -140,6 +140,9 @@
+ 	__res;								\
+ })
+ #endif
++#ifndef cpu_has_ingenic_cache
++#define cpu_has_ingenic_cache	0
++#endif
+ /* Don't override `cpu_has_fpu' to 1 or the "nofpu" option won't work.  */
+ #ifndef cpu_has_fpu
+ # ifdef CONFIG_MIPS_FP_SUPPORT
+diff --git a/arch/mips/include/asm/cpu-type.h b/arch/mips/include/asm/cpu-type.h
+index fd37a44a2f19932d8a6fa4a49f16d14b7efac1c0..25a181fd0eb7aaa30e77b6e3338eb54419498a44 100644
+--- a/arch/mips/include/asm/cpu-type.h
++++ b/arch/mips/include/asm/cpu-type.h
+@@ -56,6 +56,7 @@ static inline int __pure __get_cpu_type(const int cpu_type)
+ #ifdef CONFIG_SYS_HAS_CPU_MIPS32_R5
+ 	case CPU_M5150:
+ 	case CPU_P5600:
++	case CPU_XBURST2:
+ #endif
+ 
+ #if defined(CONFIG_SYS_HAS_CPU_MIPS32_R2) || \
+diff --git a/arch/mips/include/asm/cpu.h b/arch/mips/include/asm/cpu.h
+index 0fd9f9bbd21f1d69077c3605908d51bf8a017eca..9e27a13bd9226602f80f0a3c7ef56b1f671c7316 100644
+--- a/arch/mips/include/asm/cpu.h
++++ b/arch/mips/include/asm/cpu.h
+@@ -47,7 +47,7 @@
+ #define PRID_COMP_CAVIUM	0x0d0000
+ #define PRID_COMP_LOONGSON	0x140000
+ #define PRID_COMP_INGENIC_13	0x130000	/* X2000, X2100 */
+-#define PRID_COMP_INGENIC_D0	0xd00000	/* JZ4730, JZ4740, JZ4750, JZ4755, JZ4760, X1830 */
++#define PRID_COMP_INGENIC_D0	0xd00000	/* JZ4730, JZ4740, JZ4750, JZ4755, JZ4760, X1830, X1600 */
+ #define PRID_COMP_INGENIC_D1	0xd10000	/* JZ4770, JZ4775, X1000 */
+ #define PRID_COMP_INGENIC_E1	0xe10000	/* JZ4780 */
+ 
+@@ -186,9 +186,11 @@
+  * These are the PRID's for when 23:16 == PRID_COMP_INGENIC_*
+  */
+ 
++#define PRID_IMP_XBURST		0x0000  /* XBurst®1 with ISA */
+ #define PRID_IMP_XBURST_REV1	0x0200	/* XBurst®1 with MXU1.0/MXU1.1 SIMD ISA	*/
+-#define PRID_IMP_XBURST_REV2	0x0100	/* XBurst®1 with MXU2.0 SIMD ISA		*/
+-#define PRID_IMP_XBURST2		0x2000	/* XBurst®2 with MXU2.1 SIMD ISA		*/
++#define PRID_IMP_XBURST_REV2	0x0100	/* XBurst®1 with MXU2.0 SIMD ISA */
++#define PRID_IMP_XBURST2	0x2000	/* XBurst®2 with MXU2.1 SIMD ISA */
++#define PRID_IMP_XBURST2_R2	0x2100  /* XBurst®2 with MXU3.0 SIMD ISA */
+ 
+ /*
+  * These are the PRID's for when 23:16 == PRID_COMP_NETLOGIC
+@@ -312,8 +314,8 @@ enum cpu_type_enum {
+ 	 */
+ 	CPU_4KC, CPU_4KEC, CPU_4KSC, CPU_24K, CPU_34K, CPU_1004K, CPU_74K,
+ 	CPU_ALCHEMY, CPU_PR4450, CPU_BMIPS32, CPU_BMIPS3300, CPU_BMIPS4350,
+-	CPU_BMIPS4380, CPU_BMIPS5000, CPU_XBURST, CPU_LOONGSON32, CPU_M14KC,
+-	CPU_M14KEC, CPU_INTERAPTIV, CPU_P5600, CPU_PROAPTIV, CPU_1074K,
++	CPU_BMIPS4380, CPU_BMIPS5000, CPU_XBURST, CPU_XBURST2, CPU_LOONGSON32,
++	CPU_M14KC, CPU_M14KEC, CPU_INTERAPTIV, CPU_P5600, CPU_PROAPTIV, CPU_1074K,
+ 	CPU_M5150, CPU_I6400, CPU_P6600, CPU_M6250,
+ 
+ 	/*
+diff --git a/arch/mips/include/asm/hazards.h b/arch/mips/include/asm/hazards.h
+index a084b3b3bc81097d547b31a3343ff57cf71a541c..1c9264e05c6c48497f563620987c525e0e813ad2 100644
+--- a/arch/mips/include/asm/hazards.h
++++ b/arch/mips/include/asm/hazards.h
+@@ -24,7 +24,8 @@
+  */
+ #if (defined(CONFIG_CPU_MIPSR2) || defined(CONFIG_CPU_MIPSR5) || \
+      defined(CONFIG_CPU_MIPSR6)) && \
+-    !defined(CONFIG_CPU_CAVIUM_OCTEON) && !defined(CONFIG_CPU_LOONGSON64)
++    !defined(CONFIG_CPU_CAVIUM_OCTEON) && !defined(CONFIG_CPU_LOONGSON64) && \
++    !defined(CONFIG_MACH_INGENIC)
+ 
+ /*
+  * MIPSR2 defines ehb for hazard avoidance
+@@ -160,7 +161,8 @@ do {									\
+ 
+ #elif defined(CONFIG_MIPS_ALCHEMY) || defined(CONFIG_CPU_CAVIUM_OCTEON) || \
+ 	defined(CONFIG_CPU_LOONGSON2EF) || defined(CONFIG_CPU_LOONGSON64) || \
+-	defined(CONFIG_CPU_R10000) || defined(CONFIG_CPU_R5500)
++	defined(CONFIG_CPU_R10000) || defined(CONFIG_CPU_R5500) || defined(CONFIG_CPU_XLR) || \
++	defined(CONFIG_MACH_INGENIC)
+ 
+ /*
+  * R10000 rocks - all hazards handled in hardware, so this becomes a nobrainer.
+diff --git a/arch/mips/include/asm/mach-ingenic/cpu-feature-overrides.h b/arch/mips/include/asm/mach-ingenic/cpu-feature-overrides.h
+index 7ace50127f5aa0b7105453f17a33c06ca369536f..0c3d763c714c1d90aa7b0ac2c56322219609f4cb 100644
+--- a/arch/mips/include/asm/mach-ingenic/cpu-feature-overrides.h
++++ b/arch/mips/include/asm/mach-ingenic/cpu-feature-overrides.h
+@@ -10,7 +10,9 @@
+ #define cpu_has_tlb 1
+ #define cpu_has_4kex		1
+ #define cpu_has_3k_cache	0
+-#define cpu_has_4k_cache	1
++#define cpu_has_4k_cache	0
++#define cpu_has_ingenic_cache	1
++#define cpu_has_tx39_cache	0
+ #define cpu_has_counter		0
+ #define cpu_has_watch		1
+ #define cpu_has_divec		1
+@@ -27,7 +29,7 @@
+ #define cpu_has_mips3d 0
+ #define cpu_has_smartmips 0
+ #define kernel_uses_llsc	1
+-#define cpu_has_vtag_icache	1
++#define cpu_has_vtag_icache	0
+ #define cpu_has_dc_aliases	0
+ #define cpu_has_ic_fills_f_dc	0
+ #define cpu_has_pindexed_dcache 0
+@@ -37,7 +39,6 @@
+ #define cpu_has_dsp		0
+ #define cpu_has_dsp2		0
+ #define cpu_has_mipsmt		0
+-#define cpu_has_userlocal	0
+ #define cpu_has_nofpuex 0
+ #define cpu_has_64bits		0
+ #define cpu_has_64bit_zero_reg 0
+diff --git a/arch/mips/include/asm/mach-ingenic/smp.h b/arch/mips/include/asm/mach-ingenic/smp.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..d76cec3f11b0af39be0b8234e260c441cc2bdd04
+--- /dev/null
++++ b/arch/mips/include/asm/mach-ingenic/smp.h
+@@ -0,0 +1,318 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Ingenic XBurst SoCs SMP definitions
++ * Copyright (c) 2013 Paul Burton <paul.burton@imgtec.com>
++ * Copyright (c) 2021 周琰杰 (Zhou Yanjie) <zhouyanjie@wanyeetech.com>
++ */
++
++#ifndef __MIPS_ASM_MACH_INGENIC_SMP_H__
++#define __MIPS_ASM_MACH_INGENIC_SMP_H__
++
++
++/*
++ * Ingenic XBurst SMP definitions.
++ */
++
++#define read_c0_corectrl()				__read_32bit_c0_register($12, 2)
++#define write_c0_corectrl(val)			__write_32bit_c0_register($12, 2, val)
++
++#define read_c0_corestatus()			__read_32bit_c0_register($12, 3)
++#define write_c0_corestatus(val)		__write_32bit_c0_register($12, 3, val)
++
++#define read_c0_reim()					__read_32bit_c0_register($12, 4)
++#define write_c0_reim(val)				__write_32bit_c0_register($12, 4, val)
++
++#define read_c0_mailbox0()				__read_32bit_c0_register($20, 0)
++#define write_c0_mailbox0(val)			__write_32bit_c0_register($20, 0, val)
++
++#define read_c0_mailbox1()				__read_32bit_c0_register($20, 1)
++#define write_c0_mailbox1(val)			__write_32bit_c0_register($20, 1, val)
++
++#define read_c0_mailbox2()				__read_32bit_c0_register($20, 2)
++#define write_c0_mailbox2(val)			__write_32bit_c0_register($20, 2, val)
++
++#define read_c0_mailbox3()				__read_32bit_c0_register($20, 3)
++#define write_c0_mailbox3(val)			__write_32bit_c0_register($20, 3, val)
++
++#define smp_clr_pending(mask) do {		\
++		unsigned int stat;				\
++		stat = read_c0_corestatus();	\
++		stat &= ~((mask) & 0xff);		\
++		write_c0_corestatus(stat);		\
++	} while (0)
++
++/* Core Control register */
++#define CORECTRL_SLEEP1M_SHIFT			17
++#define CORECTRL_SLEEP1M				(_ULCAST_(0x1) << CORECTRL_SLEEP1M_SHIFT)
++#define CORECTRL_SLEEP0M_SHIFT			16
++#define CORECTRL_SLEEP0M				(_ULCAST_(0x1) << CORECTRL_SLEEP0M_SHIFT)
++#define CORECTRL_RPC1_SHIFT				9
++#define CORECTRL_RPC1					(_ULCAST_(0x1) << CORECTRL_RPC1_SHIFT)
++#define CORECTRL_RPC0_SHIFT				8
++#define CORECTRL_RPC0					(_ULCAST_(0x1) << CORECTRL_RPC0_SHIFT)
++#define CORECTRL_SWRST1_SHIFT			1
++#define CORECTRL_SWRST1					(_ULCAST_(0x1) << CORECTRL_SWRST1_SHIFT)
++#define CORECTRL_SWRST0_SHIFT			0
++#define CORECTRL_SWRST0					(_ULCAST_(0x1) << CORECTRL_SWRST0_SHIFT)
++
++/* Core Status register */
++#define CORESTATUS_SLEEP1_SHIFT			17
++#define CORESTATUS_SLEEP1				(_ULCAST_(0x1) << CORESTATUS_SLEEP1_SHIFT)
++#define CORESTATUS_SLEEP0_SHIFT			16
++#define CORESTATUS_SLEEP0				(_ULCAST_(0x1) << CORESTATUS_SLEEP0_SHIFT)
++#define CORESTATUS_IRQ1P_SHIFT			9
++#define CORESTATUS_IRQ1P				(_ULCAST_(0x1) << CORESTATUS_IRQ1P_SHIFT)
++#define CORESTATUS_IRQ0P_SHIFT			8
++#define CORESTATUS_IRQ0P				(_ULCAST_(0x1) << CORESTATUS_IRQ8P_SHIFT)
++#define CORESTATUS_MIRQ1P_SHIFT			1
++#define CORESTATUS_MIRQ1P				(_ULCAST_(0x1) << CORESTATUS_MIRQ1P_SHIFT)
++#define CORESTATUS_MIRQ0P_SHIFT			0
++#define CORESTATUS_MIRQ0P				(_ULCAST_(0x1) << CORESTATUS_MIRQ0P_SHIFT)
++
++/* Reset Entry & IRQ Mask register */
++#define REIM_ENTRY_SHIFT				16
++#define REIM_ENTRY						(_ULCAST_(0xffff) << REIM_ENTRY_SHIFT)
++#define REIM_IRQ1M_SHIFT				9
++#define REIM_IRQ1M						(_ULCAST_(0x1) << REIM_IRQ1M_SHIFT)
++#define REIM_IRQ0M_SHIFT				8
++#define REIM_IRQ0M						(_ULCAST_(0x1) << REIM_IRQ0M_SHIFT)
++#define REIM_MBOXIRQ1M_SHIFT			1
++#define REIM_MBOXIRQ1M					(_ULCAST_(0x1) << REIM_MBOXIRQ1M_SHIFT)
++#define REIM_MBOXIRQ0M_SHIFT			0
++#define REIM_MBOXIRQ0M					(_ULCAST_(0x1) << REIM_MBOXIRQ0M_SHIFT)
++
++/*
++ * Ingenic XBurst2 SMP definitions.
++ */
++
++#define INGENIC_XBURST2_THREADS_PER_CORE	2
++
++#define CCU_BASE						ioremap(0x12200000, 4)
++
++#define CCU_MAILBOX_BASE				CCU_BASE + 0x1000
++
++#define read_ccu_cssr()					readl(CCU_BASE + 0x20)
++
++#define read_ccu_csrr()					readl(CCU_BASE + 0x40)
++#define write_ccu_csrr(val)				writel(val, CCU_BASE + 0x40)
++
++#define read_ccu_mscr()					readl(CCU_BASE + 0x60)
++#define write_ccu_mscr(val)				writel(val, CCU_BASE + 0x60)
++
++#define read_ccu_pimr()					readl(CCU_BASE + 0x120)
++#define write_ccu_pimr(val)				writel(val, CCU_BASE + 0x120)
++
++#define read_ccu_mimr()					readl(CCU_BASE + 0x160)
++#define write_ccu_mimr(val)				writel(val, CCU_BASE + 0x160)
++
++#define read_ccu_oimr()					readl(CCU_BASE + 0x1a0)
++#define write_ccu_oimr(val)				writel(val, CCU_BASE + 0x1a0)
++
++#define read_ccu_rer()					readl(CCU_BASE + 0xf00)
++#define write_ccu_rer(val)				writel(val, CCU_BASE + 0xf00)
++
++#define read_ccu_mbr0()					readl(CCU_BASE + 0x1000)
++#define write_ccu_mbr0(val)				writel(val, CCU_BASE + 0x1000)
++
++#define read_ccu_mbr1()					readl(CCU_BASE + 0x1004)
++#define write_ccu_mbr1(val)				writel(val, CCU_BASE + 0x1004)
++
++#define read_ccu_mbr2()					readl(CCU_BASE + 0x1008)
++#define write_ccu_mbr2(val)				writel(val, CCU_BASE + 0x1008)
++
++#define read_ccu_mbr3()					readl(CCU_BASE + 0x100c)
++#define write_ccu_mbr3(val)				writel(val, CCU_BASE + 0x100c)
++
++/* Core Sleep Status register */
++#define CSSR_SS15_SHIFT					15
++#define CSSR_SS15						(_ULCAST_(0x1) << CSSR_SS15_SHIFT)
++#define CSSR_SS14_SHIFT					14
++#define CSSR_SS14						(_ULCAST_(0x1) << CSSR_SS14_SHIFT)
++#define CSSR_SS13_SHIFT					13
++#define CSSR_SS13						(_ULCAST_(0x1) << CSSR_SS13_SHIFT)
++#define CSSR_SS12_SHIFT					12
++#define CSSR_SS12						(_ULCAST_(0x1) << CSSR_SS12_SHIFT)
++#define CSSR_SS11_SHIFT					11
++#define CSSR_SS11						(_ULCAST_(0x1) << CSSR_SS11_SHIFT)
++#define CSSR_SS10_SHIFT					10
++#define CSSR_SS10						(_ULCAST_(0x1) << CSSR_SS10_SHIFT)
++#define CSSR_SS9_SHIFT					9
++#define CSSR_SS9						(_ULCAST_(0x1) << CSSR_SS9_SHIFT)
++#define CSSR_SS8_SHIFT					8
++#define CSSR_SS8						(_ULCAST_(0x1) << CSSR_SS8_SHIFT)
++#define CSSR_SS7_SHIFT					7
++#define CSSR_SS7						(_ULCAST_(0x1) << CSSR_SS7_SHIFT)
++#define CSSR_SS6_SHIFT					6
++#define CSSR_SS6						(_ULCAST_(0x1) << CSSR_SS6_SHIFT)
++#define CSSR_SS5_SHIFT					5
++#define CSSR_SS5						(_ULCAST_(0x1) << CSSR_SS5_SHIFT)
++#define CSSR_SS4_SHIFT					4
++#define CSSR_SS4						(_ULCAST_(0x1) << CSSR_SS4_SHIFT)
++#define CSSR_SS3_SHIFT					3
++#define CSSR_SS3						(_ULCAST_(0x1) << CSSR_SS3_SHIFT)
++#define CSSR_SS2_SHIFT					2
++#define CSSR_SS2						(_ULCAST_(0x1) << CSSR_SS2_SHIFT)
++#define CSSR_SS1_SHIFT					1
++#define CSSR_SS1						(_ULCAST_(0x1) << CSSR_SS1_SHIFT)
++#define CSSR_SS0_SHIFT					0
++#define CSSR_SS0						(_ULCAST_(0x1) << CSSR_SS0_SHIFT)
++
++/* Core Software Reset Mask register */
++#define CSRR_SRE15_SHIFT				15
++#define CSRR_SRE15						(_ULCAST_(0x1) << CSRR_SRE15_SHIFT)
++#define CSRR_SRE14_SHIFT				14
++#define CSRR_SRE14						(_ULCAST_(0x1) << CSRR_SRE14_SHIFT)
++#define CSRR_SRE13_SHIFT				13
++#define CSRR_SRE13						(_ULCAST_(0x1) << CSRR_SRE13_SHIFT)
++#define CSRR_SRE12_SHIFT				12
++#define CSRR_SRE12						(_ULCAST_(0x1) << CSRR_SRE12_SHIFT)
++#define CSRR_SRE11_SHIFT				11
++#define CSRR_SRE11						(_ULCAST_(0x1) << CSRR_SRE11_SHIFT)
++#define CSRR_SRE10_SHIFT				10
++#define CSRR_SRE10						(_ULCAST_(0x1) << CSRR_SRE10_SHIFT)
++#define CSRR_SRE9_SHIFT					9
++#define CSRR_SRE9						(_ULCAST_(0x1) << CSRR_SRE9_SHIFT)
++#define CSRR_SRE8_SHIFT					8
++#define CSRR_SRE8						(_ULCAST_(0x1) << CSRR_SRE8_SHIFT)
++#define CSRR_SRE7_SHIFT					7
++#define CSRR_SRE7						(_ULCAST_(0x1) << CSRR_SRE7_SHIFT)
++#define CSRR_SRE6_SHIFT					6
++#define CSRR_SRE6						(_ULCAST_(0x1) << CSRR_SRE6_SHIFT)
++#define CSRR_SRE5_SHIFT					5
++#define CSRR_SRE5						(_ULCAST_(0x1) << CSRR_SRE5_SHIFT)
++#define CSRR_SRE4_SHIFT					4
++#define CSRR_SRE4						(_ULCAST_(0x1) << CSRR_SRE4_SHIFT)
++#define CSRR_SRE3_SHIFT					3
++#define CSRR_SRE3						(_ULCAST_(0x1) << CSRR_SRE3_SHIFT)
++#define CSRR_SRE2_SHIFT					2
++#define CSRR_SRE2						(_ULCAST_(0x1) << CSRR_SRE2_SHIFT)
++#define CSRR_SRE1_SHIFT					1
++#define CSRR_SRE1						(_ULCAST_(0x1) << CSRR_SRE1_SHIFT)
++#define CSRR_SRE0_SHIFT					0
++#define CSRR_SRE0						(_ULCAST_(0x1) << CSRR_SRE0_SHIFT)
++
++/* Memory Subsystem Control register */
++#define MSCR_PSEL_SHIFT					24
++#define MSCR_PSEL						(_ULCAST_(0x1) << MSCR_PSEL_SHIFT)
++#define MSCR_L2SIZEQTR_SHIFT			9
++#define MSCR_L2SIZEQTR					(_ULCAST_(0x1) << MSCR_L2SIZEQTR_SHIFT)
++#define MSCR_L2SIZEHALF_SHIFT			8
++#define MSCR_L2SIZEHALF					(_ULCAST_(0x1) << MSCR_L2SIZEHALF_SHIFT)
++#define MSCR_QOSE_SHIFT					3
++#define MSCR_QOSE						(_ULCAST_(0x1) << MSCR_QOSE_SHIFT)
++#define MSCR_DISPFB1_SHIFT				2
++#define MSCR_DISPFB1					(_ULCAST_(0x1) << MSCR_DISPFB1_SHIFT)
++#define MSCR_DISPFB2_SHIFT				1
++#define MSCR_DISPFB2					(_ULCAST_(0x1) << MSCR_DISPFB2_SHIFT)
++#define MSCR_DISL2C_SHIFT				0
++#define MSCR_DISL2C						(_ULCAST_(0x1) << MSCR_DISL2C_SHIFT)
++
++/* Peripheral IRQ Mask register */
++#define PIMR_IM15_SHIFT					15
++#define PIMR_IM15						(_ULCAST_(0x1) << PIMR_IM15_SHIFT)
++#define PIMR_IM14_SHIFT					14
++#define PIMR_IM14						(_ULCAST_(0x1) << PIMR_IM14_SHIFT)
++#define PIMR_IM13_SHIFT					13
++#define PIMR_IM13						(_ULCAST_(0x1) << PIMR_IM13_SHIFT)
++#define PIMR_IM12_SHIFT					12
++#define PIMR_IM12						(_ULCAST_(0x1) << PIMR_IM12_SHIFT)
++#define PIMR_IM11_SHIFT					11
++#define PIMR_IM11						(_ULCAST_(0x1) << PIMR_IM11_SHIFT)
++#define PIMR_IM10_SHIFT					10
++#define PIMR_IM10						(_ULCAST_(0x1) << PIMR_IM10_SHIFT)
++#define PIMR_IM9_SHIFT					9
++#define PIMR_IM9						(_ULCAST_(0x1) << PIMR_IM9_SHIFT)
++#define PIMR_IM8_SHIFT					8
++#define PIMR_IM8						(_ULCAST_(0x1) << PIMR_IM8_SHIFT)
++#define PIMR_IM7_SHIFT					7
++#define PIMR_IM7						(_ULCAST_(0x1) << PIMR_IM7_SHIFT)
++#define PIMR_IM6_SHIFT					6
++#define PIMR_IM6						(_ULCAST_(0x1) << PIMR_IM6_SHIFT)
++#define PIMR_IM5_SHIFT					5
++#define PIMR_IM5						(_ULCAST_(0x1) << PIMR_IM5_SHIFT)
++#define PIMR_IM4_SHIFT					4
++#define PIMR_IM4						(_ULCAST_(0x1) << PIMR_IM4_SHIFT)
++#define PIMR_IM3_SHIFT					3
++#define PIMR_IM3						(_ULCAST_(0x1) << PIMR_IM3_SHIFT)
++#define PIMR_IM2_SHIFT					2
++#define PIMR_IM2						(_ULCAST_(0x1) << PIMR_IM2_SHIFT)
++#define PIMR_IM1_SHIFT					1
++#define PIMR_IM1						(_ULCAST_(0x1) << PIMR_IM1_SHIFT)
++#define PIMR_IM0_SHIFT					0
++#define PIMR_IM0						(_ULCAST_(0x1) << PIMR_IM0_SHIFT)
++
++/* Mailbox IRQ Mask register */
++#define MIMR_IM15_SHIFT					15
++#define MIMR_IM15						(_ULCAST_(0x1) << MIMR_IM15_SHIFT)
++#define MIMR_IM14_SHIFT					14
++#define MIMR_IM14						(_ULCAST_(0x1) << MIMR_IM14_SHIFT)
++#define MIMR_IM13_SHIFT					13
++#define MIMR_IM13						(_ULCAST_(0x1) << MIMR_IM13_SHIFT)
++#define MIMR_IM12_SHIFT					12
++#define MIMR_IM12						(_ULCAST_(0x1) << MIMR_IM12_SHIFT)
++#define MIMR_IM11_SHIFT					11
++#define MIMR_IM11						(_ULCAST_(0x1) << MIMR_IM11_SHIFT)
++#define MIMR_IM10_SHIFT					10
++#define MIMR_IM10						(_ULCAST_(0x1) << MIMR_IM10_SHIFT)
++#define MIMR_IM9_SHIFT					9
++#define MIMR_IM9						(_ULCAST_(0x1) << MIMR_IM9_SHIFT)
++#define MIMR_IM8_SHIFT					8
++#define MIMR_IM8						(_ULCAST_(0x1) << MIMR_IM8_SHIFT)
++#define MIMR_IM7_SHIFT					7
++#define MIMR_IM7						(_ULCAST_(0x1) << MIMR_IM7_SHIFT)
++#define MIMR_IM6_SHIFT					6
++#define MIMR_IM6						(_ULCAST_(0x1) << MIMR_IM6_SHIFT)
++#define MIMR_IM5_SHIFT					5
++#define MIMR_IM5						(_ULCAST_(0x1) << MIMR_IM5_SHIFT)
++#define MIMR_IM4_SHIFT					4
++#define MIMR_IM4						(_ULCAST_(0x1) << MIMR_IM4_SHIFT)
++#define MIMR_IM3_SHIFT					3
++#define MIMR_IM3						(_ULCAST_(0x1) << MIMR_IM3_SHIFT)
++#define MIMR_IM2_SHIFT					2
++#define MIMR_IM2						(_ULCAST_(0x1) << MIMR_IM2_SHIFT)
++#define MIMR_IM1_SHIFT					1
++#define MIMR_IM1						(_ULCAST_(0x1) << MIMR_IM1_SHIFT)
++#define MIMR_IM0_SHIFT					0
++#define MIMR_IM0						(_ULCAST_(0x1) << MIMR_IM0_SHIFT)
++
++/* OST IRQ Mask register */
++#define OIMR_IM15_SHIFT					15
++#define OIMR_IM15						(_ULCAST_(0x1) << OIMR_IM15_SHIFT)
++#define OIMR_IM14_SHIFT					14
++#define OIMR_IM14						(_ULCAST_(0x1) << OIMR_IM14_SHIFT)
++#define OIMR_IM13_SHIFT					13
++#define OIMR_IM13						(_ULCAST_(0x1) << OIMR_IM13_SHIFT)
++#define OIMR_IM12_SHIFT					12
++#define OIMR_IM12						(_ULCAST_(0x1) << OIMR_IM12_SHIFT)
++#define OIMR_IM11_SHIFT					11
++#define OIMR_IM11						(_ULCAST_(0x1) << OIMR_IM11_SHIFT)
++#define OIMR_IM10_SHIFT					10
++#define OIMR_IM10						(_ULCAST_(0x1) << OIMR_IM10_SHIFT)
++#define OIMR_IM9_SHIFT					9
++#define OIMR_IM9						(_ULCAST_(0x1) << OIMR_IM9_SHIFT)
++#define OIMR_IM8_SHIFT					8
++#define OIMR_IM8						(_ULCAST_(0x1) << OIMR_IM8_SHIFT)
++#define OIMR_IM7_SHIFT					7
++#define OIMR_IM7						(_ULCAST_(0x1) << OIMR_IM7_SHIFT)
++#define OIMR_IM6_SHIFT					6
++#define OIMR_IM6						(_ULCAST_(0x1) << OIMR_IM6_SHIFT)
++#define OIMR_IM5_SHIFT					5
++#define OIMR_IM5						(_ULCAST_(0x1) << OIMR_IM5_SHIFT)
++#define OIMR_IM4_SHIFT					4
++#define OIMR_IM4						(_ULCAST_(0x1) << OIMR_IM4_SHIFT)
++#define OIMR_IM3_SHIFT					3
++#define OIMR_IM3						(_ULCAST_(0x1) << OIMR_IM3_SHIFT)
++#define OIMR_IM2_SHIFT					2
++#define OIMR_IM2						(_ULCAST_(0x1) << OIMR_IM2_SHIFT)
++#define OIMR_IM1_SHIFT					1
++#define OIMR_IM1						(_ULCAST_(0x1) << OIMR_IM1_SHIFT)
++#define OIMR_IM0_SHIFT					0
++#define OIMR_IM0						(_ULCAST_(0x1) << OIMR_IM0_SHIFT)
++
++extern void ingenic_smp_init(void);
++extern void ingenic_secondary_cpu_entry(void);
++
++extern void jz4780_smp_wait_irqoff(void);
++extern void jz4780_smp_switch_irqcpu(int cpu);
++
++#endif /* __MIPS_ASM_MACH_INGENIC_SMP_H__ */
+diff --git a/arch/mips/include/asm/mipsregs.h b/arch/mips/include/asm/mipsregs.h
+index 12a095dbf9e2a9c0e5315cb7203fbc0318b27efe..17b6083118caee2b38bc80c566d1943cf66163f9 100644
+--- a/arch/mips/include/asm/mipsregs.h
++++ b/arch/mips/include/asm/mipsregs.h
+@@ -868,10 +868,14 @@
+ #define MIPS_CONF7_AR		(_ULCAST_(1) << 16)
+ 
+ /* Ingenic HPTLB off bits */
+-#define XBURST_PAGECTRL_HPTLB_DIS 0xa9000000
++#define XBURST_PAGECTL_HPTLB_DIS	0xa9000000
+ 
+ /* Ingenic Config7 bits */
+-#define MIPS_CONF7_BTB_LOOP_EN	(_ULCAST_(1) << 4)
++#define XBURST_CONF7_BTB_LOOP_EN	(_ULCAST_(1) << 4)
++
++/* Ingenic ErrCtl bits */
++#define XBURST_ERRCTL_WST_EN		(_ULCAST_(1) << 29)
++#define XBURST_ERRCTL_WST_DIS		(_ULCAST_(0) << 29)
+ 
+ /* Config7 Bits specific to MIPS Technologies. */
+ 
+@@ -2192,8 +2196,10 @@ do {									\
+ #define read_c0_brcm_sleepcount()	__read_32bit_c0_register($22, 7)
+ #define write_c0_brcm_sleepcount(val)	__write_32bit_c0_register($22, 7, val)
+ 
+-/* Ingenic page ctrl register */
+-#define write_c0_page_ctrl(val)	__write_32bit_c0_register($5, 4, val)
++/* Ingenic XBurst SoCs specific registers */
++#define write_c0_ingenic_pagectl(val)	__write_32bit_c0_register($5, 4, val)
++
++#define write_c0_ingenic_errctl(val)	__write_32bit_c0_register($26, 0, val)
+ 
+ /*
+  * Macros to access the guest system control coprocessor
+diff --git a/arch/mips/include/asm/stackframe.h b/arch/mips/include/asm/stackframe.h
+index a13431379073f29ae327935386b7590b61594335..cc795fb187609d715880f8d67c88a619d14d29a8 100644
+--- a/arch/mips/include/asm/stackframe.h
++++ b/arch/mips/include/asm/stackframe.h
+@@ -427,7 +427,7 @@
+ 
+ 		.macro	RESTORE_SP_AND_RET docfi=0
+ 		RESTORE_SP \docfi
+-#if defined(CONFIG_CPU_MIPSR5) || defined(CONFIG_CPU_MIPSR6)
++#ifdef CONFIG_CPU_MIPSR6
+ 		eretnc
+ #else
+ 		.set	push
+diff --git a/arch/mips/ingenic/Makefile b/arch/mips/ingenic/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f90eeed9c533c94337a266de9314abaa65fda25
+--- /dev/null
++++ b/arch/mips/ingenic/Makefile
+@@ -0,0 +1,11 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# Makefile for the Ingenic JZ4740.
++#
++
++# Object file lists.
++CFLAGS_setup.o = -I$(src)/../../../scripts/dtc/libfdt
++
++# SMP support
++obj-$(CONFIG_SMP) += smp.o
++obj-$(CONFIG_SMP) += smp-entry.o
+diff --git a/arch/mips/ingenic/Platform b/arch/mips/ingenic/Platform
+new file mode 100644
+index 0000000000000000000000000000000000000000..1334e8c143ce03d90691d90dc09bf139ba623047
+--- /dev/null
++++ b/arch/mips/ingenic/Platform
+@@ -0,0 +1,2 @@
++load-$(CONFIG_MACH_X1600)	:= 0xffffffff80010000
++load-$(CONFIG_MACH_X2000)	:= 0xffffffff80010000
+diff --git a/arch/mips/ingenic/smp-entry.S b/arch/mips/ingenic/smp-entry.S
+new file mode 100644
+index 0000000000000000000000000000000000000000..7719f548a52add08e33a7e84f03acfadc8fbb43f
+--- /dev/null
++++ b/arch/mips/ingenic/smp-entry.S
+@@ -0,0 +1,64 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Ingenic XBurst SoCs SMP entry point
++ * Copyright (c) 2013 Paul Burton <paul.burton@imgtec.com>
++ * Copyright (c) 2021 周琰杰 (Zhou Yanjie) <zhouyanjie@wanyeetech.com>
++ */
++
++#include <asm/addrspace.h>
++#include <asm/asm.h>
++#include <asm/asmmacro.h>
++#include <asm/cacheops.h>
++#include <asm/cpu.h>
++#include <asm/mipsregs.h>
++
++#define CACHE_SIZE (32 * 1024)
++#define CACHE_LINESIZE 32
++
++.extern ingenic_cpu_entry_sp
++.extern ingenic_cpu_entry_gp
++
++.section .text.smp-entry
++.balign 0x10000
++.set noreorder
++LEAF(ingenic_secondary_cpu_entry)
++	mtc0			zero,			CP0_CAUSE
++
++	li				t0,				ST0_CU0
++	mtc0			t0,				CP0_STATUS
++
++	/* detect prid */
++	mfc0			t0,				CP0_PRID
++	andi			t1,				t0,				PRID_IMP_XBURST2
++	bne				zero,			t1,				2f
++
++	/* cache setup */
++	li				t0,				KSEG0
++	ori				t1,				t0,				CACHE_SIZE
++	mtc0			zero,			CP0_TAGLO,		0
++1:	cache			Index_Store_Tag_I,				0(t0)
++	cache			Index_Store_Tag_D,				0(t0)
++	bne				t0,				t1,				1b
++	addiu			t0,				t0,				CACHE_LINESIZE
++
++	/* kseg0 cache attribute */
++2:	mfc0			t0,				CP0_CONFIG,		0
++	ori				t0,				t0,				CONF_CM_CACHABLE_NONCOHERENT
++	mtc0			t0,				CP0_CONFIG,		0
++
++	/* pagemask */
++	mtc0			zero,			CP0_PAGEMASK,	0
++
++	/* retrieve sp */
++	la				t0,				ingenic_cpu_entry_sp
++	lw				sp,				0(t0)
++
++	/* retrieve gp */
++	la				t0,				ingenic_cpu_entry_gp
++	lw				gp,				0(t0)
++
++	/* jump to the kernel in kseg0 */
++	la				t0,				smp_bootstrap
++	jr				t0
++	nop
++	END(ingenic_secondary_cpu_entry)
+diff --git a/arch/mips/ingenic/smp.c b/arch/mips/ingenic/smp.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..1c28f2a1150a33d5c9bfdf201bf0eb99c143c9fc
+--- /dev/null
++++ b/arch/mips/ingenic/smp.c
+@@ -0,0 +1,748 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Ingenic XBurst SoCs SMP support
++ * Copyright (c) 2013 Paul Burton <paul.burton@imgtec.com>
++ * Copyright (c) 2021 周琰杰 (Zhou Yanjie) <zhouyanjie@wanyeetech.com>
++ */
++
++#include <linux/clk.h>
++#include <linux/cpu.h>
++#include <linux/delay.h>
++#include <linux/interrupt.h>
++#include <linux/of.h>
++#include <linux/sched.h>
++#include <linux/sched/hotplug.h>
++#include <linux/sched/task_stack.h>
++#include <linux/smp.h>
++#include <linux/tick.h>
++
++#include <asm/mach-ingenic/smp.h>
++#include <asm/r4kcache.h>
++#include <asm/smp-ops.h>
++#include <asm/tlbflush.h>
++
++struct ingenic_xburst2_mailbox {
++	void *__iomem *base;
++
++	spinlock_t lock;
++};
++
++u32 ingenic_cpu_entry_sp;
++u32 ingenic_cpu_entry_gp;
++
++static struct ingenic_xburst2_mailbox __percpu *ingenic_xburst2_mailbox;
++
++static struct clk *cpu_clock_gates[CONFIG_NR_CPUS] = { NULL };
++
++static struct cpumask cpu_running;
++
++static DEFINE_SPINLOCK(smp_lock);
++
++#define XBURST_TAGLO_DIRTY_MASK	0xc
++
++static inline __always_inline notrace void ingenic_wback_dcache(void)
++{
++	unsigned long start = INDEX_BASE;
++	unsigned long end = start + current_cpu_data.dcache.waysize;
++	unsigned long ws_inc = 1UL << current_cpu_data.dcache.waybit;
++	unsigned long ws_end =
++		current_cpu_data.dcache.ways << current_cpu_data.dcache.waybit;
++	unsigned long ws, addr, tmp;
++
++	/*
++	 * Doing a writeback/invalidate on the whole cache has a significant
++	 * performance cost. In this loop we instead only writeback/invalidate
++	 * cache lines which are marked dirty. To do this we load the tag at
++	 * each index and check the (Ingenic-specific) dirty bits, and only
++	 * perform the operation if they are set. There is still a performance
++	 * cost to this but it is nowhere near as high as blasting the whole
++	 * cache.
++	 */
++	for (ws = 0; ws < ws_end; ws += ws_inc) {
++		for (addr = start; addr < end; addr += 0x80) {
++			__asm__ __volatile__ (
++			"	.set	push							\n"
++			"	.set	noreorder						\n"
++			"	.set	mips32r2						\n"
++			"	cache	%2, 0x00(%1)					\n"
++			"	mfc0	%0, "__stringify(CP0_TAGLO)"	\n"
++			"	and		%0, %0, %3						\n"
++			"	beq		$0, %0, 1f						\n"
++			"	cache	%2, 0x20(%1)					\n"
++			"	cache	%4, 0x00(%1)					\n"
++			"1:	mfc0	%0, "__stringify(CP0_TAGLO)"	\n"
++			"	and		%0, %0, %3						\n"
++			"	beq		$0, %0, 2f						\n"
++			"	cache	%2, 0x40(%1)					\n"
++			"	cache	%4, 0x20(%1)					\n"
++			"2:	mfc0	%0, "__stringify(CP0_TAGLO)"	\n"
++			"	and		%0, %0, %3						\n"
++			"	beq		$0, %0, 3f						\n"
++			"	cache	%2, 0x60(%1)					\n"
++			"	cache	%4, 0x40(%1)					\n"
++			"3:	mfc0	%0, "__stringify(CP0_TAGLO)"	\n"
++			"	and		%0, %0, %3						\n"
++			"	beq		$0, %0, 4f						\n"
++			"	nop										\n"
++			"	cache	%4, 0x60(%1)					\n"
++			"4:	.set	pop								\n"
++
++			:	"=&r"	(tmp)
++			:	"r"		(addr | ws),
++				"i"		(Index_Load_Tag_D),
++				"i"		(XBURST_TAGLO_DIRTY_MASK),
++				"i"		(Index_Writeback_Inv_D));
++		}
++	}
++}
++
++/*
++ * The Ingenic XBurst SMP variant has to write back dirty cache lines before
++ * executing wait. The CPU & cache clock will be gated until we return from
++ * the wait, and if another core attempts to access data from our data cache
++ * during this time then it will lock up.
++ */
++void jz4780_smp_wait_irqoff(void)
++{
++	unsigned long pending = read_c0_cause() & read_c0_status() & CAUSEF_IP;
++
++	/*
++	 * Going to idle has a significant overhead due to the cache flush so
++	 * try to avoid it if we'll immediately be woken again due to an IRQ.
++	 */
++	if (!need_resched() && !pending) {
++		ingenic_wback_dcache();
++
++		__asm__ __volatile__ (
++		"	.set push		\n"
++		"	.set mips32r2	\n"
++		"	sync			\n"
++		"	wait			\n"
++		"	.set pop		\n");
++	}
++
++	local_irq_enable();
++}
++
++void jz4780_smp_switch_irqcpu(int cpu)
++{
++	int status;
++
++	spin_lock(&smp_lock);
++
++	if (cpu_online(!cpu)) {
++		status = read_c0_reim();
++		status &= ~(REIM_IRQ1M | REIM_IRQ0M);
++		status |= REIM_IRQ0M << (!cpu);
++		write_c0_reim(status);
++	}
++
++	spin_unlock(&smp_lock);
++}
++
++static irqreturn_t ingenic_xburst_mbox_handler(int irq, void *dev_id)
++{
++	int cpu = smp_processor_id();
++	u32 action, status;
++
++	spin_lock(&smp_lock);
++
++	switch (cpu) {
++	case 0:
++		action = read_c0_mailbox0();
++		write_c0_mailbox0(0);
++		break;
++	case 1:
++		action = read_c0_mailbox1();
++		write_c0_mailbox1(0);
++		break;
++	case 2:
++		action = read_c0_mailbox2();
++		write_c0_mailbox2(0);
++		break;
++	case 3:
++		action = read_c0_mailbox3();
++		write_c0_mailbox3(0);
++		break;
++	default:
++		panic("Unhandled CPU %d!", cpu);
++	}
++
++	/* clear pending mailbox interrupt */
++	status = read_c0_corestatus();
++	status &= ~(CORESTATUS_MIRQ0P << cpu);
++	write_c0_corestatus(status);
++
++	spin_unlock(&smp_lock);
++
++	if (action & SMP_RESCHEDULE_YOURSELF)
++		scheduler_ipi();
++	if (action & SMP_CALL_FUNCTION)
++		generic_smp_call_function_interrupt();
++
++	return IRQ_HANDLED;
++}
++
++static irqreturn_t ingenic_xburst2_mbox_handler(int irq, void *dev_id)
++{
++	struct ingenic_xburst2_mailbox *mailbox = dev_id;
++	unsigned int action = 0;
++
++	spin_lock(&mailbox->lock);
++	action = readl(mailbox->base);
++	writel(0, mailbox->base);
++	spin_unlock(&mailbox->lock);
++
++	if (!action) {
++		pr_err("SMP[%d]:invalid mailboxes action is NULL\n",smp_processor_id());
++		goto ipi_finish;
++	}
++
++	if (action & SMP_RESCHEDULE_YOURSELF)
++		scheduler_ipi();
++	if (action & SMP_CALL_FUNCTION)
++		generic_smp_call_function_interrupt();
++
++ipi_finish:
++	return IRQ_HANDLED;
++}
++
++static void ingenic_smp_setup(void)
++{
++	struct device_node *cpu_node;
++	u32 addr = KSEG1ADDR((u32)&ingenic_secondary_cpu_entry);
++	int cpu = 0;
++	u32 val;
++
++	for_each_of_cpu_node(cpu_node) {
++		__cpu_number_map[cpu] = cpu;
++		__cpu_logical_map[cpu] = cpu;
++		set_cpu_possible(cpu++, true);
++	}
++
++	switch (current_cpu_type()) {
++	case CPU_XBURST:
++
++		/* mask mailbox interrupts for this core */
++		val = read_c0_reim();
++		val &= ~REIM_MBOXIRQ0M;
++		write_c0_reim(val);
++
++		/* clear mailboxes & pending mailbox IRQs */
++		write_c0_mailbox0(0);
++		write_c0_mailbox1(0);
++		write_c0_mailbox2(0);
++		write_c0_mailbox3(0);
++		write_c0_corestatus(0);
++
++		/* set reset entry point */
++		WARN_ON(addr & ~REIM_ENTRY);
++		val &= ~REIM_ENTRY;
++		val |= addr & REIM_ENTRY;
++
++		/* unmask mailbox interrupts for this core */
++		val |= REIM_MBOXIRQ0M;
++		write_c0_reim(val);
++		break;
++	case CPU_XBURST2:
++
++		/* declare we are SMT capable */
++		smp_num_siblings = 2;
++
++		/* mask mailbox interrupts for this core */
++		val = read_ccu_mimr();
++		val &= ~MIMR_IM0;
++		write_ccu_mimr(val);
++
++		/* clear mailboxes */
++		write_ccu_mbr0(0);
++		write_ccu_mbr1(0);
++		write_ccu_mbr2(0);
++		write_ccu_mbr3(0);
++
++		/* set reset entry point */
++		write_ccu_rer(addr);
++
++		/* unmask mailbox interrupts for this core */
++		val |= MIMR_IM0;
++		write_ccu_mimr(val);
++		break;
++	default:
++		panic("Unknown Ingenic CPU type.");
++	}
++
++	set_c0_status(STATUSF_IP3);
++
++	cpumask_set_cpu(cpu, &cpu_running);
++}
++
++static void ingenic_xburst_smp_prepare_cpus(unsigned int max_cpus)
++{
++	struct device_node *cpu_node;
++	unsigned ctrl;
++	int cpu, err;
++
++	/* setup the mailbox IRQ */
++	err = request_irq(MIPS_CPU_IRQ_BASE + 3, ingenic_xburst_mbox_handler,
++			IRQF_PERCPU | IRQF_NO_THREAD, "core mailbox", NULL);
++	if (err)
++		pr_err("request_irq() on core mailbox failed\n");
++
++	ctrl = read_c0_corectrl();
++
++	for_each_of_cpu_node(cpu_node) {
++		cpu = of_cpu_node_to_id(cpu_node);
++		if (cpu < 0) {
++			pr_err("Failed to read index of %s\n", cpu_node->full_name);
++			continue;
++		}
++
++		/* use reset entry point from REIM register */
++		ctrl |= CORECTRL_RPC0 << cpu;
++
++		cpu_clock_gates[cpu] = of_clk_get(cpu_node, 0);
++		if (IS_ERR(cpu_clock_gates[cpu])) {
++			cpu_clock_gates[cpu] = NULL;
++			continue;
++		}
++	}
++
++	write_c0_corectrl(ctrl);
++}
++
++static void ingenic_xburst2_prepare_cpus(unsigned int max_cpus)
++{
++	struct device_node *cpu_node;
++	struct ingenic_xburst2_mailbox *mailbox;
++	unsigned pimr, oimr;
++	int cpu, err;
++
++	ingenic_xburst2_mailbox = alloc_percpu(struct ingenic_xburst2_mailbox);
++	if(!ingenic_xburst2_mailbox)
++		pr_err("Failed to alloc percpu mailbox\n");
++
++	/* setup the mailbox IRQ */
++	err = request_percpu_irq(MIPS_CPU_IRQ_BASE + 3, ingenic_xburst2_mbox_handler,
++			"core mailbox", ingenic_xburst2_mailbox);
++	if (err)
++		pr_err("request_percpu_irq() on core mailbox failed\n");
++
++	pimr = read_ccu_pimr();
++	oimr = read_ccu_oimr();
++
++	for_each_of_cpu_node(cpu_node) {
++		cpu = of_cpu_node_to_id(cpu_node);
++		if (cpu < 0) {
++			pr_err("Failed to read index of %s\n", cpu_node->full_name);
++			continue;
++		}
++
++		/* unmask peripheral and OST interrupts for each core */
++		pimr |= PIMR_IM0 << cpu;
++		oimr |= OIMR_IM0 << cpu;
++
++		mailbox = per_cpu_ptr(ingenic_xburst2_mailbox, cpu);
++
++		mailbox->base = CCU_MAILBOX_BASE + cpu * 4;
++
++		enable_percpu_irq(MIPS_CPU_IRQ_BASE + 3, IRQ_TYPE_NONE);
++
++		spin_lock_init(&mailbox->lock);
++
++		cpu_clock_gates[cpu] = of_clk_get(cpu_node, 0);
++		if (IS_ERR(cpu_clock_gates[cpu])) {
++			cpu_clock_gates[cpu] = NULL;
++			continue;
++		}
++	}
++
++	write_ccu_pimr(pimr);
++	write_ccu_oimr(oimr);
++}
++
++/*
++ * Tell the hardware to boot CPUx, runs on CPU0.
++ */
++static int ingenic_boot_secondary(int cpu, struct task_struct *idle)
++{
++	unsigned long flags;
++	int err;
++	u32 val;
++
++	spin_lock_irqsave(&smp_lock, flags);
++
++	/* ensure the core is in reset */
++	switch (current_cpu_type()) {
++	case CPU_XBURST:
++		val = read_c0_corectrl();
++		val |= CORECTRL_SWRST0 << cpu;
++		write_c0_corectrl(val);
++		break;
++	case CPU_XBURST2:
++		val = read_ccu_csrr();
++		val |= CSRR_SRE0 << cpu;
++		write_ccu_csrr(val);
++		break;
++	default:
++		panic("Unknown Ingenic CPU type.");
++	}
++
++	/* ungate core clock */
++	if (cpu_clock_gates[cpu]) {
++		err = clk_prepare(cpu_clock_gates[cpu]);
++		if (err)
++			pr_err("Failed to prepare CPU clock gate\n");
++
++		err = clk_enable(cpu_clock_gates[cpu]);
++		if (err)
++			pr_err("Failed to ungate core clock\n");
++	}
++
++	/* set entry sp/gp register values */
++	ingenic_cpu_entry_sp = __KSTK_TOS(idle);
++	ingenic_cpu_entry_gp = (u32)task_thread_info(idle);
++	smp_wmb();
++
++	/* take the core out of reset */
++	switch (current_cpu_type()) {
++	case CPU_XBURST:
++		val &= ~(CORECTRL_SWRST0 << cpu);
++		write_c0_corectrl(val);
++		break;
++	case CPU_XBURST2:
++		val &= ~(CSRR_SRE0 << cpu);
++		write_ccu_csrr(val);
++		break;
++	default:
++		panic("Unknown Ingenic CPU type.");
++	}
++
++	cpumask_set_cpu(cpu, &cpu_running);
++
++	spin_unlock_irqrestore(&smp_lock, flags);
++
++	return 0;
++}
++
++/*
++ * Early setup, runs on secondary CPU after cache probe.
++ */
++static void ingenic_init_secondary(void)
++{
++	int cpu = smp_processor_id();
++
++	switch (current_cpu_type()) {
++	case CPU_XBURST:
++		break;
++	case CPU_XBURST2:
++		cpu_set_core(&current_cpu_data, cpu_logical_map(cpu) / INGENIC_XBURST2_THREADS_PER_CORE);
++		break;
++	default:
++		panic("Unknown Ingenic CPU type.");
++	}
++}
++
++/*
++ * Late setup, runs on secondary CPU before entering the idle loop.
++ */
++static void ingenic_smp_finish(void)
++{
++	int cpu = smp_processor_id();
++	u32 val;
++
++	spin_lock(&smp_lock);
++
++	/* unmask mailbox interrupts for this core */
++	switch (current_cpu_type()) {
++	case CPU_XBURST:
++		val = read_c0_reim();
++		val |= REIM_MBOXIRQ0M << cpu;
++		write_c0_reim(val);
++		break;
++	case CPU_XBURST2:
++		val = read_ccu_mimr();
++		val |= MIMR_IM0 << cpu;
++		write_ccu_mimr(val);
++		break;
++	default:
++		panic("Unknown Ingenic CPU type.");
++	}
++
++	spin_unlock(&smp_lock);
++
++	/* unmask interrupts for this core */
++	change_c0_status(ST0_IM, STATUSF_IP4 | STATUSF_IP3 |
++			STATUSF_IP2 | STATUSF_IP1 | STATUSF_IP0);
++
++	/* force broadcast timer */
++	tick_broadcast_force();
++}
++
++static void ingenic_xburst_send_ipi_single_locked(int cpu, unsigned int action)
++{
++	u32 mbox;
++
++	switch (cpu) {
++	case 0:
++		mbox = read_c0_mailbox0();
++		write_c0_mailbox0(mbox | action);
++		break;
++	case 1:
++		mbox = read_c0_mailbox1();
++		write_c0_mailbox1(mbox | action);
++		break;
++	case 2:
++		mbox = read_c0_mailbox2();
++		write_c0_mailbox2(mbox | action);
++		break;
++	case 3:
++		mbox = read_c0_mailbox3();
++		write_c0_mailbox3(mbox | action);
++		break;
++	default:
++		panic("Unhandled CPU %d!", cpu);
++	}
++}
++
++static void ingenic_xburst_send_ipi_single(int cpu, unsigned int action)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&smp_lock, flags);
++	ingenic_xburst_send_ipi_single_locked(cpu, action);
++	spin_unlock_irqrestore(&smp_lock, flags);
++}
++
++static void ingenic_xburst2_send_ipi_single(int cpu, unsigned int action)
++{
++	struct ingenic_xburst2_mailbox *mailbox = per_cpu_ptr(ingenic_xburst2_mailbox, cpu);
++	unsigned int val;
++	unsigned long flags;
++
++	spin_lock_irqsave(&mailbox->lock, flags);
++	val = readl(mailbox->base);
++	writel(action | val, mailbox->base);
++	spin_unlock_irqrestore(&mailbox->lock, flags);
++}
++
++static void ingenic_xburst_send_ipi_mask(const struct cpumask *mask,
++				 unsigned int action)
++{
++	int cpu;
++
++	for_each_cpu(cpu, mask)
++		ingenic_xburst_send_ipi_single(cpu, action);
++}
++
++static void ingenic_xburst2_send_ipi_mask(const struct cpumask *mask,
++				 unsigned int action)
++{
++	int cpu;
++
++	for_each_cpu(cpu, mask)
++		ingenic_xburst2_send_ipi_single(cpu, action);
++}
++
++#ifdef CONFIG_HOTPLUG_CPU
++static int ingenic_cpu_disable(void)
++{
++	int cpu = smp_processor_id();
++	unsigned int val;
++
++	local_irq_disable();
++
++	set_cpu_online(cpu, false);
++	calculate_cpu_foreign_map();
++
++	spin_lock(&smp_lock);
++
++	switch (current_cpu_type()) {
++	case CPU_XBURST:
++		val = read_c0_reim();
++		if (val & (REIM_IRQ0M << cpu)) {
++			val &= ~(REIM_IRQ0M << cpu);
++			val |= REIM_IRQ0M; /* peripheral irq to cpu0 */
++			write_c0_reim(val);
++		}
++
++		break;
++	case CPU_XBURST2:
++		val = read_ccu_pimr();
++		if (val & (PIMR_IM0 << cpu)) {
++			val &= ~(PIMR_IM0 << cpu);
++			val |= (PIMR_IM0); /* peripheral irq to cpu0 */
++			write_ccu_pimr(val);
++		}
++
++		val = read_ccu_oimr();
++		if (val & (OIMR_IM0 << cpu)) {
++			val &= ~(OIMR_IM0 << cpu);
++			val |= (OIMR_IM0); /* OST irq to cpu0 */
++			write_ccu_oimr(val);
++		}
++
++		break;
++	default:
++		panic("Unknown Ingenic CPU type.");
++	}
++
++	spin_unlock(&smp_lock);
++
++	clear_tasks_mm_cpumask(cpu);
++
++	return 0;
++}
++
++static void ingenic_cpu_die(unsigned int cpu)
++{
++	unsigned long flags;
++	unsigned int val;
++
++	local_irq_save(flags);
++
++	cpumask_clear_cpu(cpu, &cpu_running);
++
++	wmb();
++
++	switch (current_cpu_type()) {
++	case CPU_XBURST:
++		while (!(read_c0_corestatus() & (CORESTATUS_SLEEP0 << cpu)));
++
++		val = read_c0_corectrl();
++		val |= CORECTRL_SWRST0 << cpu;
++		write_c0_corectrl(val);
++		break;
++	case CPU_XBURST2:
++		while (!(read_ccu_cssr() & (CSSR_SS0 << cpu)));
++
++		val = read_ccu_csrr();
++		val |= CSRR_SRE0 << cpu;
++		write_ccu_csrr(val);
++		break;
++	default:
++		panic("Unknown Ingenic CPU type.");
++	}
++
++	clk_disable_unprepare(cpu_clock_gates[cpu]);
++
++	local_irq_restore(flags);
++}
++
++static void __ingenic_play_dead(void)
++{
++	__asm__ __volatile__ (
++	"	.set	push		\n"
++	"	.set	mips32r2	\n"
++	"	sync				\n"
++	"	wait				\n"
++	"	.set	pop			\n");
++}
++
++static void ingenic_xburst_play_dead(void) {
++	void (*do_play_dead)(void) = (void *)KSEG1ADDR(__ingenic_play_dead);
++	int cpu = smp_processor_id();
++
++	local_irq_disable();
++
++	switch (cpu) {
++	case 0:
++		write_c0_mailbox0(0);
++		break;
++	case 1:
++		write_c0_mailbox1(0);
++		break;
++	}
++
++	smp_clr_pending(CORESTATUS_MIRQ0P << cpu);
++
++	while(1) {
++		while(cpumask_test_cpu(cpu, &cpu_running))
++			;
++		blast_icache32();
++		blast_dcache32();
++
++		do_play_dead();
++	}
++}
++
++static void ingenic_xburst2_play_dead(void)
++{
++	void (*do_play_dead)(void) = (void *)KSEG1ADDR(__ingenic_play_dead);
++	int cpu = smp_processor_id();
++	unsigned int val;
++
++	val = read_ccu_mimr();
++	val &= ~(MIMR_IM0 << cpu);
++	write_ccu_mimr(val);
++	idle_task_exit();
++	local_irq_disable();
++	local_flush_tlb_all();
++
++	/* isn't smt thread core */
++	if(!cpu_online(((cpu + 1) & 1) | (cpu & (~1))))
++		blast_dcache32();
++
++	do_play_dead();
++
++	pr_err("ERROR:SMP[%d]: shouldn't run here.", cpu);
++
++	while(1)
++		do_play_dead();
++}
++
++void play_dead(void)
++{
++	switch (current_cpu_type()) {
++	case CPU_XBURST:
++		ingenic_xburst_play_dead();
++		break;
++	case CPU_XBURST2:
++		ingenic_xburst2_play_dead();
++		break;
++	default:
++		panic("Unknown Ingenic CPU type.");
++	}
++}
++#endif
++
++static struct plat_smp_ops ingenic_xburst_smp_ops = {
++	.send_ipi_single	= ingenic_xburst_send_ipi_single,
++	.send_ipi_mask		= ingenic_xburst_send_ipi_mask,
++	.init_secondary		= ingenic_init_secondary,
++	.smp_finish			= ingenic_smp_finish,
++	.boot_secondary		= ingenic_boot_secondary,
++	.smp_setup			= ingenic_smp_setup,
++	.prepare_cpus		= ingenic_xburst_smp_prepare_cpus,
++#ifdef CONFIG_HOTPLUG_CPU
++	.cpu_disable		= ingenic_cpu_disable,
++	.cpu_die			= ingenic_cpu_die,
++#endif
++};
++
++struct plat_smp_ops ingenic_xburst2_smp_ops = {
++	.send_ipi_single	= ingenic_xburst2_send_ipi_single,
++	.send_ipi_mask		= ingenic_xburst2_send_ipi_mask,
++	.init_secondary		= ingenic_init_secondary,
++	.smp_finish			= ingenic_smp_finish,
++	.boot_secondary		= ingenic_boot_secondary,
++	.smp_setup			= ingenic_smp_setup,
++	.prepare_cpus		= ingenic_xburst2_prepare_cpus,
++#ifdef CONFIG_HOTPLUG_CPU
++	.cpu_disable		= ingenic_cpu_disable,
++	.cpu_die			= ingenic_cpu_die,
++#endif
++};
++
++void __init ingenic_smp_init(void)
++{
++	switch (current_cpu_type()) {
++	case CPU_XBURST:
++		register_smp_ops(&ingenic_xburst_smp_ops);
++		break;
++	case CPU_XBURST2:
++		register_smp_ops(&ingenic_xburst2_smp_ops);
++		break;
++	default:
++		panic("Unknown Ingenic CPU type.");
++	}
++}
+diff --git a/arch/mips/kernel/cpu-probe.c b/arch/mips/kernel/cpu-probe.c
+index 489612ed9d498719ec0515ebc59d655d129d5c4b..bf4f8df90a0f50e98168ff8d01df3e21bc0c6b81 100644
+--- a/arch/mips/kernel/cpu-probe.c
++++ b/arch/mips/kernel/cpu-probe.c
+@@ -569,7 +569,8 @@ static inline unsigned int decode_config4(struct cpuinfo_mips *c)
+ 	config4 = read_c0_config4();
+ 
+ 	if (cpu_has_tlb) {
+-		if (((config4 & MIPS_CONF4_IE) >> 29) == 2)
++		if (((config4 & MIPS_CONF4_IE) >> 29) == 2 ||
++				((config4 & MIPS_CONF4_IE) >> 29) == 3)
+ 			c->options |= MIPS_CPU_TLBINV;
+ 
+ 		/*
+@@ -1763,21 +1764,25 @@ static inline void cpu_probe_ingenic(struct cpuinfo_mips *c, unsigned int cpu)
+ 	c->options &= ~MIPS_CPU_COUNTER;
+ 	BUG_ON(__builtin_constant_p(cpu_has_counter) && cpu_has_counter);
+ 
+-	/* XBurst has virtually tagged icache */
+-	c->icache.flags |= MIPS_CACHE_VTAG;
+-
+ 	switch (c->processor_id & PRID_IMP_MASK) {
+ 
++	/* XBurst®1 with ISA */
++	case PRID_IMP_XBURST:
++		c->cputype = CPU_XBURST;
++		c->writecombine = _CACHE_UNCACHED_ACCELERATED;
++		__cpu_name[cpu] = "Ingenic XBurst";
++		break;
++
+ 	/* XBurst®1 with MXU1.0/MXU1.1 SIMD ISA */
+ 	case PRID_IMP_XBURST_REV1:
+ 
+ 		/*
+-		 * The XBurst core by default attempts to avoid branch target
++		 * The XBurst®1 core by default attempts to avoid branch target
+ 		 * buffer lookups by detecting & special casing loops. This
+ 		 * feature will cause BogoMIPS and lpj calculate in error.
+ 		 * Set cp0 config7 bit 4 to disable this feature.
+ 		 */
+-		set_c0_config7(MIPS_CONF7_BTB_LOOP_EN);
++		set_c0_config7(XBURST_CONF7_BTB_LOOP_EN);
+ 
+ 		switch (c->processor_id & PRID_COMP_MASK) {
+ 
+@@ -1806,7 +1811,7 @@ static inline void cpu_probe_ingenic(struct cpuinfo_mips *c, unsigned int cpu)
+ 		 * getting stuck.
+ 		 */
+ 		case PRID_COMP_INGENIC_D1:
+-			write_c0_page_ctrl(XBURST_PAGECTRL_HPTLB_DIS);
++			write_c0_ingenic_pagectl(XBURST_PAGECTL_HPTLB_DIS);
+ 			break;
+ 
+ 		default:
+@@ -1824,10 +1829,17 @@ static inline void cpu_probe_ingenic(struct cpuinfo_mips *c, unsigned int cpu)
+ 
+ 	/* XBurst®2 with MXU2.1 SIMD ISA */
+ 	case PRID_IMP_XBURST2:
+-		c->cputype = CPU_XBURST;
++		c->cputype = CPU_XBURST2;
+ 		__cpu_name[cpu] = "Ingenic XBurst II";
+ 		break;
+ 
++	/* XBurst®2 with MXU3.0 SIMD ISA */
++	case PRID_IMP_XBURST2_R2:
++		c->cputype = CPU_XBURST2;
++		c->writecombine = _CACHE_UNCACHED_ACCELERATED;
++		__cpu_name[cpu] = "Ingenic XBurst II R2";
++		break;
++
+ 	default:
+ 		panic("Unknown Ingenic Processor ID!");
+ 		break;
+diff --git a/arch/mips/kernel/idle.c b/arch/mips/kernel/idle.c
+index 80e8a04a642e05a69c13b88c66b82d23c369055e..92e6104edb1231dba50a6b85e18c850c4cdae9f9 100644
+--- a/arch/mips/kernel/idle.c
++++ b/arch/mips/kernel/idle.c
+@@ -18,6 +18,7 @@
+ #include <asm/cpu-type.h>
+ #include <asm/idle.h>
+ #include <asm/mipsregs.h>
++#include <asm/mach-ingenic/smp.h>
+ 
+ /*
+  * Not all of the MIPS CPUs have the "wait" instruction available. Moreover,
+@@ -156,8 +157,10 @@ void __init check_wait(void)
+ 	case CPU_CAVIUM_OCTEON_PLUS:
+ 	case CPU_CAVIUM_OCTEON2:
+ 	case CPU_CAVIUM_OCTEON3:
+-	case CPU_XBURST:
+ 	case CPU_LOONGSON32:
++	case CPU_XBURST2:
++//	case CPU_XLR:
++//	case CPU_XLP:
+ 		cpu_wait = r4k_wait;
+ 		break;
+ 	case CPU_LOONGSON64:
+@@ -205,6 +208,12 @@ void __init check_wait(void)
+ 			cpu_wait = r4k_wait_irqoff;
+ 		break;
+ 
++	case CPU_XBURST:
++		cpu_wait = r4k_wait;
++		if (IS_ENABLED(CONFIG_MACH_INGENIC) && IS_ENABLED(CONFIG_SMP))
++			cpu_wait = jz4780_smp_wait_irqoff;
++		break;
++
+ 	case CPU_TX49XX:
+ 		cpu_wait = r4k_wait_irqoff;
+ 		break;
+diff --git a/arch/mips/kernel/traps.c b/arch/mips/kernel/traps.c
+index 8ec1e185b35ce007966b0d27163231654eca3f0b..7ab927103e7c77f02aa4430e98dd5811c2867dc4 100644
+--- a/arch/mips/kernel/traps.c
++++ b/arch/mips/kernel/traps.c
+@@ -509,6 +509,12 @@ asmlinkage void do_be(struct pt_regs *regs)
+ #define SC     0xe0000000
+ #define SPEC0  0x00000000
+ #define SPEC3  0x7c000000
++#define SPEC3_EXT    0x00
++#define SPEC3_INS    0x04
++#define SPEC3_BSHFL  0x20
++#define SPEC3_WSBH   0x02
++#define SPEC3_SEB    0x10
++#define SPEC3_SEH    0x18
+ #define RD     0x0000f800
+ #define FUNC   0x0000003f
+ #define SYNC   0x0000000f
+@@ -707,6 +713,128 @@ static int simulate_sync(struct pt_regs *regs, unsigned int opcode)
+ 	return -1;			/* Must be something else ... */
+ }
+ 
++/*
++ * simulate MIPS R2 instructions on R1 used e.g. by Debian >= 9
++ */
++static int simulate_spec3(struct pt_regs *regs, unsigned int opcode)
++{
++	int lsb, msb, msbd;
++	int rs, rt, rd;
++	u32 mask, value;
++	int subop;
++
++	if ((opcode & OPCODE) != SPEC3)
++		return -1;
++
++	switch (opcode & FUNC) {
++	case SPEC3_EXT:
++		lsb = (opcode & GENMASK(10,6)) >> 6;
++		msbd = (opcode & RD) >> 11;
++		rt = (opcode & RT) >> 16;
++		rs = (opcode & BASE) >> 21;
++		mask = GENMASK(lsb+msbd, lsb);
++
++		perf_sw_event(PERF_COUNT_SW_EMULATION_FAULTS,
++			1, regs, 0);
++
++		regs->regs[rt] = (regs->regs[rs] & mask) >> lsb;
++
++		return 0;
++	case SPEC3_INS:
++		lsb = (opcode & GENMASK(10,6)) >> 6;
++		msb = (opcode & RD) >> 11;
++		rt = (opcode & RT) >> 16;
++		rs = (opcode & BASE) >> 21;
++		mask = GENMASK(msb, lsb);
++
++		perf_sw_event(PERF_COUNT_SW_EMULATION_FAULTS,
++			1, regs, 0);
++
++		value = regs->regs[rt] & ~mask;
++		value |= (regs->regs[rs] << lsb) & mask;
++		regs->regs[rt] = value;
++
++		return 0;
++	case SPEC3_BSHFL:
++		subop = (opcode & GENMASK(10,6)) >> 6;
++
++		switch (subop) {
++		case SPEC3_WSBH:
++			rd = (opcode & RD) >> 11;
++			rt = (opcode & RT) >> 16;
++
++			perf_sw_event(PERF_COUNT_SW_EMULATION_FAULTS,
++				1, regs, 0);
++
++			regs->regs[rt] = ((regs->regs[rd] << 8) & 0xff00ff00) |
++					 ((regs->regs[rd] >> 8) & 0x00ff00ff);
++
++			return 0;
++		case SPEC3_SEB:
++			rd = (opcode & RD) >> 11;
++			rt = (opcode & RT) >> 16;
++
++			perf_sw_event(PERF_COUNT_SW_EMULATION_FAULTS,
++				1, regs, 0);
++
++#if 1	// VARIANT 1
++			/* some compilers might emit another SEB instruction */
++			regs->regs[rt] = (s8) regs->regs[rd];
++#elif 0	// VARIANT 2
++			__asm__ __volatile__(
++				"sll     %0,%1,0x18\n"
++				"sra     %0,%0,0x18\n"
++				: "=r"(regs->regs[rt])
++				: "r"(regs->regs[rd])
++				);
++#else	// VARIANT 3
++			/*
++			 * define in a way that it is unlikely the kernel (cross)
++			 * compiler detects optimization into another SEB instruction
++			 */
++			value = regs->regs[rd];
++			regs->regs[rt] = (value & 0x80) ?
++							 (value | ~0x0000007f) :
++							 (value & 0x000000ff);
++#endif
++
++			return 0;
++		case SPEC3_SEH:
++			rd = (opcode & RD) >> 11;
++			rt = (opcode & RT) >> 16;
++
++			perf_sw_event(PERF_COUNT_SW_EMULATION_FAULTS,
++				1, regs, 0);
++
++#if 1	// VARIANT 1
++			/* some compilers might emit another SEH instruction */
++			regs->regs[rt] = (s16) regs->regs[rd];
++#elif 0	// VARIANT 2
++			__asm__ __volatile__(
++				"sll     %0,%1,0x10\n"
++				"sra     %0,%0,0x10\n"
++				: "=r"(regs->regs[rt])
++				: "r"(regs->regs[rd])
++				);
++#else	// VARIANT 3
++			/*
++			 * define in a way that it is unlikely the kernel (cross)
++			 * compiler detects optimization into another SEB instruction
++			 */
++			value = regs->regs[rd];
++			regs->regs[rt] = (value & 0x8000) ?
++							 (value | ~0x00007fff) :
++							 (value & 0x0000ffff);
++#endif
++
++			return 0;
++		}
++	}
++
++	/* Not ours.  */
++	return -1;
++}
++
+ /*
+  * Loongson-3 CSR instructions emulation
+  */
+@@ -1204,6 +1332,9 @@ asmlinkage void do_ri(struct pt_regs *regs)
+ 		if (!cpu_has_llsc && status < 0)
+ 			status = simulate_llsc(regs, opcode);
+ 
++		if (status < 0)
++			status = simulate_spec3(regs, opcode);
++
+ 		if (status < 0)
+ 			status = simulate_rdhwr_normal(regs, opcode);
+ 
+diff --git a/arch/mips/mm/Makefile b/arch/mips/mm/Makefile
+index 304692391519d305636338e3dbcc980f8d4e665b..147baf047fd6b3ec77c422ca58df59d647a086e1 100644
+--- a/arch/mips/mm/Makefile
++++ b/arch/mips/mm/Makefile
+@@ -37,6 +37,7 @@ obj-$(CONFIG_CPU_R4K_CACHE_TLB) += c-r4k.o cex-gen.o tlb-r4k.o
+ obj-$(CONFIG_CPU_R3000)		+= c-r3k.o
+ obj-$(CONFIG_CPU_SB1)		+= c-r4k.o cerr-sb1.o cex-sb1.o tlb-r4k.o
+ obj-$(CONFIG_CPU_CAVIUM_OCTEON) += c-octeon.o cex-oct.o tlb-r4k.o
++obj-$(CONFIG_MACH_INGENIC) += c-ingenic.o cex-gen.o tlb-r4k.o
+ 
+ obj-$(CONFIG_IP22_CPU_SCACHE)	+= sc-ip22.o
+ obj-$(CONFIG_R5000_CPU_SCACHE)	+= sc-r5k.o
+diff --git a/arch/mips/mm/c-ingenic.c b/arch/mips/mm/c-ingenic.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..96b66c8d912d37a4ca6fa34c3bcaa00b1ed84fad
+--- /dev/null
++++ b/arch/mips/mm/c-ingenic.c
+@@ -0,0 +1,506 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Ingenic XBurst SoCs specific cache driver
++ * Copyright (c) 2020 周琰杰 (Zhou Yanjie) <zhouyanjie@wanyeetech.com>
++ */
++
++#include <linux/cpu_pm.h>
++#include <linux/highmem.h>
++#include <linux/kernel.h>
++#include <linux/preempt.h>
++#include <linux/sched.h>
++#include <linux/smp.h>
++
++#include <asm/barrier.h>
++#include <asm/bootinfo.h>
++#include <asm/cache.h>
++#include <asm/cacheops.h>
++#include <asm/cpu.h>
++#include <asm/mach-ingenic/smp.h>
++#include <asm/mmu_context.h>
++#include <asm/r4kcache.h>
++#include <asm/traps.h>
++
++static unsigned long dcache_size __read_mostly;
++static unsigned long icache_size __read_mostly;
++static unsigned long scache_size __read_mostly;
++
++struct flush_icache_range_args {
++	unsigned long start;
++	unsigned long end;
++	bool user;
++};
++
++static void ingenic_cache_noop(void) {}
++static void ingenic_cache_noop0(void) {while(1) printk("-------0\n");}
++static void ingenic_cache_noop1(void) {while(1) printk("-------1\n");}
++static void ingenic_cache_noop2(void) {while(1) printk("-------2\n");}
++
++static void (*ingenic_blast_scache)(void);
++static void (*ingenic_blast_scache_range)(unsigned long start, unsigned long end);
++
++static void ingenic_blast_scache_setup(void)
++{
++	unsigned long sc_lsize = cpu_scache_line_size();
++
++	if (sc_lsize == 32)
++		ingenic_blast_scache = blast_scache32;
++	else if (sc_lsize == 64)
++		ingenic_blast_scache = blast_scache64;
++	else if (sc_lsize == 128)
++		ingenic_blast_scache = blast_scache128;
++
++	ingenic_blast_scache_range = blast_scache_range;
++}
++
++static inline void ingenic_on_each_cpu(void (*func)(void *info), void *info)
++{
++	preempt_disable();
++
++	if (mips_machtype == MACH_INGENIC_JZ4780)
++		smp_call_function_many(&cpu_foreign_map[smp_processor_id()], func, info, 1);
++
++	func(info);
++
++	preempt_enable();
++}
++
++static inline void local_ingenic_flush_cache_all(void *args)
++{
++	blast_dcache32();
++	blast_icache32();
++}
++
++static void ingenic_flush_cache_all(void)
++{
++	ingenic_on_each_cpu(local_ingenic_flush_cache_all, NULL);
++}
++
++static inline int has_valid_asid(const struct mm_struct *mm)
++{
++	unsigned int cpu;
++
++	if (mips_machtype >= MACH_INGENIC_X2000) {
++		for_each_cpu(cpu, cpu_present_mask)
++			if (cpu_context(cpu, mm))
++				return 1;
++	} else
++		return cpu_context(smp_processor_id(), mm);
++
++	return 0;
++}
++
++static inline void local_ingenic_flush_cache_range(void * args)
++{
++	struct vm_area_struct *vma = args;
++
++	if (!has_valid_asid(vma->vm_mm))
++		return;
++
++	blast_dcache32();
++	blast_icache32();
++}
++
++static void ingenic_flush_cache_range(struct vm_area_struct *vma,
++						     unsigned long start, unsigned long end)
++{
++	if (vma->vm_flags & VM_EXEC)
++		ingenic_on_each_cpu(local_ingenic_flush_cache_range, vma);
++}
++
++static void ingenic_flush_cache_page(struct vm_area_struct *vma,
++						     unsigned long addr, unsigned long pfn)
++{
++	int exec = vma->vm_flags & VM_EXEC;
++	pte_t *ptep;
++
++	preempt_disable();
++
++	if (!has_valid_asid(vma->vm_mm))
++		goto out;
++
++	addr &= PAGE_MASK;
++	ptep = pte_offset_kernel(pmd_off(vma->vm_mm, addr), addr);
++
++	if (!(pte_present(*ptep)))
++		goto out;
++
++	if ((vma->vm_mm == current->active_mm) && (pte_val(*ptep) & _PAGE_VALID)) {
++		if (exec) {
++			blast_dcache32_page(addr);
++			blast_icache32_page(addr);
++		}
++
++		goto out;
++	}
++
++	if (exec) {
++		blast_dcache32_page_indexed(addr);
++		blast_icache32_page_indexed(addr);
++	}
++
++out:
++	preempt_enable();
++}
++
++static inline void __local_ingenic_flush_icache_range(unsigned long start,
++						     unsigned long end, bool user)
++{
++	if (end - start >= icache_size) {
++		blast_dcache32();
++		blast_icache32();
++	} else if (user) {
++		protected_blast_dcache_range(start, end);
++		protected_blast_icache_range(start, end);
++	} else {
++		blast_dcache_range(start, end);
++		blast_icache_range(start, end);
++	}
++}
++
++static inline void local_ingenic_flush_icache_range(unsigned long start,
++						     unsigned long end)
++{
++	__local_ingenic_flush_icache_range(start, end, false);
++}
++
++static inline void local_ingenic_flush_icache_user_range(unsigned long start,
++						     unsigned long end)
++{
++	__local_ingenic_flush_icache_range(start, end, true);
++}
++
++static inline void local_ingenic_flush_icache_range_ipi(void *args)
++{
++	struct flush_icache_range_args *fir_args = args;
++	unsigned long start = fir_args->start;
++	unsigned long end = fir_args->end;
++	bool user = fir_args->user;
++
++	__local_ingenic_flush_icache_range(start, end, user);
++}
++
++static void __ingenic_flush_icache_range(unsigned long start, unsigned long end, bool user)
++{
++	struct flush_icache_range_args args;
++
++	args.start = start;
++	args.end = end;
++	args.user = user;
++
++	ingenic_on_each_cpu(local_ingenic_flush_icache_range_ipi, &args);
++}
++
++static void ingenic_flush_icache_range(unsigned long start, unsigned long end)
++{
++	return __ingenic_flush_icache_range(start, end, false);
++}
++
++static void ingenic_flush_icache_user_range(unsigned long start, unsigned long end)
++{
++	return __ingenic_flush_icache_range(start, end, true);
++}
++
++static void ingenic_dma_cache_wback_inv(unsigned long addr, unsigned long size)
++{
++	preempt_disable();
++
++	if (size >= dcache_size)
++		blast_dcache32();
++	else
++		blast_dcache_range(addr, addr + size);
++
++	if (size >= scache_size)
++		ingenic_blast_scache();
++	else
++		ingenic_blast_scache_range(addr, addr + size);
++
++	preempt_enable();
++
++	__sync();
++	/* Match the vendor MIPS_BRIDGE_SYNC_WAR after DMA cache maintenance. */
++	__fast_iob();
++}
++
++static void ingenic_xburst_dma_cache_inv(unsigned long addr, unsigned long size)
++{
++	preempt_disable();
++	write_c0_ingenic_errctl(XBURST_ERRCTL_WST_EN);
++
++	if (size >= dcache_size)
++		blast_dcache32();
++	else
++		blast_inv_dcache_range(addr, addr + size);
++
++	write_c0_ingenic_errctl(XBURST_ERRCTL_WST_DIS);
++	preempt_enable();
++
++	__sync();
++	/* Match the vendor MIPS_BRIDGE_SYNC_WAR after DMA cache maintenance. */
++	__fast_iob();
++}
++
++static void ingenic_xburst2_dma_cache_inv(unsigned long addr, unsigned long size)
++{
++	unsigned long lsize = cpu_scache_line_size();
++	unsigned long almask = ~(lsize - 1);
++
++	preempt_disable();
++
++	if (size >= dcache_size)
++		blast_dcache32();
++	else
++		blast_inv_dcache_range(addr, addr + size);
++
++	if (size >= scache_size) {
++		ingenic_blast_scache();
++	} else {
++		cache_op(Hit_Writeback_Inv_SD, addr & almask);
++		cache_op(Hit_Writeback_Inv_SD, (addr + size - 1) & almask);
++		blast_inv_scache_range(addr, addr + size);
++	}
++
++	preempt_enable();
++
++	__sync();
++}
++
++static void probe_pcache(void)
++{
++	struct cpuinfo_mips *c = &current_cpu_data;
++	unsigned long config1;
++
++	config1 = read_c0_config1();
++
++	c->icache.linesz = 2 << ((config1 >> 19) & 7);
++	c->icache.sets = 32 << (((config1 >> 22) + 1) & 7);
++	c->icache.ways = 1 + ((config1 >> 16) & 7);
++
++	icache_size = c->icache.ways * c->icache.sets * c->icache.linesz;
++	if (!icache_size)
++		panic("Invalid Primary instruction cache size.");
++
++	c->icache.waysize = c->icache.sets * c->icache.linesz;
++	c->icache.waybit = __ffs(icache_size / c->icache.ways);
++
++	c->dcache.linesz = 2 << ((config1 >> 10) & 7);
++	c->dcache.sets = 32 << (((config1 >> 13) + 1) & 7);
++	c->dcache.ways = 1 + ((config1 >> 7) & 7);
++
++	dcache_size = c->dcache.ways * c->dcache.sets * c->dcache.linesz;
++	if (!dcache_size)
++		panic("Invalid Primary data cache size.");
++
++	c->dcache.waysize = c->dcache.sets * c->dcache.linesz;
++	c->dcache.waybit = __ffs(dcache_size / c->dcache.ways);
++
++	c->options |= MIPS_CPU_PREFETCH;
++
++	switch (mips_machtype) {
++
++	/* Physically indexed icache */
++	case MACH_INGENIC_JZ4730:
++	case MACH_INGENIC_JZ4740:
++		c->icache.flags |= MIPS_CACHE_PINDEX;
++		break;
++
++	/* Physically indexed icache and dcache */
++	case MACH_INGENIC_JZ4725B:
++	case MACH_INGENIC_JZ4755:
++	case MACH_INGENIC_JZ4760:
++	case MACH_INGENIC_X2000:
++	case MACH_INGENIC_X2000E:
++		c->icache.flags |= MIPS_CACHE_PINDEX;
++		c->dcache.flags |= MIPS_CACHE_PINDEX;
++		break;
++	}
++
++	pr_info("Primary instruction cache %ldkiB, %s, %d-way, %d sets, linesize %d bytes.\n",
++			icache_size >> 10, c->icache.flags & MIPS_CACHE_PINDEX ? "PIPT" : "VIPT",
++			c->icache.ways, c->icache.sets, c->icache.linesz);
++
++	pr_info("Primary data cache %ldkiB, %s, %d-way, %d sets, linesize %d bytes.\n",
++			dcache_size >> 10, c->dcache.flags & MIPS_CACHE_PINDEX ? "PIPT" : "VIPT",
++			c->dcache.ways, c->dcache.sets, c->dcache.linesz);
++}
++
++static void probe_scache(void)
++{
++	struct cpuinfo_mips *c = &current_cpu_data;
++	unsigned int config1, config2;
++
++	/* Mark as not present until probe completed */
++	c->scache.flags |= MIPS_CACHE_NOT_PRESENT;
++
++	ingenic_blast_scache = (void *)ingenic_cache_noop;
++	ingenic_blast_scache_range = (void *)ingenic_cache_noop;
++
++	if (current_cpu_type() == CPU_XBURST2)
++		/* Check the DisL2C bit */
++		if (read_ccu_mscr() & MSCR_DISL2C)
++			return;
++
++	/* Does this Ingenic CPU have a config2 register? */
++	config1 = read_c0_config1();
++	if (!(config1 & MIPS_CONF_M))
++		return;
++
++	config2 = read_c0_config2();
++
++	c->scache.linesz = 2 << ((config2 >> 4) & 0xf);
++	c->scache.sets = 64 << ((config2 >> 8) & 0xf);
++	c->scache.ways = 1 + ((config2 >> 0) & 0xf);
++
++	switch (mips_machtype) {
++
++	/*
++	 * According to config2 it would be 5-ways, but that is
++	 * contradicted by all documentation.
++	 */
++	case MACH_INGENIC_JZ4770:
++	case MACH_INGENIC_JZ4775:
++		c->scache.ways = 4;
++		break;
++
++	/*
++	 * According to config2 it would be 8-ways and 256-sets,
++	 * but that is contradicted by all documentation.
++	 */
++	case MACH_INGENIC_JZ4780:
++		c->scache.sets = 1024;
++		c->scache.ways = 4;
++		break;
++
++	/*
++	 * According to config2 it would be 5-ways and 512-sets,
++	 * but that is contradicted by all documentation.
++	 */
++	case MACH_INGENIC_X1000:
++	case MACH_INGENIC_X1000E:
++		c->scache.sets = 256;
++		c->scache.ways = 4;
++		break;
++	}
++
++	scache_size = c->scache.ways * c->scache.sets * c->scache.linesz;
++	if (!scache_size)
++		return ;
++
++	c->scache.waysize = c->scache.sets * c->scache.linesz;
++	c->scache.waybit = __ffs(scache_size / c->scache.ways);
++
++	c->scache.flags &= ~MIPS_CACHE_NOT_PRESENT;
++
++	if (mips_machtype >= MACH_INGENIC_X2000) {
++		c->scache.flags |= MIPS_CACHE_PINDEX;
++
++		/* Enable the L2 prefetch unit */
++		write_ccu_mscr(read_ccu_mscr() & ~MSCR_DISPFB2);
++	} else {
++		write_c0_ingenic_errctl(XBURST_ERRCTL_WST_DIS);
++	}
++
++	ingenic_blast_scache_setup();
++
++	pr_info("Unified secondary cache %ldkiB, %s, %d-way, %d sets, linesize %d bytes.\n",
++			scache_size >> 10, c->scache.flags & MIPS_CACHE_PINDEX ? "PIPT" : "VIPT",
++			c->scache.ways, c->scache.sets, c->scache.linesz);
++}
++
++static int cca = -1;
++
++static int __init cca_setup(char *str)
++{
++	get_option(&str, &cca);
++
++	return 0;
++}
++
++early_param("cca", cca_setup);
++
++static void ingenic_coherency_setup(void)
++{
++	if (cca < 0 || cca > 7)
++		cca = read_c0_config() & CONF_CM_CMASK;
++	_page_cachable_default = cca << _CACHE_SHIFT;
++
++	pr_debug("Using cache attribute %d\n", cca);
++	change_c0_config(CONF_CM_CMASK, cca);
++}
++
++static void ingenic_cache_error_setup(void)
++{
++	extern char __weak except_vec2_generic;
++
++	set_uncached_handler(0x100, &except_vec2_generic, 0x80);
++}
++
++void ingenic_cache_init(void)
++{
++	extern void build_clear_page(void);
++	extern void build_copy_page(void);
++
++	probe_pcache();
++	probe_scache();
++
++	__flush_cache_vmap = ingenic_cache_noop0;
++	__flush_cache_vunmap = ingenic_cache_noop1;
++	__flush_cache_all = ingenic_flush_cache_all;
++
++	__local_flush_icache_user_range = local_ingenic_flush_icache_user_range;
++	__flush_icache_user_range = ingenic_flush_icache_user_range;
++
++	__flush_kernel_vmap_range = (void *)ingenic_cache_noop2;
++
++	flush_cache_range = ingenic_flush_cache_range;
++	flush_cache_page = ingenic_flush_cache_page;
++	flush_cache_mm = (void *)ingenic_cache_noop;
++	flush_cache_all = ingenic_cache_noop;
++
++	local_flush_icache_range = local_ingenic_flush_icache_range;
++	flush_icache_range = ingenic_flush_icache_range;
++	flush_icache_all = ingenic_cache_noop;
++
++	flush_data_cache_page = blast_dcache32_page;
++
++	_dma_cache_wback_inv = ingenic_dma_cache_wback_inv;
++	_dma_cache_wback = ingenic_dma_cache_wback_inv;
++
++	if (current_cpu_type() == CPU_XBURST)
++		_dma_cache_inv = ingenic_xburst_dma_cache_inv;
++	else if (current_cpu_type() == CPU_XBURST2)
++		_dma_cache_inv = ingenic_xburst2_dma_cache_inv;
++	else
++		panic("Unknown Ingenic CPU type.");
++
++	build_clear_page();
++	build_copy_page();
++
++	local_ingenic_flush_cache_all(NULL);
++
++	ingenic_coherency_setup();
++	board_cache_error_setup = ingenic_cache_error_setup;
++}
++
++static int ingenic_cache_pm_notifier(struct notifier_block *self,
++						     unsigned long cmd, void *v)
++{
++	switch (cmd) {
++	case CPU_PM_ENTER_FAILED:
++	case CPU_PM_EXIT:
++		ingenic_coherency_setup();
++		break;
++	}
++
++	return NOTIFY_OK;
++}
++
++static struct notifier_block ingenic_cache_pm_notifier_block = {
++	.notifier_call = ingenic_cache_pm_notifier,
++};
++
++static int __init ingenic_cache_init_pm(void)
++{
++	return cpu_pm_register_notifier(&ingenic_cache_pm_notifier_block);
++}
++arch_initcall(ingenic_cache_init_pm);
+diff --git a/arch/mips/mm/cache.c b/arch/mips/mm/cache.c
+index ad9b0430a28e2d4845697395a608e2aea61e05a3..83f078d374a6b09aa5b937cf4af232691970f7d9 100644
+--- a/arch/mips/mm/cache.c
++++ b/arch/mips/mm/cache.c
+@@ -207,12 +207,22 @@ void cpu_cache_init(void)
+ {
+ 	if (IS_ENABLED(CONFIG_CPU_R3000) && cpu_has_3k_cache)
+ 		r3k_cache_init();
++
+ 	if ((IS_ENABLED(CONFIG_CPU_R4K_CACHE_TLB) ||
+-	     IS_ENABLED(CONFIG_CPU_SB1)) && cpu_has_4k_cache)
++	     IS_ENABLED(CONFIG_CPU_SB1)) && cpu_has_4k_cache) {
++		extern void __weak r4k_cache_init(void);
++
+ 		r4k_cache_init();
++	}
+ 
+ 	if (IS_ENABLED(CONFIG_CPU_CAVIUM_OCTEON) && cpu_has_octeon_cache)
+ 		octeon_cache_init();
+ 
++	if (cpu_has_ingenic_cache) {
++		extern void __weak ingenic_cache_init(void);
++
++		ingenic_cache_init();
++	}
++
+ 	setup_protection_map();
+ }
+diff --git a/arch/mips/mm/sc-mips.c b/arch/mips/mm/sc-mips.c
+index 06ec304ad4d16e07d4b8c635b30c5ead4873df3a..7e57f52c4b6b5304c746e6a8d9b31ba4036a0f03 100644
+--- a/arch/mips/mm/sc-mips.c
++++ b/arch/mips/mm/sc-mips.c
+@@ -221,29 +221,6 @@ static inline int mips_sc_probe(void)
+ 	else
+ 		return 0;
+ 
+-	if (current_cpu_type() == CPU_XBURST) {
+-		switch (mips_machtype) {
+-		/*
+-		 * According to config2 it would be 5-ways, but that is
+-		 * contradicted by all documentation.
+-		 */
+-		case MACH_INGENIC_JZ4770:
+-		case MACH_INGENIC_JZ4775:
+-			c->scache.ways = 4;
+-			break;
+-
+-		/*
+-		 * According to config2 it would be 5-ways and 512-sets,
+-		 * but that is contradicted by all documentation.
+-		 */
+-		case MACH_INGENIC_X1000:
+-		case MACH_INGENIC_X1000E:
+-			c->scache.sets = 256;
+-			c->scache.ways = 4;
+-			break;
+-		}
+-	}
+-
+ 	c->scache.waysize = c->scache.sets * c->scache.linesz;
+ 	c->scache.waybit = __ffs(c->scache.waysize);
+ 
+diff --git a/arch/mips/mm/tlb-r4k.c b/arch/mips/mm/tlb-r4k.c
+index 24fe85fa169d1640ce7a10c4c43f93562e7c96b9..6b5380e05a7ff8b789134913e8c4aea3b90cd3ea 100644
+--- a/arch/mips/mm/tlb-r4k.c
++++ b/arch/mips/mm/tlb-r4k.c
+@@ -59,7 +59,7 @@ void local_flush_tlb_all(void)
+ {
+ 	unsigned long flags;
+ 	unsigned long old_ctx;
+-	int entry, ftlbhighset;
++	int entry;
+ 
+ 	local_irq_save(flags);
+ 	/* Save old context and create impossible VPN2 value */
+@@ -75,19 +75,24 @@ void local_flush_tlb_all(void)
+ 	 * If there are any wired entries, fall back to iterating
+ 	 */
+ 	if (cpu_has_tlbinv && !entry) {
+-		if (current_cpu_data.tlbsizevtlb) {
+-			write_c0_index(0);
+-			mtc0_tlbw_hazard();
+-			tlbinvf();  /* invalidate VTLB */
+-		}
+-		ftlbhighset = current_cpu_data.tlbsizevtlb +
+-			current_cpu_data.tlbsizeftlbsets;
+-		for (entry = current_cpu_data.tlbsizevtlb;
+-		     entry < ftlbhighset;
+-		     entry++) {
+-			write_c0_index(entry);
+-			mtc0_tlbw_hazard();
+-			tlbinvf();  /* invalidate one FTLB set */
++		if (IS_ENABLED(CONFIG_MACH_X2000) && boot_cpu_type() == CPU_XBURST2) {
++			tlbinvf();  /* invalidate FTLB/VTLB set */
++		} else {
++			int ftlbhighset;
++			if (current_cpu_data.tlbsizevtlb) {
++				write_c0_index(0);
++				mtc0_tlbw_hazard();
++				tlbinvf();  /* invalidate VTLB */
++			}
++			ftlbhighset = current_cpu_data.tlbsizevtlb +
++				current_cpu_data.tlbsizeftlbsets;
++			for (entry = current_cpu_data.tlbsizevtlb;
++			     entry < ftlbhighset;
++			     entry++) {
++				write_c0_index(entry);
++				mtc0_tlbw_hazard();
++				tlbinvf();  /* invalidate one FTLB set */
++			}
+ 		}
+ 	} else {
+ 		while (entry < current_cpu_data.tlbsize) {
+@@ -102,7 +107,9 @@ void local_flush_tlb_all(void)
+ 	tlbw_use_hazard();
+ 	write_c0_entryhi(old_ctx);
+ 	htw_start();
++#if defined(CONFIG_MACH_LOONGSON2EF) || defined(CONFIG_MACH_LOONGSON64)
+ 	flush_micro_tlb();
++#endif
+ 	local_irq_restore(flags);
+ }
+ EXPORT_SYMBOL(local_flush_tlb_all);
+@@ -162,7 +169,9 @@ void local_flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
+ 		} else {
+ 			drop_mmu_context(mm);
+ 		}
++#if defined(CONFIG_MACH_LOONGSON2EF) || defined(CONFIG_MACH_LOONGSON64)
+ 		flush_micro_tlb();
++#endif
+ 		local_irq_restore(flags);
+ 	}
+ }
+@@ -208,7 +217,9 @@ void local_flush_tlb_kernel_range(unsigned long start, unsigned long end)
+ 	} else {
+ 		local_flush_tlb_all();
+ 	}
++#if defined(CONFIG_MACH_LOONGSON2EF) || defined(CONFIG_MACH_LOONGSON64)
+ 	flush_micro_tlb();
++#endif
+ 	local_irq_restore(flags);
+ }
+ 
+@@ -251,7 +262,9 @@ void local_flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
+ 		if (cpu_has_mmid)
+ 			write_c0_memorymapid(old_mmid);
+ 		htw_start();
++#if defined(CONFIG_MACH_LOONGSON2EF) || defined(CONFIG_MACH_LOONGSON64)
+ 		flush_micro_tlb_vm(vma);
++#endif
+ 		local_irq_restore(flags);
+ 	}
+ }
+@@ -285,7 +298,9 @@ void local_flush_tlb_one(unsigned long page)
+ 	}
+ 	write_c0_entryhi(oldpid);
+ 	htw_start();
++#if defined(CONFIG_MACH_LOONGSON2EF) || defined(CONFIG_MACH_LOONGSON64)
+ 	flush_micro_tlb();
++#endif
+ 	local_irq_restore(flags);
+ }
+ 
+@@ -381,7 +396,9 @@ void __update_tlb(struct vm_area_struct * vma, unsigned long address, pte_t pte)
+ 	}
+ 	tlbw_use_hazard();
+ 	htw_start();
++#if defined(CONFIG_MACH_LOONGSON2EF) || defined(CONFIG_MACH_LOONGSON64)
+ 	flush_micro_tlb_vm(vma);
++#endif
+ 
+ 	if (ptemap)
+ 		pte_unmap(ptemap);
+diff --git a/arch/mips/mm/tlbex.c b/arch/mips/mm/tlbex.c
+index 69ea54bdc0c36182ddb0c8e289a7e2ee573182c6..d9b90fc6186da9acf9884c1195ec72c0b753c58a 100644
+--- a/arch/mips/mm/tlbex.c
++++ b/arch/mips/mm/tlbex.c
+@@ -568,6 +568,7 @@ void build_tlb_write_entry(u32 **p, struct uasm_label **l,
+ 		break;
+ 
+ 	case CPU_XBURST:
++	case CPU_XBURST2:
+ 		tlbw(p);
+ 		uasm_i_nop(p);
+ 		break;

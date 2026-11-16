@@ -27,8 +27,8 @@ PRESETS = {
 }
 RECOVERY_FILES = (
     "../ax1800_spi_nor_burner_u-boot-spl.bin",
-    "../clk-mini-ultra-nor-recov.uzImage.bin",
-    "../clk-mini-ultra-nor-recov.initrd.bin",
+    "../x1600-aic8800d80-recov.uzImage.bin",
+    "../x1600-aic8800d80-recov.initrd.bin",
 )
 
 
@@ -37,8 +37,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--preset", choices=PRESETS, help="Stock device IP preset")
     parser.add_argument(
         "--fw",
-        default="../clk-mini-ultra-nor.c2aflash",
-        help="Firmware image (default: ../clk-mini-ultra-nor.c2aflash)",
+        default="../x1600-aic8800d80.c2aflash",
+        help="Firmware image (default: ../x1600-aic8800d80.c2aflash)",
     )
     parser.add_argument("--already-fel", action="store_true", help="Skip entering USB boot mode")
     parser.add_argument(

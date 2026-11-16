@@ -1,0 +1,23 @@
+Subject: [PATCH] mmc: jz4740: release DMA channels before freeing the IRQ
+Upstream-Status: Pending
+
+Reorder device removal so DMA channels are released while the controller
+IRQ is still registered.
+
+diff --git a/drivers/mmc/host/jz4740_mmc.c b/drivers/mmc/host/jz4740_mmc.c
+index 97366bfbfc4b7a078f75c87b5841501d7610ff58..f7ea75a024658143b68c51214577686c4ea022cd 100644
+--- a/drivers/mmc/host/jz4740_mmc.c
++++ b/drivers/mmc/host/jz4740_mmc.c
+@@ -1190,10 +1190,10 @@ static void jz4740_mmc_remove(struct platform_device *pdev)
+ 
+ 	mmc_remove_host(host->mmc);
+ 
+-	free_irq(host->irq, host);
+-
+ 	if (host->use_dma)
+ 		jz4740_mmc_release_dma_channels(host);
++
++	free_irq(host->irq, host);
+ }
+ 
+ static int jz4740_mmc_suspend(struct device *dev)

@@ -142,5 +142,22 @@ inherit kernel-broken-version-c2a
 
 DEPENDS:append = " u-boot-tools-native"
 
+# Letux X1600 support follows the sunxi series; local fixes follow Letux.
+require linux-sunxi-letux.inc
+
+# Mini Ultra board configuration is owned here for the x1600 twins.
+SRC_URI:append:x1600-aic8800d80 = " \
+    file://x1600/0001-mips-ingenic-add-AX1800M-DTB-target.patch \
+    file://x1600/0002-mips-reduce-appended-DTB-padding.patch \
+    file://x1600-aic8800d80_defconfig \
+    file://arch/mips/boot/dts/ingenic/carlinkit-mini-ultra-nor.dts \
+"
+
+do_patch:append:x1600-aic8800d80() {
+    install -m 0644 \
+        ${UNPACKDIR}/arch/mips/boot/dts/ingenic/carlinkit-mini-ultra-nor.dts \
+        ${S}/arch/mips/boot/dts/ingenic/carlinkit-mini-ultra-nor.dts
+}
+
 # Keep the ARM32 LTO unlock last in the patch series.
 SRC_URI:append = " file://arch/arm/0002-arm-enable-catplay-clang-lto.patch"

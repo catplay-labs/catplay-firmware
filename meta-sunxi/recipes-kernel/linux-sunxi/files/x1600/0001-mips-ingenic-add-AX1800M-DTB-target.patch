@@ -1,0 +1,28 @@
+Subject: [PATCH] mips: ingenic: add X1600 AX1800M DTB target
+Upstream-Status: Inappropriate [hardware-specific C2A integration]
+
+Same Mini Ultra board selection as linux-letux, without LX16 context.
+
+diff --git a/arch/mips/boot/dts/ingenic/Makefile b/arch/mips/boot/dts/ingenic/Makefile
+--- a/arch/mips/boot/dts/ingenic/Makefile
++++ b/arch/mips/boot/dts/ingenic/Makefile
+@@ -4,4 +4,5 @@
+ dtb-$(CONFIG_JZ4770_GCW0)	+= gcw0.dtb
+ dtb-$(CONFIG_JZ4780_CI20)	+= ci20.dtb
+ dtb-$(CONFIG_X1000_CU1000_NEO)	+= cu1000-neo.dtb
++dtb-$(CONFIG_X1600_AX1800M)	+= carlinkit-mini-ultra-nor.dtb
+ dtb-$(CONFIG_X1830_CU1830_NEO)	+= cu1830-neo.dtb
+diff --git a/arch/mips/ingenic/Kconfig b/arch/mips/ingenic/Kconfig
+--- a/arch/mips/ingenic/Kconfig
++++ b/arch/mips/ingenic/Kconfig
+@@ -41,6 +41,10 @@ config X1000_CU1000_NEO
+ 	bool "YSH & ATIL CU1000 Module with Neo backplane"
+ 	select MACH_X1000
+ 
++config X1600_AX1800M
++	bool "Carlinkit Mini Ultra AX1800M"
++	select MACH_X1600
++
+ config X1830_CU1830_NEO
+ 	bool "YSH & ATIL CU1830 Module with Neo backplane"
+ 	select MACH_X1830

@@ -1,0 +1,21 @@
+Subject: [PATCH] spi: ingenic: clear the SSICDR gate before hardware setup
+Upstream-Status: Pending
+
+Clear bit 27 of SSICDR through a direct register access before programming
+the SSI controller. This is a workaround for the source-clock gate not
+being cleared by clk_prepare_enable.
+
+diff --git a/drivers/spi/spi-ingenic.c b/drivers/spi/spi-ingenic.c
+index 44535539f1e1497098401415edc7bf5e58d7d4e5..851022215eb0a5848f3fd867980593d8c5aa01c9 100644
+--- a/drivers/spi/spi-ingenic.c
++++ b/drivers/spi/spi-ingenic.c
+@@ -317,6 +317,9 @@ static int spi_ingenic_prepare_hardware(struct spi_controller *ctlr)
+ 	if (ret)
+ 		return ret;
+ 
++// Hack to write SSICDR - should have been done by clk_prepare_enable(priv->clk)
++*((volatile uint32_t *) 0xb000005c) &= ~(1U << 27);
++
+ 	regmap_write(priv->map, REG_SSICR0, REG_SSICR0_EACLRUN);
+ 	regmap_write(priv->map, REG_SSICR1, 0);
+ 	regmap_write(priv->map, REG_SSISR, 0);

@@ -1,0 +1,30 @@
+Subject: [PATCH] MIPS: Ingenic: add the X1600 machine option
+Upstream-Status: Pending
+
+Define MACH_X1600 with MIPS32 Release 2 and high-memory capabilities.
+Select it for generic Ingenic kernels alongside the existing SoC options.
+
+diff --git a/arch/mips/ingenic/Kconfig b/arch/mips/ingenic/Kconfig
+index f595b339a4b8476533de6601464d717172571dac..36d1750d8c102f8f58c79f19453e389976300690 100644
+--- a/arch/mips/ingenic/Kconfig
++++ b/arch/mips/ingenic/Kconfig
+@@ -8,6 +8,7 @@ config MACH_INGENIC_GENERIC
+ 	select MACH_JZ4770
+ 	select MACH_JZ4780
+ 	select MACH_X1000
++	select MACH_X1600
+ 	select MACH_X1830
+ 
+ choice
+@@ -71,6 +72,11 @@ config MACH_X1000
+ 	select SYS_HAS_CPU_MIPS32_R2
+ 	select SYS_SUPPORTS_HIGHMEM
+ 
++config MACH_X1600
++	bool
++	select SYS_HAS_CPU_MIPS32_R2
++	select SYS_SUPPORTS_HIGHMEM
++
+ config MACH_X1830
+ 	bool
+ 	select MIPS_CPU_SCACHE

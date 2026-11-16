@@ -1,0 +1,297 @@
+Subject: [PATCH] clk: ingenic: support a second PLL output divider
+Upstream-Status: Pending
+
+Extend PLL rate calculation, readback and programming to include a second
+post-VCO divider. Support direct divider values when no encoding table is
+provided, and update the JZ4760 and X1000 calculator callback signatures.
+
+diff --git a/drivers/clk/ingenic/cgu.c b/drivers/clk/ingenic/cgu.c
+index 41e4c69131bd6ec79c59159d0e7dc49b3f6f12b4..20f03576227e7c7cfa1779024ad8dbd7bb094f79 100644
+--- a/drivers/clk/ingenic/cgu.c
++++ b/drivers/clk/ingenic/cgu.c
+@@ -4,6 +4,7 @@
+  *
+  * Copyright (c) 2013-2015 Imagination Technologies
+  * Author: Paul Burton <paul.burton@mips.com>
++ * Copyright (c) 2023, 2024 Paul Boddie <paul@boddie.org.uk>
+  */
+ 
+ #include <linux/bitops.h>
+@@ -76,6 +77,41 @@ ingenic_cgu_gate_set(struct ingenic_cgu *cgu,
+  * PLL operations
+  */
+ 
++static unsigned
++ingenic_pll_recalc_rate_od(u32 ctl, u8 od_shift, u8 od_bits, u8 od_max,
++			   const s8 *od_encoding)
++{
++	unsigned od, od_enc = 0;
++
++	if (od_bits > 0) {
++		od_enc = ctl >> od_shift;
++		od_enc &= GENMASK(od_bits - 1, 0);
++	}
++
++	/*
++	 * Use the encoding table if indicated. Otherwise, use the value
++	 * directly, interpreting an encoded value of zero as a divider
++	 * value of one.
++	 */
++	if (od_encoding)
++	{
++		for (od = 0; od < od_max; od++)
++			if (od_encoding[od] == od_enc)
++				break;
++		od++;
++	}
++	else
++		od = od_enc ? od_enc : 1;
++
++	/* if od_max = 0, od_bits should be 0 and od is fixed to 1. */
++	if (od_max == 0)
++		BUG_ON(od_bits != 0);
++	else
++		BUG_ON(od == od_max);
++
++	return od;
++}
++
+ static unsigned long
+ ingenic_pll_recalc_rate(struct clk_hw *hw, unsigned long parent_rate)
+ {
+@@ -83,7 +119,7 @@ ingenic_pll_recalc_rate(struct clk_hw *hw, unsigned long parent_rate)
+ 	const struct ingenic_cgu_clk_info *clk_info = to_clk_info(ingenic_clk);
+ 	struct ingenic_cgu *cgu = ingenic_clk->cgu;
+ 	const struct ingenic_cgu_pll_info *pll_info;
+-	unsigned m, n, od, od_enc = 0;
++	unsigned m, n, od, od1;
+ 	bool bypass;
+ 	u32 ctl;
+ 
+@@ -97,71 +133,82 @@ ingenic_pll_recalc_rate(struct clk_hw *hw, unsigned long parent_rate)
+ 	n = (ctl >> pll_info->n_shift) & GENMASK(pll_info->n_bits - 1, 0);
+ 	n += pll_info->n_offset;
+ 
+-	if (pll_info->od_bits > 0) {
+-		od_enc = ctl >> pll_info->od_shift;
+-		od_enc &= GENMASK(pll_info->od_bits - 1, 0);
+-	}
+-
+ 	if (pll_info->bypass_bit >= 0) {
+-		ctl = readl(cgu->base + pll_info->bypass_reg);
++		u32 ctl2 = readl(cgu->base + pll_info->bypass_reg);
+ 
+-		bypass = !!(ctl & BIT(pll_info->bypass_bit));
++		bypass = !!(ctl2 & BIT(pll_info->bypass_bit));
+ 
+ 		if (bypass)
+ 			return parent_rate;
+ 	}
+ 
+-	for (od = 0; od < pll_info->od_max; od++)
+-		if (pll_info->od_encoding[od] == od_enc)
+-			break;
++	od = ingenic_pll_recalc_rate_od(ctl, pll_info->od_shift, pll_info->od_bits,
++		pll_info->od_max, pll_info->od_encoding);
+ 
+-	/* if od_max = 0, od_bits should be 0 and od is fixed to 1. */
+-	if (pll_info->od_max == 0)
+-		BUG_ON(pll_info->od_bits != 0);
+-	else
+-		BUG_ON(od == pll_info->od_max);
+-	od++;
++	od1 = ingenic_pll_recalc_rate_od(ctl, pll_info->od1_shift, pll_info->od1_bits,
++		pll_info->od1_max, pll_info->od_encoding);
+ 
+ 	return div_u64((u64)parent_rate * m * pll_info->rate_multiplier,
+-		n * od);
++		n * od * od1);
+ }
+ 
+ static void
+ ingenic_pll_calc_m_n_od(const struct ingenic_cgu_pll_info *pll_info,
+ 			unsigned long rate, unsigned long parent_rate,
+-			unsigned int *pm, unsigned int *pn, unsigned int *pod)
++			unsigned int *pm, unsigned int *pn, unsigned int *pod,
++			unsigned int *pod1)
+ {
+-	unsigned int m, n, od = 1;
++	unsigned int m, n, od = 1, od1 = 1;
+ 
+ 	/*
+-	 * The frequency after the input divider must be between 10 and 50 MHz.
++	 * The frequency after the input divider must be within the range
++	 * defined in the programming manual as FREF:
++	 *
++	 * JZ4740: 1 MHz - 15 MHz
++	 * JZ4780: 183 kHz - 1.5 GHz
++	 * X1000:  10 MHz - 50 MHz
++	 * X1600:  1 MHz - 800 MHz
++	 * X2000:  5 MHz - 200 MHz
++	 *
+ 	 * The highest divider yields the best resolution.
+ 	 */
+ 	n = parent_rate / (10 * MHZ);
+ 	n = min_t(unsigned int, n, 1 << pll_info->n_bits);
+ 	n = max_t(unsigned int, n, pll_info->n_offset);
+ 
+-	m = (rate / MHZ) * od * n / (parent_rate / MHZ);
++	/*
++	 * The frequency after the VCO stage (parent * m / n) must be in the
++	 * range defined in the programming manual as FVCO:
++	 *
++	 * JZ4740: 100 MHz - 500 MHz
++	 * JZ4780: 300 MHz - 1.5 GHz
++	 * X1000:  300 MHz - 600 MHz (low-band), 500 MHz - 1 GHz (high-band)
++	 * X1600:  600 MHz - 2.4 GHz
++	 * X2000:  2.4 GHz - 4.8 GHz
++	 */
++	m = (rate / MHZ) * od * od1 * n / (parent_rate / MHZ);
+ 	m = min_t(unsigned int, m, 1 << pll_info->m_bits);
+ 	m = max_t(unsigned int, m, pll_info->m_offset);
+ 
+ 	*pm = m;
+ 	*pn = n;
+ 	*pod = od;
++	*pod1 = od1;
+ }
+ 
+ static unsigned long
+ ingenic_pll_calc(const struct ingenic_cgu_clk_info *clk_info,
+ 		 unsigned long rate, unsigned long parent_rate,
+-		 unsigned int *pm, unsigned int *pn, unsigned int *pod)
++		 unsigned int *pm, unsigned int *pn, unsigned int *pod,
++		 unsigned int *pod1)
+ {
+ 	const struct ingenic_cgu_pll_info *pll_info = &clk_info->pll;
+-	unsigned int m, n, od;
++	unsigned int m, n, od, od1 = 1;
+ 
+ 	if (pll_info->calc_m_n_od)
+-		(*pll_info->calc_m_n_od)(pll_info, rate, parent_rate, &m, &n, &od);
++		(*pll_info->calc_m_n_od)(pll_info, rate, parent_rate, &m, &n, &od, &od1);
+ 	else
+-		ingenic_pll_calc_m_n_od(pll_info, rate, parent_rate, &m, &n, &od);
++		ingenic_pll_calc_m_n_od(pll_info, rate, parent_rate, &m, &n, &od, &od1);
+ 
+ 	if (pm)
+ 		*pm = m;
+@@ -169,9 +216,11 @@ ingenic_pll_calc(const struct ingenic_cgu_clk_info *clk_info,
+ 		*pn = n;
+ 	if (pod)
+ 		*pod = od;
++	if (pod1)
++		*pod1 = od1;
+ 
+ 	return div_u64((u64)parent_rate * m * pll_info->rate_multiplier,
+-		n * od);
++		n * od * od1);
+ }
+ 
+ static int ingenic_pll_determine_rate(struct clk_hw *hw,
+@@ -181,7 +230,7 @@ static int ingenic_pll_determine_rate(struct clk_hw *hw,
+ 	const struct ingenic_cgu_clk_info *clk_info = to_clk_info(ingenic_clk);
+ 
+ 	req->rate = ingenic_pll_calc(clk_info, req->rate, req->best_parent_rate,
+-				     NULL, NULL, NULL);
++				     NULL, NULL, NULL, NULL);
+ 
+ 	return 0;
+ }
+@@ -208,12 +257,12 @@ ingenic_pll_set_rate(struct clk_hw *hw, unsigned long req_rate,
+ 	const struct ingenic_cgu_clk_info *clk_info = to_clk_info(ingenic_clk);
+ 	const struct ingenic_cgu_pll_info *pll_info = &clk_info->pll;
+ 	unsigned long rate, flags;
+-	unsigned int m, n, od;
++	unsigned int m, n, od, od1;
+ 	int ret = 0;
+ 	u32 ctl;
+ 
+ 	rate = ingenic_pll_calc(clk_info, req_rate, parent_rate,
+-			       &m, &n, &od);
++			       &m, &n, &od, &od1);
+ 	if (rate != req_rate)
+ 		pr_info("ingenic-cgu: request '%s' rate %luHz, actual %luHz\n",
+ 			clk_info->name, req_rate, rate);
+@@ -229,7 +278,18 @@ ingenic_pll_set_rate(struct clk_hw *hw, unsigned long req_rate,
+ 
+ 	if (pll_info->od_bits > 0) {
+ 		ctl &= ~(GENMASK(pll_info->od_bits - 1, 0) << pll_info->od_shift);
+-		ctl |= pll_info->od_encoding[od - 1] << pll_info->od_shift;
++		if (pll_info->od_encoding)
++			ctl |= pll_info->od_encoding[od - 1] << pll_info->od_shift;
++		else
++			ctl |= (od ? od : 1) << pll_info->od_shift;
++	}
++
++	if (pll_info->od1_bits > 0) {
++		ctl &= ~(GENMASK(pll_info->od1_bits - 1, 0) << pll_info->od1_shift);
++		if (pll_info->od_encoding)
++			ctl |= pll_info->od_encoding[od1 - 1] << pll_info->od1_shift;
++		else
++			ctl |= (od1 ? od1 : 1) << pll_info->od1_shift;
+ 	}
+ 
+ 	writel(ctl, cgu->base + pll_info->reg);
+diff --git a/drivers/clk/ingenic/cgu.h b/drivers/clk/ingenic/cgu.h
+index 0d417d69dab7199b9e4145aa3e88ebaf99f60510..8351cfb82951047ee81aa6830c5f04d75e1a29d3 100644
+--- a/drivers/clk/ingenic/cgu.h
++++ b/drivers/clk/ingenic/cgu.h
+@@ -36,6 +36,12 @@
+  * @od_bits: the size of the post-VCO divider field in bits, or 0 if no
+  *	     OD field exists (then the OD is fixed to 1)
+  * @od_max: the maximum post-VCO divider value
++ * @od1_shift: the number of bits to shift the secondary post-VCO divider
++ *             value by (ie. the index of the lowest bit of the post-VCO
++ *             divider value in the PLL's control register)
++ * @od1_bits: the size of the secondary post-VCO divider field in bits, or 0
++ *            if no OD1 field exists (then the OD1 is fixed to 1)
++ * @od1_max: the maximum secondary post-VCO divider value
+  * @od_encoding: a pointer to an array mapping post-VCO divider values to
+  *               their encoded values in the PLL control register, or -1 for
+  *               unsupported values
+@@ -56,13 +62,15 @@ struct ingenic_cgu_pll_info {
+ 	u8 m_shift, m_bits, m_offset;
+ 	u8 n_shift, n_bits, n_offset;
+ 	u8 od_shift, od_bits, od_max;
++	u8 od1_shift, od1_bits, od1_max;
+ 	unsigned bypass_reg;
+ 	s8 bypass_bit;
+ 	s8 enable_bit;
+ 	s8 stable_bit;
+ 	void (*calc_m_n_od)(const struct ingenic_cgu_pll_info *pll_info,
+ 			    unsigned long rate, unsigned long parent_rate,
+-			    unsigned int *m, unsigned int *n, unsigned int *od);
++			    unsigned int *m, unsigned int *n, unsigned int *od,
++			    unsigned int *od1);
+ 	void (*set_rate_hook)(const struct ingenic_cgu_pll_info *pll_info,
+ 			      unsigned long rate, unsigned long parent_rate);
+ };
+diff --git a/drivers/clk/ingenic/jz4760-cgu.c b/drivers/clk/ingenic/jz4760-cgu.c
+index 372fe4b079927f3734c93255ff05efe319119052..52cc5ce1500480130bb8f1035e8edb820a064ab9 100644
+--- a/drivers/clk/ingenic/jz4760-cgu.c
++++ b/drivers/clk/ingenic/jz4760-cgu.c
+@@ -56,7 +56,8 @@ static const u8 jz4760_cgu_pll_half_div_table[] = {
+ static void
+ jz4760_cgu_calc_m_n_od(const struct ingenic_cgu_pll_info *pll_info,
+ 		       unsigned long rate, unsigned long parent_rate,
+-		       unsigned int *pm, unsigned int *pn, unsigned int *pod)
++		       unsigned int *pm, unsigned int *pn, unsigned int *pod,
++		       unsigned int *pod1)
+ {
+ 	unsigned int m, n, od, m_max = (1 << pll_info->m_bits) - 1;
+ 
+diff --git a/drivers/clk/ingenic/x1000-cgu.c b/drivers/clk/ingenic/x1000-cgu.c
+index d89bdfb7c219a96a743dd2de5e141d4dff491795..cb82d8e6470b6c9c64310fd31e4d583635c13220 100644
+--- a/drivers/clk/ingenic/x1000-cgu.c
++++ b/drivers/clk/ingenic/x1000-cgu.c
+@@ -173,7 +173,8 @@ static const struct clk_ops x1000_otg_phy_ops = {
+ static void
+ x1000_i2spll_calc_m_n_od(const struct ingenic_cgu_pll_info *pll_info,
+ 			 unsigned long rate, unsigned long parent_rate,
+-			 unsigned int *pm, unsigned int *pn, unsigned int *pod)
++			 unsigned int *pm, unsigned int *pn, unsigned int *pod,
++			 unsigned int *pod1)
+ {
+ 	const unsigned long m_max = GENMASK(pll_info->m_bits - 1, 0);
+ 	const unsigned long n_max = GENMASK(pll_info->n_bits - 1, 0);

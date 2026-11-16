@@ -1,0 +1,56 @@
+Subject: [PATCH] watchdog: jz4740: use the counter clear strobe on X1600
+
+X1600 reloads the watchdog counter through the CLRZ command at TCSR bit
+10, as used by the vendor INGENIC_WDT driver selected for SOC_X1600.
+Writes to TCNT do not reload the running counter, so regular userspace
+keepalives fail to prevent reset.
+
+Force a masked write of CLRZ on every ping, preserving the clock source
+and prescaler. An ordinary update_bits operation could skip a repeated
+command. Keep the TCNT path on other SoCs and propagate write failures.
+
+Upstream-Status: Pending
+---
+--- a/drivers/watchdog/jz4740_wdt.c
++++ b/drivers/watchdog/jz4740_wdt.c
+@@ -24,6 +24,8 @@
+ #include <linux/of_device.h>
+ #include <linux/regmap.h>
+ 
++#define X1600_WDT_TCSR_CLRZ BIT(10)
++
+ #define DEFAULT_HEARTBEAT 5
+ #define MAX_HEARTBEAT     2048
+ 
+@@ -52,6 +54,7 @@
+ 	struct regmap *map;
+ 	struct clk *clk;
+ 	unsigned long clk_rate;
++	bool has_counter_clear;
+ 	const struct jz_wdt_soc_info *soc_info;
+ };
+ 
+@@ -59,9 +62,11 @@
+ {
+ 	struct jz4740_wdt_drvdata *drvdata = watchdog_get_drvdata(wdt_dev);
+ 
+-	regmap_write(drvdata->map, drvdata->soc_info->counter, 0);
+-
+-	return 0;
++	if (drvdata->has_counter_clear)
++		return regmap_write_bits(drvdata->map, TCU_REG_WDT_TCSR,
++					 X1600_WDT_TCSR_CLRZ, X1600_WDT_TCSR_CLRZ);
++
++	return regmap_write(drvdata->map, drvdata->soc_info->counter, 0);
+ }
+ 
+ static int jz4730_wdt_set_timeout(struct watchdog_device *wdt_dev,
+@@ -222,6 +227,8 @@
+ 		return -ENOMEM;
+ 
+ 	drvdata->soc_info = soc_info;
++	drvdata->has_counter_clear = of_device_is_compatible(dev->of_node,
++							   "ingenic,x1600-watchdog");
+ 	drvdata->clk = devm_clk_get(&pdev->dev, "wdt");
+ 	if (IS_ERR(drvdata->clk)) {
+ 		dev_err(&pdev->dev, "cannot find WDT clock\n");

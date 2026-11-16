@@ -1,0 +1,417 @@
+Subject: [PATCH] phy: ingenic: initialize X1600 USB PHY tuning from DT
+Upstream-Status: Pending
+
+Add X1600 PHY reset and initialization with optional, range-checked tuning
+properties. Leave unspecified hardware fields unchanged and replace only
+the selected bits using field_prep() for the table-driven register masks.
+Describe the properties and the second register region in the binding.
+
+Leave the PHY supply enabled when exiting the common PHY driver.
+
+diff --git a/Documentation/devicetree/bindings/phy/ingenic,phy-usb.yaml b/Documentation/devicetree/bindings/phy/ingenic,phy-usb.yaml
+index 30b42008db063c5345cfe27c86c64c39333fe225..a68b99b7b4e90852a152f059d7b27e2e155fbb32 100644
+--- a/Documentation/devicetree/bindings/phy/ingenic,phy-usb.yaml
++++ b/Documentation/devicetree/bindings/phy/ingenic,phy-usb.yaml
+@@ -20,11 +20,13 @@ properties:
+       - ingenic,jz4775-phy
+       - ingenic,jz4780-phy
+       - ingenic,x1000-phy
++      - ingenic,x1600-phy
+       - ingenic,x1830-phy
+       - ingenic,x2000-phy
+ 
+   reg:
+-    maxItems: 1
++    minItems: 1
++    maxItems: 2
+ 
+   clocks:
+     maxItems: 1
+@@ -35,6 +37,141 @@ properties:
+   '#phy-cells':
+     const: 0
+ 
++  ingenic,preemphasis-mode:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 7
++    description: |
++      TX pre-emphasis enable mode (PREEMPH1 bits 2:0).
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
++  ingenic,preemphasis-half-bit:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 1
++    description: |
++      TX half-bit pre-emphasis selection (HBPREEM).
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
++  ingenic,preemphasis-amplitude:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 7
++    description: |
++      TX high-speed pre-emphasis amplitude (TXHSPREEM).
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
++  ingenic,disconnect-threshold-msb:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 3
++    description: |
++      High-speed disconnect threshold bits in DISCONN_DET_MSB.
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
++  ingenic,disconnect-threshold-middle:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 1
++    description: |
++      High-speed disconnect threshold bit in SQUELCH_DISCONN.
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
++  ingenic,rx-squelch-tune:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 15
++    description: |
++      Receive squelch threshold tuning (RXSQTRI).
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
++  ingenic,disconnect-threshold-lsb:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 1
++    description: |
++      High-speed disconnect threshold bit in DISCONN_DET_LSB.
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
++  ingenic,hs-receiver-bias:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 1
++    description: |
++      High-speed receiver bias selection (HSRECVBIAS).
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
++  ingenic,disconnect-bias:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 3
++    description: |
++      Disconnect detector bias selection (DISDETBIAS).
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
++  ingenic,hs-output-impedance:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 31
++    description: |
++      High-speed output impedance tuning (ODTTUNE).
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
++  ingenic,b-session-valid-tune:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 7
++    description: |
++      B-session valid threshold tuning (BSEREFTUNE).
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
++  ingenic,a-session-valid-tune:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 7
++    description: |
++      A-session valid threshold tuning (ASEREFTUNE).
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
++  ingenic,vbus-valid-tune:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 7
++    description: |
++      VBUS valid threshold tuning (VBUSREFTUNE).
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
++  ingenic,session-end-tune:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 7
++    description: |
++      Session end threshold tuning (SEREFTUNE).
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
++  ingenic,hs-eye-tune:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 7
++    description: |
++      High-speed eye tuning (HSEYETUNE).
++      Encoded register field value, without shifting. If omitted, the
++      hardware field is left unchanged. Only supported on X1600.
++
+ required:
+   - compatible
+   - reg
+@@ -42,6 +179,37 @@ required:
+   - vcc-supply
+   - '#phy-cells'
+ 
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: ingenic,x1600-phy
++    then:
++      properties:
++        reg:
++          minItems: 2
++          maxItems: 2
++    else:
++      properties:
++        ingenic,preemphasis-mode: false
++        ingenic,preemphasis-half-bit: false
++        ingenic,preemphasis-amplitude: false
++        ingenic,disconnect-threshold-msb: false
++        ingenic,disconnect-threshold-middle: false
++        ingenic,rx-squelch-tune: false
++        ingenic,disconnect-threshold-lsb: false
++        ingenic,hs-receiver-bias: false
++        ingenic,disconnect-bias: false
++        ingenic,hs-output-impedance: false
++        ingenic,b-session-valid-tune: false
++        ingenic,a-session-valid-tune: false
++        ingenic,vbus-valid-tune: false
++        ingenic,session-end-tune: false
++        ingenic,hs-eye-tune: false
++        reg:
++          maxItems: 1
++
+ additionalProperties: false
+ 
+ examples:
+diff --git a/drivers/phy/ingenic/phy-ingenic-usb.c b/drivers/phy/ingenic/phy-ingenic-usb.c
+index 7e62d46850fdafcf62cf61b0e5c3da4dc663ec51..672bdc6626633b718d7b8057ddf811518de8dff4 100644
+--- a/drivers/phy/ingenic/phy-ingenic-usb.c
++++ b/drivers/phy/ingenic/phy-ingenic-usb.c
+@@ -22,6 +22,18 @@
+ #define REG_USBVBFIL_OFFSET			0x08
+ #define REG_USBPCR1_OFFSET			0x0c
+ 
++/* X1600 PHY register offsets */
++#define REG_PHY_PREEMPH1                	0x30
++#define REG_PHY_PREEMPH2                	0x40
++#define REG_PHY_DISCONN_DET_MSB         	0x60
++#define REG_PHY_SQUELCH_DISCONN         	0x64
++#define REG_PHY_DISCONN_DET_LSB         	0x68
++#define REG_PHY_VBUS                    	0x108
++#define REG_PHY_SESSIONVALID            	0x10c
++#define REG_PHY_SESSIONEND              	0x110
++#define REG_PHY_HS_ODT                  	0x11c
++#define REG_PHY_EYETUNE                 	0x124
++
+ /* bits within the USBPCR register */
+ #define USBPCR_USB_MODE				BIT(31)
+ #define USBPCR_AVLD_REG				BIT(30)
+@@ -83,6 +95,63 @@
+ #define USBPCR1_PORT_RST			BIT(21)
+ #define USBPCR1_WORD_IF_16BIT		BIT(19)
+ 
++/* bits within the X1600 PHY registers */
++#define PHY_PREEMPH1_ENABLE                   	GENMASK(2, 0)
++#define PHY_PREEMPH2_HBPREEM                  	BIT(6)
++#define PHY_PREEMPH2_TXHSPREEM                	GENMASK(5, 3)
++#define PHY_DISCONN_DET_MSB_HSDISDETRI        	GENMASK(1, 0)
++#define PHY_SQUELCH_DISCONN_HSDISDETRI        	BIT(7)
++#define PHY_SQUELCH_DISCONN_RXSQTRI           	GENMASK(6, 3)
++#define PHY_DISCONN_DET_LSB_HSDISDETRI        	BIT(0)
++#define PHY_HS_ODT_HSRECVBIAS                 	BIT(7)
++#define PHY_HS_ODT_DISDETBIAS                 	GENMASK(6, 5)
++#define PHY_HS_ODT_ODTTUNE                    	GENMASK(4, 0)
++#define PHY_SESSIONVALID_BSEREFTUNE           	GENMASK(5, 3)
++#define PHY_SESSIONVALID_ASEREFTUNE           	GENMASK(2, 0)
++#define PHY_SESSIONEND_VBUSREFTUNE            	GENMASK(5, 3)
++#define PHY_SESSIONEND_SEREFTUNE              	GENMASK(2, 0)
++#define PHY_EYETUNE_HSEYETUNE                 	GENMASK(4, 2)
++#define PHY_VBUS_VBUSDETPOWERDOWN	BIT(3)
++
++struct x1600_usb_phy_tuning {
++	const char *property;
++	u32 reg;
++	u32 mask;
++};
++
++static const struct x1600_usb_phy_tuning x1600_usb_phy_tuning[] = {
++	{ "ingenic,preemphasis-mode",
++	  REG_PHY_PREEMPH1, PHY_PREEMPH1_ENABLE },
++	{ "ingenic,preemphasis-half-bit",
++	  REG_PHY_PREEMPH2, PHY_PREEMPH2_HBPREEM },
++	{ "ingenic,preemphasis-amplitude",
++	  REG_PHY_PREEMPH2, PHY_PREEMPH2_TXHSPREEM },
++	{ "ingenic,disconnect-threshold-msb",
++	  REG_PHY_DISCONN_DET_MSB, PHY_DISCONN_DET_MSB_HSDISDETRI },
++	{ "ingenic,disconnect-threshold-middle",
++	  REG_PHY_SQUELCH_DISCONN, PHY_SQUELCH_DISCONN_HSDISDETRI },
++	{ "ingenic,rx-squelch-tune",
++	  REG_PHY_SQUELCH_DISCONN, PHY_SQUELCH_DISCONN_RXSQTRI },
++	{ "ingenic,disconnect-threshold-lsb",
++	  REG_PHY_DISCONN_DET_LSB, PHY_DISCONN_DET_LSB_HSDISDETRI },
++	{ "ingenic,hs-receiver-bias",
++	  REG_PHY_HS_ODT, PHY_HS_ODT_HSRECVBIAS },
++	{ "ingenic,disconnect-bias",
++	  REG_PHY_HS_ODT, PHY_HS_ODT_DISDETBIAS },
++	{ "ingenic,hs-output-impedance",
++	  REG_PHY_HS_ODT, PHY_HS_ODT_ODTTUNE },
++	{ "ingenic,b-session-valid-tune",
++	  REG_PHY_SESSIONVALID, PHY_SESSIONVALID_BSEREFTUNE },
++	{ "ingenic,a-session-valid-tune",
++	  REG_PHY_SESSIONVALID, PHY_SESSIONVALID_ASEREFTUNE },
++	{ "ingenic,vbus-valid-tune",
++	  REG_PHY_SESSIONEND, PHY_SESSIONEND_VBUSREFTUNE },
++	{ "ingenic,session-end-tune",
++	  REG_PHY_SESSIONEND, PHY_SESSIONEND_SEREFTUNE },
++	{ "ingenic,hs-eye-tune",
++	  REG_PHY_EYETUNE, PHY_EYETUNE_HSEYETUNE },
++};
++
+ struct ingenic_soc_info {
+ 	void (*usb_phy_init)(struct phy *phy);
+ };
+@@ -92,6 +161,8 @@ struct ingenic_usb_phy {
+ 
+ 	struct phy *phy;
+ 	void __iomem *base;
++	void __iomem *extra;
++	int tuning[ARRAY_SIZE(x1600_usb_phy_tuning)];
+ 	struct clk *clk;
+ 	struct regulator *vcc_supply;
+ };
+@@ -124,7 +195,6 @@ static int ingenic_usb_phy_exit(struct phy *phy)
+ 	struct ingenic_usb_phy *priv = phy_get_drvdata(phy);
+ 
+ 	clk_disable_unprepare(priv->clk);
+-	regulator_disable(priv->vcc_supply);
+ 
+ 	return 0;
+ }
+@@ -260,6 +330,67 @@ static void x1000_usb_phy_init(struct phy *phy)
+ 	writel(reg, priv->base + REG_USBPCR_OFFSET);
+ }
+ 
++static int x1600_usb_phy_read_tuning(struct device *dev,
++				     struct ingenic_usb_phy *priv)
++{
++	const struct x1600_usb_phy_tuning *field;
++	u32 value;
++	unsigned int i;
++	int err;
++
++	for (i = 0; i < ARRAY_SIZE(x1600_usb_phy_tuning); i++) {
++		field = &x1600_usb_phy_tuning[i];
++		priv->tuning[i] = -1;
++		if (!of_find_property(dev->of_node, field->property, NULL))
++			continue;
++
++		err = of_property_read_u32(dev->of_node, field->property, &value);
++		if (err)
++			return dev_err_probe(dev, err, "Invalid %s\n",
++					     field->property);
++		if (value > (field->mask >> __ffs(field->mask)))
++			return dev_err_probe(dev, -EINVAL, "%s out of range\n",
++					     field->property);
++
++		priv->tuning[i] = value;
++	}
++
++	return 0;
++}
++
++static void x1600_usb_phy_init(struct phy *phy)
++{
++	struct ingenic_usb_phy *priv = phy_get_drvdata(phy);
++	const struct x1600_usb_phy_tuning *field;
++	unsigned int i;
++	u32 reg;
++
++	writel(USBPCR1_PORT_RST, priv->base + REG_USBPCR1_OFFSET);
++
++	writel(USBPCR_USB_MODE | USBPCR_POR, priv->base + REG_USBPCR_OFFSET);
++	udelay(500);
++	writel(USBPCR_USB_MODE, priv->base + REG_USBPCR_OFFSET);
++	writel(USBPCR1_DMPD | USBPCR1_DPPD, priv->base + REG_USBPCR1_OFFSET);
++	udelay(500);
++
++	/* Missing properties leave the corresponding hardware fields untouched. */
++	for (i = 0; i < ARRAY_SIZE(x1600_usb_phy_tuning); i++) {
++		if (priv->tuning[i] < 0)
++			continue;
++
++		field = &x1600_usb_phy_tuning[i];
++		reg = readl(priv->extra + field->reg);
++		reg &= ~field->mask;
++		reg |= field_prep(field->mask, priv->tuning[i]);
++		writel(reg, priv->extra + field->reg);
++	}
++
++#ifdef CONFIG_USB_DWC2_EXT_VBUS_DETECT
++	reg = readl(priv->extra + REG_PHY_VBUS) | PHY_VBUS_VBUSDETPOWERDOWN;
++	writel(reg, priv->extra + REG_PHY_VBUS);
++#endif
++}
++
+ static void x1830_usb_phy_init(struct phy *phy)
+ {
+ 	struct ingenic_usb_phy *priv = phy_get_drvdata(phy);
+@@ -305,6 +436,10 @@ static const struct ingenic_soc_info x1000_soc_info = {
+ 	.usb_phy_init = x1000_usb_phy_init,
+ };
+ 
++static const struct ingenic_soc_info x1600_soc_info = {
++	.usb_phy_init = x1600_usb_phy_init,
++};
++
+ static const struct ingenic_soc_info x1830_soc_info = {
+ 	.usb_phy_init = x1830_usb_phy_init,
+ };
+@@ -336,6 +471,16 @@ static int ingenic_usb_phy_probe(struct platform_device *pdev)
+ 		return PTR_ERR(priv->base);
+ 	}
+ 
++	if (priv->soc_info->usb_phy_init == x1600_usb_phy_init) {
++		priv->extra = devm_platform_ioremap_resource(pdev, 1);
++		if (IS_ERR(priv->extra))
++			return PTR_ERR(priv->extra);
++
++		err = x1600_usb_phy_read_tuning(dev, priv);
++		if (err)
++			return err;
++	}
++
+ 	priv->clk = devm_clk_get(dev, NULL);
+ 	if (IS_ERR(priv->clk)) {
+ 		err = PTR_ERR(priv->clk);
+@@ -364,6 +509,7 @@ static const struct of_device_id ingenic_usb_phy_of_matches[] = {
+ 	{ .compatible = "ingenic,jz4775-phy", .data = &jz4775_soc_info },
+ 	{ .compatible = "ingenic,jz4780-phy", .data = &jz4780_soc_info },
+ 	{ .compatible = "ingenic,x1000-phy", .data = &x1000_soc_info },
++	{ .compatible = "ingenic,x1600-phy", .data = &x1600_soc_info },
+ 	{ .compatible = "ingenic,x1830-phy", .data = &x1830_soc_info },
+ 	{ .compatible = "ingenic,x2000-phy", .data = &x2000_soc_info },
+ 	{ /* sentinel */ }

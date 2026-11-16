@@ -40,7 +40,7 @@ If the device does not appear in Device Manager, check that the USB cable suppor
 
 ### Ensure the right directory
 
-Unpack the `clk-mini-ultra-nor` firmware bundle and run the wizard from its `tools` directory. The default firmware and recovery paths are relative to that directory.
+Unpack the `x1600-aic8800d80` firmware bundle and run the wizard from its `tools` directory. The default firmware and recovery paths are relative to that directory.
 
 ```console
 $ cd tools/
@@ -83,7 +83,7 @@ Connect the computer to the device's `VehiConn_*` hotspot (password `88888888` o
 $ pipx run wizard.py --preset wooboobox
 ```
 
-The wizard enters USB boot mode, starts CatPlay recovery and flashes `../clk-mini-ultra-nor.c2aflash`. Recovery is reached at `192.168.51.2` over USB. On Unix, the wizard uses `sudo` for the USB stages when needed; on Windows it runs those stages without `sudo`.
+The wizard enters USB boot mode, starts CatPlay recovery and flashes `../x1600-aic8800d80.c2aflash`. Recovery is reached at `192.168.51.2` over USB. On Unix, the wizard uses `sudo` for the USB stages when needed; on Windows it runs those stages without `sudo`.
 
 You can select a different image with `--fw PATH`. Use `--no-flash` to stop after starting recovery.
 

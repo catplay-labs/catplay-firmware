@@ -1,0 +1,83 @@
+Subject: [PATCH] dt-bindings: add IRQ, GMAC and audio constants used by X1600
+Upstream-Status: Pending
+
+Provide the shared MIPS interrupt numbering, Ingenic GMAC interface modes
+and BAIC audio-format constants included by the X1600 device description.
+
+diff --git a/include/dt-bindings/interrupt-controller/mips-irq.h b/include/dt-bindings/interrupt-controller/mips-irq.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..963d38f5894e39773bd7c518800eed0d37f9f64c
+--- /dev/null
++++ b/include/dt-bindings/interrupt-controller/mips-irq.h
+@@ -0,0 +1,16 @@
++#ifndef _DT_BINDINGS_INTERRUPT_CONTROLLER_MIPS_IRQ_H
++#define _DT_BINDINGS_INTERRUPT_CONTROLLER_MIPS_IRQ_H
++
++#define MIPS_CPU_IRQ_BASE	(0)
++
++#define CORE_INTC_IRQ       (MIPS_CPU_IRQ_BASE + 2)
++#define CORE_MAILBOX_IRQ    (MIPS_CPU_IRQ_BASE + 3)
++#define CORE_SYS_OST_IRQ    (MIPS_CPU_IRQ_BASE + 4)
++
++#define CORE_IRQS_END	(7)
++
++#define INTC_NR_IRQS    (64)
++#define IRQ_INTC_BASE   (CORE_IRQS_END + 1)
++#define IRQ_INTC_END    (IRQ_INTC_BASE + INTC_NR_IRQS - 1)
++
++#endif
+diff --git a/include/dt-bindings/net/ingenic_gmac.h b/include/dt-bindings/net/ingenic_gmac.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..32207f24e965a2429da70237d16f607642b3b470
+--- /dev/null
++++ b/include/dt-bindings/net/ingenic_gmac.h
+@@ -0,0 +1,9 @@
++#ifndef __INGENIC_GMAC_H__
++#define __INGENIC_GMAC_H__
++
++#define GMII	0
++#define RGMII	1
++#define MII	2
++#define RMII	4
++
++#endif
+diff --git a/include/dt-bindings/sound/ingenic-baic.h b/include/dt-bindings/sound/ingenic-baic.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b33d9bffdad7aa853d5a14ad845467465685c43b
+--- /dev/null
++++ b/include/dt-bindings/sound/ingenic-baic.h
+@@ -0,0 +1,34 @@
++#ifndef __INGENIC_BAIC_H__
++#define __INGENIC_BAIC_H__
++
++#undef BIT
++#define BIT(n)			(1 << (n))
++#define BAIC_DAIFMT_NO_GRP	(0x0 << 0)
++#define BAIC_DAIFMT_I2S_GRP	(0x1 << 0)
++#define BAIC_DAIFMT_DSP_GRP	(0x2 << 0)
++#define BAIC_DAIFMT_GRP_MSK	(0x3 << 0)
++#define BAIC_DAIFMT_MODEA	(BIT(0) << 2)	/*dsp grp*/
++#define BAIC_DAIFMT_MODEB	(BIT(1) << 2)
++#define BAIC_DAIFMT_PCM		(BIT(0) << 4)
++#define BAIC_DAIFMT_DSP		(BIT(1) << 4)
++#define BAIC_DAIFMT_TDM2	(BIT(2) << 4)
++#define BAIC_DAIFMT_TDM1	(BIT(3) << 4)
++#define BAIC_DAIFMT_I2S		(BIT(4) << 4)	/*i2s grp*/
++#define BAIC_DAIFMT_RIGHTJ	(BIT(5) << 4)
++#define BAIC_DAIFMT_LEFTJ	(BIT(6) << 4)
++
++#define BAIC_NO_REPLAY		(BIT(7) << 4)	/*just support replay or record*/
++#define BAIC_NO_RECORD		(BIT(8) << 4)
++
++#define BAIC_PCM_MODE	(BAIC_DAIFMT_PCM|BAIC_DAIFMT_DSP_GRP|BAIC_DAIFMT_MODEA|BAIC_DAIFMT_MODEB)
++#define BAIC_DSP_MODE	(BAIC_DAIFMT_DSP|BAIC_DAIFMT_DSP_GRP|BAIC_DAIFMT_MODEA|BAIC_DAIFMT_MODEB)
++#define BAIC_TDM1_MODE	(BAIC_DAIFMT_TDM1|BAIC_DAIFMT_DSP_GRP|BAIC_DAIFMT_MODEA|BAIC_DAIFMT_MODEB)
++#define BAIC_TDM2_MODE	(BAIC_DAIFMT_TDM2|BAIC_DAIFMT_DSP_GRP|BAIC_DAIFMT_MODEA|BAIC_DAIFMT_MODEB)
++#define BAIC_I2S_MODE	(BAIC_DAIFMT_I2S|BAIC_DAIFMT_RIGHTJ|BAIC_DAIFMT_LEFTJ|BAIC_DAIFMT_I2S_GRP)
++
++#define BAIC_2AND(x,y)		((x) | (y))
++#define BAIC_3AND(x,y,z)	((x) | (y) | (z))
++#define BAIC_4AND(x,y,z,m)	((x) | (y) | (z) | (m))
++#define BAIC_5AND(x,y,z,m,n)	((x) | (y) | (z) | (m) | (n))
++
++#endif /*__INGENIC_BAIC_H__*/

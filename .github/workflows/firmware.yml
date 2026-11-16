@@ -5,8 +5,8 @@ on:
     branches: [master]
   workflow_dispatch:
     inputs:
-      machine-clk-mini-ultra-nor:
-        description: Build clk-mini-ultra-nor and recovery
+      machine-x1600-aic8800d80:
+        description: Build x1600-aic8800d80 and recovery
         type: boolean
         default: false
       machine-v821b-rtl8733bs:
@@ -83,7 +83,7 @@ jobs:
         env:
           MACHINE_SELECTION: >-
             {
-              "clk-mini-ultra-nor": ${{ github.event_name != 'workflow_dispatch' || inputs.machine-clk-mini-ultra-nor }},
+              "x1600-aic8800d80": ${{ github.event_name != 'workflow_dispatch' || inputs.machine-x1600-aic8800d80 }},
               "v821b-rtl8733bs": ${{ github.event_name != 'workflow_dispatch' || inputs.machine-v821b-rtl8733bs }},
               "v851s3-aic8800d80": ${{ github.event_name != 'workflow_dispatch' || inputs.machine-v851s3-aic8800d80 }},
               "v553-aic8800d80": ${{ github.event_name != 'workflow_dispatch' || inputs.machine-v553-aic8800d80 }}
