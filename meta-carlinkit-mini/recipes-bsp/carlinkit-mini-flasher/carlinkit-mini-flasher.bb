@@ -6,7 +6,6 @@ inherit allarch deploy
 
 SRC_URI += " \
     file://errors.py \
-    file://exploit.sh \
     file://flash.py \
     file://reboot2recovery.py \
     file://recov.py \
@@ -20,7 +19,6 @@ S = "${UNPACKDIR}"
 
 C2A_FLASHER_FILES = " \
     errors.py \
-    exploit.sh \
     flash.py \
     reboot2recovery.py \
     recov.py \
