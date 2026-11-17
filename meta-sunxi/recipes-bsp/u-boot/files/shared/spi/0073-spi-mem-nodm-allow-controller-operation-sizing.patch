@@ -1,0 +1,16 @@
+Subject: [PATCH] spi: mem: allow non-DM controllers to constrain operation sizes
+Upstream-Status: Pending
+
+diff --git a/drivers/spi/spi-mem-nodm.c b/drivers/spi/spi-mem-nodm.c
+index 6d9ab617..55f87e69 100644
+--- a/drivers/spi/spi-mem-nodm.c
++++ b/drivers/spi/spi-mem-nodm.c
+@@ -85,7 +85,7 @@ int spi_mem_exec_op(struct spi_slave *slave,
+ 	return 0;
+ }
+ 
+-int spi_mem_adjust_op_size(struct spi_slave *slave,
++int __weak spi_mem_adjust_op_size(struct spi_slave *slave,
+ 			   struct spi_mem_op *op)
+ {
+ 	unsigned int len;
