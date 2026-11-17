@@ -44,6 +44,7 @@ C2A_UBOOT_SHARED_FILES = " \
     file://shared/0041-spl-zlib-o3.patch \
     file://shared/0044-spl-crc32-slicing4.patch \
     file://shared/nor/0060-spi-nor-spl-manufacturers.patch \
+    file://shared/spl/0071-tpl-legacy-uimage-loader.patch \
 "
 
 C2A_UBOOT_V851_FILES = " \

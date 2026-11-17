@@ -1,0 +1,73 @@
+Subject: [PATCH] spl: support legacy uImage parsing and CRC checks in TPL
+Upstream-Status: Pending
+
+diff --git a/common/spl/Kconfig.tpl b/common/spl/Kconfig.tpl
+index a535b61e..6c212c8f 100644
+--- a/common/spl/Kconfig.tpl
++++ b/common/spl/Kconfig.tpl
+@@ -342,4 +342,17 @@ config TPL_YMODEM_SUPPORT
+ 	  means of transmitting U-Boot over a serial line for using in TPL,
+ 	  with a checksum to ensure correctness.
+ 
++config TPL_LEGACY_IMAGE_FORMAT
++	bool "Support TPL loading and booting of Legacy images"
++	depends on !TI_SECURE_DEVICE
++	help
++	  Allow the standard TPL loaders to load a legacy uImage next stage.
++
++config TPL_LEGACY_IMAGE_CRC_CHECK
++	bool "Check CRC of Legacy images in TPL"
++	depends on TPL_LEGACY_IMAGE_FORMAT
++	select TPL_CRC32
++	help
++	  Validate the legacy uImage payload CRC before entering the next stage.
++
+ endmenu
+diff --git a/common/spl/spl.c b/common/spl/spl.c
+index 15ee5265..0074dd3e 100644
+--- a/common/spl/spl.c
++++ b/common/spl/spl.c
+@@ -605,7 +605,7 @@ static int spl_load_image(struct spl_image_info *spl_image,
+ 	bootdev.boot_device_name = NULL;
+ 
+ 	ret = loader->load_image(spl_image, &bootdev);
+-#ifdef CONFIG_SPL_LEGACY_IMAGE_CRC_CHECK
++#if CONFIG_IS_ENABLED(LEGACY_IMAGE_CRC_CHECK)
+ 	if (!ret && spl_image->dcrc_length) {
+ 		/* check data crc */
+ 		ulong dcrc = crc32_wd(0, (unsigned char *)spl_image->dcrc_data,
+diff --git a/common/spl/spl_legacy.c b/common/spl/spl_legacy.c
+index b3efb3e6..e1cea3b1 100644
+--- a/common/spl/spl_legacy.c
++++ b/common/spl/spl_legacy.c
+@@ -38,7 +38,7 @@ int spl_parse_legacy_header(struct spl_image_info *spl_image,
+ 	u32 header_size = sizeof(struct legacy_img_hdr);
+ 
+ 	/* check uImage header CRC */
+-	if (IS_ENABLED(CONFIG_SPL_LEGACY_IMAGE_CRC_CHECK) &&
++	if (CONFIG_IS_ENABLED(LEGACY_IMAGE_CRC_CHECK) &&
+ 	    !image_check_hcrc(header)) {
+ 		puts("SPL: Image header CRC check failed!\n");
+ 		return -EINVAL;
+@@ -62,7 +62,7 @@ int spl_parse_legacy_header(struct spl_image_info *spl_image,
+ 			header_size;
+ 	}
+ 
+-#ifdef CONFIG_SPL_LEGACY_IMAGE_CRC_CHECK
++#if CONFIG_IS_ENABLED(LEGACY_IMAGE_CRC_CHECK)
+ 	/* store uImage data length and CRC to check later */
+ 	spl_image->dcrc_data = image_get_load(header);
+ 	spl_image->dcrc_length = image_get_data_size(header);
+diff --git a/include/spl.h b/include/spl.h
+index 390d18fd..1f90bc1d 100644
+--- a/include/spl.h
++++ b/include/spl.h
+@@ -298,7 +298,7 @@ struct spl_image_info {
+ 	ulong fdt_size;
+ 	u32 flags;
+ 	void *arg;
+-#ifdef CONFIG_SPL_LEGACY_IMAGE_CRC_CHECK
++#if CONFIG_IS_ENABLED(LEGACY_IMAGE_CRC_CHECK)
+ 	ulong dcrc_data;
+ 	ulong dcrc_length;
+ 	ulong dcrc;
