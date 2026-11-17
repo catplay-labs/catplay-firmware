@@ -1,0 +1,55 @@
+Subject: [PATCH] spl: mips: support Falcon boot with the external DTB ABI
+Upstream-Status: Pending
+
+diff --git a/arch/mips/lib/spl.c b/arch/mips/lib/spl.c
+index 4949b17b..54866c26 100644
+--- a/arch/mips/lib/spl.c
++++ b/arch/mips/lib/spl.c
+@@ -4,8 +4,12 @@
+  */
+ 
+ #include <cpu_func.h>
++#include <hang.h>
+ #include <log.h>
+ #include <spl.h>
++#include <asm/global_data.h>
++
++DECLARE_GLOBAL_DATA_PTR;
+ 
+ void __noreturn jump_to_image(struct spl_image_info *spl_image)
+ {
+@@ -19,3 +23,21 @@ void __noreturn jump_to_image(struct spl_image_info *spl_image)
+ 	debug("image entry point: 0x%lx\n", spl_image->entry_point);
+ 	image_entry();
+ }
++
++#if CONFIG_IS_ENABLED(OS_BOOT)
++void __noreturn jump_to_image_linux(struct spl_image_info *image)
++{
++	typedef void (*kernel_t)(long, ulong, ulong, ulong);
++	kernel_t kernel = (kernel_t)image->entry_point;
++	void *fdt = image->arg;
++
++	/* MIPS has no flush_cache_all(); cover every loaded image in RAM. */
++	flush_cache(gd->ram_base, gd->ram_size);
++	if (fdt)
++		kernel(-2, (ulong)fdt, 0, 0);
++	else
++		/* Without an external DTB, use the kernel built-in command line. */
++		kernel(0, 0, 0, 0);
++	hang();
++}
++#endif
+diff --git a/common/spl/Kconfig b/common/spl/Kconfig
+index 3adb91e0..00637cec 100644
+--- a/common/spl/Kconfig
++++ b/common/spl/Kconfig
+@@ -1236,7 +1236,7 @@ config SPL_ONENAND_SUPPORT
+ config SPL_OS_BOOT
+ 	bool "Activate Falcon Mode"
+ 	select SPL_OS_BOOT_SECURE if TI_SECURE_DEVICE
+-	depends on ARM || MICROBLAZE || PPC
++	depends on ARM || MICROBLAZE || PPC || MIPS
+ 	help
+ 	  Enable booting directly to an OS from SPL.
+ 	  for more info read doc/develop/falcon.rst

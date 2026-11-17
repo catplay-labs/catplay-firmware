@@ -1,0 +1,20 @@
+Subject: [PATCH] spl: fit: preserve the MIPS mapping of loaded device trees
+Upstream-Status: Pending
+
+diff --git a/common/spl/spl_fit.c b/common/spl/spl_fit.c
+index 9c894ebb..dcb30e42 100644
+--- a/common/spl/spl_fit.c
++++ b/common/spl/spl_fit.c
+@@ -518,7 +518,12 @@ static int spl_fit_append_fdt(struct spl_image_info *spl_image,
+ 		if (ret < 0)
+ 			return ret;
+ 
++#ifdef CONFIG_MIPS
++		/* Preserve the MIPS mapping used by load_simple_fit(). */
++		spl_image->fdt_addr = map_sysmem(image_info.load_addr, image_info.size);
++#else
+ 		spl_image->fdt_addr = phys_to_virt(image_info.load_addr);
++#endif
+ 	}
+ 
+ 	if (CONFIG_IS_ENABLED(FIT_IMAGE_TINY))
