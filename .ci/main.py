@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import os
 import re
@@ -119,9 +120,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "downloads objects with rclone; upload failures are warnings"
         ),
     )
-    parser.add_argument("--hashserve", metavar="HOST:PORT",
-                        help="shared hash equivalence server; upload errors become fatal")
-    return parser.parse_args(argv)
+    parser.add_argument("--hashserve", metavar="ENDPOINT",
+                        help="external hash equivalence server; upload errors become fatal")
+    parser.add_argument("--s3-hashserv", metavar="S3_URL",
+                        help="run local hashserv using an S3 .sqlite3.gz snapshot or current.json; warn if missing")
+    parser.add_argument("--s3-hashserv-upload", metavar="S3_URL",
+                        help="upload local hashserv snapshot after the build to this exact .sqlite3.gz S3 URL")
+    args = parser.parse_args(argv)
+    if args.hashserve and (args.s3_hashserv or args.s3_hashserv_upload):
+        parser.error("--hashserve cannot be combined with local S3 hashserv options")
+    return args
 
 
 def normalize_state_s3(value: str) -> str:
@@ -199,8 +207,10 @@ def hashserve_config(endpoint: str | None) -> str:
     if not endpoint:
         return ""
     host, separator, port = endpoint.rpartition(":")
-    if not separator or not re.fullmatch(r"[A-Za-z0-9.-]+", host) or not port.isdigit() or not 1 <= int(port) <= 65535:
-        raise ValueError("--hashserve requires HOST:PORT")
+    unix = re.fullmatch(r"unix:///[-A-Za-z0-9_./]+", endpoint)
+    if not unix and (not separator or not re.fullmatch(r"[A-Za-z0-9.-]+", host)
+                     or not port.isdigit() or not 1 <= int(port) <= 65535):
+        raise ValueError("--hashserve requires HOST:PORT or an absolute unix:/// socket path")
     return ('BB_SIGNATURE_HANDLER = "OEEquivHash"\n'
             f'BB_HASHSERVE = "{endpoint}"\n'
             'BB_HASHSERVE_UPSTREAM = ""\n')
@@ -408,7 +418,7 @@ def upload_s3_cache(build_dir: Path, *, required: bool = False) -> None:
     rclone_path = shutil.which("rclone")
     if rclone_path is None:
         if required:
-            raise ValueError("s3-upload: rclone is required with shared hashserv")
+            raise ValueError("s3-upload: rclone is required with hashserv")
         print(
             "WARNING: s3-upload: rclone executable not found; upload skipped",
             file=sys.stderr,
@@ -447,7 +457,7 @@ def upload_s3_cache(build_dir: Path, *, required: bool = False) -> None:
 
     if not succeeded:
         if required:
-            raise ValueError("s3-upload failed with shared hashserv")
+            raise ValueError("s3-upload failed with hashserv")
         print(
             f"WARNING: s3-upload: finished with errors after "
             f"{elapsed_seconds:.1f}s; successful build result is preserved",
@@ -576,6 +586,8 @@ def run_bitbake(
     machine: str,
     bitbake_args: Sequence[str],
     state_s3_config: Path | None,
+    *,
+    timeout: float | None = None,
 ) -> int:
     shell_script = r"""
 set -e
@@ -612,8 +624,34 @@ exec bitbake "$@"
             *command_args,
         ],
         check=False,
+        timeout=timeout,
     )
     return completed.returncode
+
+
+def stop_bitbake(firmware_dir: Path, build_dir: Path, machine: str, *, timeout: float = 30) -> None:
+    """Wait for daemon/task shutdown, not just the asynchronous kill request."""
+    deadline = time.monotonic() + timeout
+    status = run_bitbake(firmware_dir, build_dir, machine, ['--kill-server'], None, timeout=timeout)
+    if status:
+        raise RuntimeError(f'Could not stop interrupted BitBake server (exit {status})')
+    path = build_dir / 'bitbake.lock'
+    while time.monotonic() < deadline:
+        try:
+            with path.open() as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    # Do not mistake an unlinked/replaced inode for the current
+                    # daemon's lock, and never unlink BitBake's own lock file.
+                    if os.fstat(lock.fileno()).st_ino == path.stat().st_ino:
+                        return
+        except FileNotFoundError:
+            return
+        time.sleep(.1)
+    raise RuntimeError('Timed out waiting for interrupted BitBake tasks to stop')
 
 
 def wait_hashserve(endpoint: str | None, firmware_dir: Path, *, timeout: float = 180) -> None:
@@ -645,11 +683,28 @@ def wait_hashserve(endpoint: str | None, firmware_dir: Path, *, timeout: float =
 
 
 def execute(args: argparse.Namespace) -> int:
-    firmware_dir, build_dir = resolve_directories(
-        args.firmware_dir,
-        args.build_dir,
-        args.config_dir,
-    )
+    firmware_dir, build_dir = resolve_directories(args.firmware_dir, args.build_dir, args.config_dir)
+    if args.s3_hashserv or args.s3_hashserv_upload:
+        from hashserv_snapshot import local_hashserv
+        with local_hashserv(firmware_dir / 'bitbake', args.s3_hashserv,
+                            args.s3_hashserv_upload) as endpoint:
+            args.hashserve = endpoint
+            status = None
+            try:
+                status = execute_build(args, firmware_dir, build_dir)
+                return status
+            finally:
+                if status != 0:
+                    try:
+                        machines = args.machine_values or args.machines_values
+                        stop_bitbake(firmware_dir, build_dir, machines[0])
+                    except Exception as error:
+                        print(f'WARNING: BitBake shutdown failed ({type(error).__name__}); '
+                              'original build error preserved', file=sys.stderr, flush=True)
+    return execute_build(args, firmware_dir, build_dir)
+
+
+def execute_build(args: argparse.Namespace, firmware_dir: Path, build_dir: Path) -> int:
     machines = args.machine_values or args.machines_values
     targets = args.targets or [DEFAULT_TARGET]
     state_s3 = normalize_state_s3(args.state_s3) if args.state_s3 else args.state_s3
@@ -714,7 +769,7 @@ def execute(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         return execute(parse_args(argv))
-    except ValueError as error:
+    except (ValueError, RuntimeError) as error:
         print(f"main.py: {error}", file=sys.stderr, flush=True)
         return 2
     except OSError as error:

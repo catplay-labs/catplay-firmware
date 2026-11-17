@@ -1,4 +1,4 @@
-"""S3 rendezvous and consistent SQLite snapshots for one CI hashserv session."""
+"""S3 storage and consistent SQLite snapshots shared by CI helpers."""
 import gzip
 from contextlib import closing
 import hashlib
@@ -14,6 +14,24 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 
+def s3_client():
+    """Also usable on desktops with the normal AWS credential/profile chain."""
+    options = {}
+    for variable, argument in (
+        ('S3_UPLOAD_ENDPOINT', 'endpoint_url'),
+        ('S3_UPLOAD_REGION', 'region_name'),
+        ('S3_UPLOAD_ACCESS_KEY_ID', 'aws_access_key_id'),
+        ('S3_UPLOAD_SECRET_ACCESS_KEY', 'aws_secret_access_key'),
+    ):
+        if os.environ.get(variable):
+            options[argument] = os.environ[variable]
+    return boto3.client(
+        's3', **options,
+        config=Config(signature_version='s3v4', s3={'addressing_style': 'path'},
+                      retries={'mode': 'standard', 'total_max_attempts': 4},
+                      connect_timeout=10, read_timeout=30))
+
+
 class Store:
     def __init__(self):
         self.storage_class = os.environ.get('S3_UPLOAD_STORAGE_CLASS', '').strip()
@@ -23,14 +41,7 @@ class Store:
         self.session = self.key('ci-hashserv', repository, os.environ['GITHUB_RUN_ID'],
                                 os.environ['GITHUB_RUN_ATTEMPT'])
         self.database = self.key('hashserv', repository)
-        self.client = boto3.client(
-            's3', endpoint_url=os.environ['S3_UPLOAD_ENDPOINT'],
-            region_name=os.environ['S3_UPLOAD_REGION'],
-            aws_access_key_id=os.environ['S3_UPLOAD_ACCESS_KEY_ID'],
-            aws_secret_access_key=os.environ['S3_UPLOAD_SECRET_ACCESS_KEY'],
-            config=Config(signature_version='s3v4', s3={'addressing_style': 'path'},
-                          retries={'mode': 'standard', 'total_max_attempts': 4},
-                          connect_timeout=10, read_timeout=30))
+        self.client = s3_client()
 
     def key(self, *parts):
         return '/'.join(part.strip('/') for part in (self.root, *parts) if part.strip('/'))

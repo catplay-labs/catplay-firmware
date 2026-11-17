@@ -29,6 +29,8 @@ UPLOAD_VARIABLES = (
     "S3_UPLOAD_ENDPOINT", "S3_UPLOAD_BUCKET", "S3_UPLOAD_ACCESS_KEY_ID",
     "S3_UPLOAD_SECRET_ACCESS_KEY", "S3_UPLOAD_REGION", "S3_UPLOAD_PREFIX",
     "S3_UPLOAD_STORAGE_CLASS",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "AWS_DEFAULT_REGION", "AWS_REGION",
 )
 SAFE_NAME = re.compile(r"[^a-zA-Z0-9_.-]+")
 
@@ -70,7 +72,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--state-s3", nargs="?", const="", metavar="BASE_URL",
                         help="HTTP(S)/s3:// mirror URL, or omit URL to read privately using S3_UPLOAD_*")
     parser.add_argument("--s3-upload", action="store_true")
-    parser.add_argument("--hashserve", metavar="HOST:PORT", help="shared hash equivalence server")
+    parser.add_argument("--hashserve", metavar="ENDPOINT", help="external hash equivalence server")
+    parser.add_argument("--s3-hashserv", metavar="S3_URL",
+                        help="run local hashserv using an S3 .sqlite3.gz snapshot or current.json; warn if missing")
+    parser.add_argument("--s3-hashserv-upload", metavar="S3_URL",
+                        help="upload local hashserv snapshot after the build to this exact .sqlite3.gz S3 URL")
     parser.add_argument(
         "--keep-container",
         action=argparse.BooleanOptionalAction,
@@ -96,7 +102,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="host directory receiving matched build artifacts",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.hashserve and (args.s3_hashserv or args.s3_hashserv_upload):
+        parser.error("--hashserve cannot be combined with local S3 hashserv options")
+    return args
 
 
 def checked_dir(path: Path, description: str) -> Path:
@@ -466,6 +475,10 @@ def execute_locked(args: argparse.Namespace) -> int:
         main_args.append("--s3-upload")
     if args.hashserve:
         main_args.extend(["--hashserve", args.hashserve])
+    if args.s3_hashserv:
+        main_args.extend(["--s3-hashserv", args.s3_hashserv])
+    if args.s3_hashserv_upload:
+        main_args.extend(["--s3-hashserv-upload", args.s3_hashserv_upload])
 
     docker_run = [
         "docker", "run", "--init", "--name", container,
