@@ -38,8 +38,6 @@ class Store:
         self.bucket = os.environ['S3_UPLOAD_BUCKET']
         self.root = os.environ.get('S3_UPLOAD_PREFIX', '').strip('/')
         repository = os.environ['GITHUB_REPOSITORY']
-        self.session = self.key('ci-hashserv', repository, os.environ['GITHUB_RUN_ID'],
-                                os.environ['GITHUB_RUN_ATTEMPT'])
         self.database = self.key('hashserv', repository)
         self.client = s3_client()
 
@@ -56,27 +54,11 @@ class Store:
         with response['Body'] as body:
             return body.read()
 
-    def put(self, key, data):
+    def put(self, key, data, *, metadata=None):
         options = {'StorageClass': self.storage_class} if self.storage_class else {}
+        if metadata:
+            options['Metadata'] = metadata
         self.client.put_object(Bucket=self.bucket, Key=key, Body=data, **options)
-
-    def read(self, name):
-        data = self.get(f'{self.session}/{name}.json')
-        return json.loads(data) if data is not None else None
-
-    def write(self, name, data):
-        self.put(f'{self.session}/{name}.json', json.dumps(data).encode())
-
-    def delete_session(self):
-        # Only this attempt, never persistent snapshots or another run.
-        for page in self.client.get_paginator('list_objects_v2').paginate(
-                Bucket=self.bucket, Prefix=self.session + '/'):
-            objects = [{'Key': obj['Key']} for obj in page.get('Contents', [])]
-            if objects:
-                result = self.client.delete_objects(Bucket=self.bucket,
-                                                     Delete={'Objects': objects})
-                if result.get('Errors'):
-                    raise RuntimeError('S3 rendezvous cleanup failed')
 
 
 def validate_database(filename):
@@ -92,34 +74,16 @@ def backup_database(source, destination):
     validate_database(destination)
 
 
-def restore(store, destination):
-    data = store.get(store.database + '/current.json')
-    if data is None:
-        return False
-    pointer = json.loads(data)
-    if not pointer['key'].startswith(store.database + '/snapshots/'):
-        raise RuntimeError('Snapshot pointer is outside hashserv snapshots')
-    if not pointer['key'].endswith('.sqlite3.gz'):
-        raise RuntimeError('Expected a gzip-compressed .sqlite3.gz snapshot')
-    snapshot = store.get(pointer['key'])
-    if snapshot is None or hashlib.sha256(snapshot).hexdigest() != pointer['sha256']:
-        raise RuntimeError('Missing or corrupt hashserv snapshot')
-    Path(destination).write_bytes(gzip.decompress(snapshot))
-    validate_database(destination)
-    return True
-
-
-def snapshot(store, source, directory, *, publish=True):
+def snapshot(store, source, directory):
     target = Path(directory) / f'backup-{uuid.uuid4().hex}.sqlite3'
     try:
         backup_database(source, target)
         # gzip's standard compression level (6), with a reproducible header.
         payload = gzip.compress(target.read_bytes(), compresslevel=6, mtime=0)
         key = f'{store.database}/snapshots/{time.time_ns()}-{uuid.uuid4().hex}.sqlite3.gz'
-        store.put(key, payload)
         pointer = {'key': key, 'sha256': hashlib.sha256(payload).hexdigest()}
-        if publish:
-            store.put(store.database + '/current.json', json.dumps(pointer).encode())
+        store.put(key, payload, metadata={'sha256': pointer['sha256']})
+        store.put(store.database + '/current.json', json.dumps(pointer).encode())
         return pointer
     finally:
         target.unlink(missing_ok=True)

@@ -38,9 +38,6 @@ on:
 permissions:
   contents: read
 
-env:
-  STUN_SERVER: stun.l.google.com:19302
-
 # Stable per-machine Docker volumes can be reused on persistent runners.
 concurrency:
   group: firmware-build
@@ -283,44 +280,6 @@ jobs:
             --archive "$RUNNER_TEMP/bitbake-image.tar.gz" --image-id "$IMAGE_ID" \
             --manifest-digest "$IMAGE_MANIFEST_DIGEST"
 
-  hashserv:
-    name: Hash equivalence server
-    needs: [source, image]
-    environment: Release
-    runs-on: ubuntu-24.04
-    timeout-minutes: 355
-    permissions:
-      contents: read
-      actions: read
-    env:
-      FIRMWARE_MACHINES: ${{ needs.source.outputs.machines }}
-      GH_TOKEN: ${{ github.token }}
-      S3_UPLOAD_ENDPOINT: ${{ vars.S3_UPLOAD_ENDPOINT || secrets.S3_UPLOAD_ENDPOINT }}
-      S3_UPLOAD_BUCKET: ${{ vars.S3_UPLOAD_BUCKET || secrets.S3_UPLOAD_BUCKET }}
-      S3_UPLOAD_REGION: ${{ vars.S3_UPLOAD_REGION || secrets.S3_UPLOAD_REGION }}
-      S3_UPLOAD_PREFIX: ${{ vars.S3_UPLOAD_PREFIX || secrets.S3_UPLOAD_PREFIX }}
-      S3_UPLOAD_STORAGE_CLASS: ${{ vars.S3_UPLOAD_STORAGE_CLASS || secrets.S3_UPLOAD_STORAGE_CLASS }}
-      S3_UPLOAD_ACCESS_KEY_ID: ${{ secrets.S3_UPLOAD_ACCESS_KEY_ID }}
-      S3_UPLOAD_SECRET_ACCESS_KEY: ${{ secrets.S3_UPLOAD_SECRET_ACCESS_KEY }}
-    steps:
-      - name: Initial disk usage
-        run: df -h
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - name: Install CI network tools
-        run: bash .ci/setup-ci-network.sh
-      - name: Load shared BitBake image from S3
-        env:
-          IMAGE_ID: ${{ needs.image.outputs.image-id }}
-          IMAGE_SHA256: ${{ needs.image.outputs.archive-sha256 }}
-          IMAGE_MANIFEST_DIGEST: ${{ needs.image.outputs.manifest-digest }}
-        run: |
-          python3 .ci/ci_image.py load --image-id "$IMAGE_ID" --sha256 "$IMAGE_SHA256" \
-            --manifest-digest "$IMAGE_MANIFEST_DIGEST"
-      - name: Serve shared hash equivalence and snapshot to S3
-        run: python3 .ci/ci_hashserv.py server
-
   build:
     name: Build ${{ matrix.machine }}
     needs: [source, image]
@@ -329,12 +288,10 @@ jobs:
     timeout-minutes: 315
     strategy:
       fail-fast: false
-      # Must not exceed available runners minus one: hashserv needs its own slot.
       max-parallel: ${{ fromJSON(needs.source.outputs.max-parallel-builds) }}
       matrix:
         machine: ${{ fromJSON(needs.source.outputs.machines) }}
     env:
-      FIRMWARE_MACHINES: ${{ needs.source.outputs.machines }}
       NO_COLOR: '1'
       S3_UPLOAD_ENDPOINT: ${{ vars.S3_UPLOAD_ENDPOINT || secrets.S3_UPLOAD_ENDPOINT }}
       S3_UPLOAD_BUCKET: ${{ vars.S3_UPLOAD_BUCKET || secrets.S3_UPLOAD_BUCKET }}
@@ -369,8 +326,8 @@ jobs:
               exit 1
             fi
           done
-      - name: Install CI network tools
-        run: bash .ci/setup-ci-network.sh
+      - name: Install CI S3 tools
+        run: bash .ci/setup-ci-tools.sh
       - name: Load shared BitBake image from S3
         env:
           IMAGE_ID: ${{ needs.image.outputs.image-id }}
@@ -379,16 +336,23 @@ jobs:
         run: |
           python3 .ci/ci_image.py load --image-id "$IMAGE_ID" --sha256 "$IMAGE_SHA256" \
             --manifest-digest "$IMAGE_MANIFEST_DIGEST"
+      - name: Locate hashserv snapshots for this build
+        id: hashserv-snapshot
+        run: python3 .ci/ci_hashserv.py paths --machine "$MACHINE"
       - name: Build firmware and synchronize S3 caches
+        env:
+          HASHSERV_RESTORE: ${{ steps.hashserv-snapshot.outputs.restore }}
+          HASHSERV_UPLOAD: ${{ steps.hashserv-snapshot.outputs.upload }}
         run: |
           python3 .ci/disk_usage.py run --output "$RUNNER_TEMP/disk-metrics" -- \
-            python3 .ci/ci_hashserv.py builder --machine "$MACHINE" -- \
             python3 .ci/build-fw.py \
             --firmware-dir "$GITHUB_WORKSPACE" \
             --alias "ci-$MACHINE" \
             --cached-image catplay-bitbake:ci \
             --machine "$MACHINE" \
             --state-s3 --s3-upload --no-keep-container \
+            --s3-hashserv "$HASHSERV_RESTORE" \
+            --s3-hashserv-upload "$HASHSERV_UPLOAD" \
             --artifacts-output "$RUNNER_TEMP/firmware-artifacts"
       - name: Capture final cache sizes
         if: ${{ always() }}
@@ -415,9 +379,36 @@ jobs:
           compression-level: 0
           retention-days: 1
 
+  hashserv-merge:
+    name: Merge hashserv snapshots
+    needs: [source, build]
+    if: ${{ always() && needs.source.result == 'success' && needs.build.result != 'skipped' }}
+    environment: Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      FIRMWARE_MACHINES: ${{ needs.source.outputs.machines }}
+      S3_UPLOAD_ENDPOINT: ${{ vars.S3_UPLOAD_ENDPOINT || secrets.S3_UPLOAD_ENDPOINT }}
+      S3_UPLOAD_BUCKET: ${{ vars.S3_UPLOAD_BUCKET || secrets.S3_UPLOAD_BUCKET }}
+      S3_UPLOAD_REGION: ${{ vars.S3_UPLOAD_REGION || secrets.S3_UPLOAD_REGION }}
+      S3_UPLOAD_PREFIX: ${{ vars.S3_UPLOAD_PREFIX || secrets.S3_UPLOAD_PREFIX }}
+      S3_UPLOAD_STORAGE_CLASS: ${{ vars.S3_UPLOAD_STORAGE_CLASS || secrets.S3_UPLOAD_STORAGE_CLASS }}
+      S3_UPLOAD_ACCESS_KEY_ID: ${{ secrets.S3_UPLOAD_ACCESS_KEY_ID }}
+      S3_UPLOAD_SECRET_ACCESS_KEY: ${{ secrets.S3_UPLOAD_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install CI S3 tools
+        run: bash .ci/setup-ci-tools.sh
+      - name: Merge build snapshots and publish the current hashserv database
+        run: python3 .ci/ci_hashserv.py merge
+
   pack:
     name: Pack and publish firmware release
-    needs: [source, build, hashserv]
+    needs: [source, build, hashserv-merge]
     runs-on: ubuntu-24.04
     environment: Release
     permissions:
@@ -516,7 +507,7 @@ jobs:
 
   cleanup:
     name: Remove intermediate workflow artifacts
-    needs: [source, image, hashserv, build, pack]
+    needs: [source, image, hashserv-merge, build, pack]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     environment: Release
