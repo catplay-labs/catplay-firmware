@@ -23,6 +23,7 @@ SRC_URI:append:v821 = " ${C2A_UBOOT_COMMON_FILES}"
 C2A_UBOOT_SHARED_FILES = " \
     file://shared/mips/0069-mips-spl-fit-fdt-mapping.patch \
     file://shared/mips/0070-mips-spl-falcon-linux-handoff.patch \
+    file://shared/mips/0072-mips-x1600-DMA-bridge-drain.patch \
     file://shared/0043-spl-fit-verify-image-hashes.patch \
     file://shared/0001-sunxi-egon-max-size.patch \
     file://shared/0002-sunxi-riscv-egon-build.patch \

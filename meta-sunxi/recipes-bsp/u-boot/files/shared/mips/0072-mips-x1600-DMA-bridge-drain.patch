@@ -1,0 +1,54 @@
+Subject: [PATCH] mips: x1600: drain the memory bridge after cache maintenance
+Upstream-Status: Pending
+
+diff --git a/arch/mips/lib/cache.c b/arch/mips/lib/cache.c
+index d365578b..1ccf6ede 100644
+--- a/arch/mips/lib/cache.c
++++ b/arch/mips/lib/cache.c
+@@ -17,6 +17,22 @@
+ 
+ DECLARE_GLOBAL_DATA_PTR;
+ 
++/* Drain XBurst's bridge after the cache operation and CPU sync. */
++static inline void mips_bridge_sync(void)
++{
++#ifdef CONFIG_SOC_X1600
++	__asm__ __volatile__(
++		".set push\n\t"
++		".set noreorder\n\t"
++		"lw $0, %0\n\t"
++		"nop\n\t"
++		".set pop\n\t"
++		:
++		: "m" (*(volatile u32 *)CKSEG1)
++		: "memory");
++#endif
++}
++
+ static void probe_l2(void)
+ {
+ #ifdef CONFIG_MIPS_L2_CACHE
+@@ -137,6 +153,7 @@ void __weak flush_cache(ulong start_addr, ulong size)
+ ops_done:
+ 	/* ensure cache ops complete before any further memory accesses */
+ 	sync();
++	mips_bridge_sync();
+ 
+ 	/* ensure the pipeline doesn't contain now-invalid instructions */
+ 	instruction_hazard_barrier();
+@@ -158,6 +175,7 @@ void __weak flush_dcache_range(ulong start_addr, ulong stop)
+ 
+ 	/* ensure cache ops complete before any further memory accesses */
+ 	sync();
++	mips_bridge_sync();
+ }
+ 
+ void __weak invalidate_dcache_range(ulong start_addr, ulong stop)
+@@ -176,6 +194,7 @@ void __weak invalidate_dcache_range(ulong start_addr, ulong stop)
+ 
+ 	/* ensure cache ops complete before any further memory accesses */
+ 	sync();
++	mips_bridge_sync();
+ }
+ 
+ int dcache_status(void)
