@@ -1,0 +1,749 @@
+Subject: [PATCH] spi: ingenic: share polling PIO and DMA SFC between DM and TPL
+Upstream-Status: Inappropriate [CatPlay X1600 platform support]
+
+diff --git a/arch/mips/mach-jz47xx/x1600/sfc.c b/arch/mips/mach-jz47xx/x1600/sfc.c
+new file mode 100644
+index 00000000..d1d0db67
+--- /dev/null
++++ b/arch/mips/mach-jz47xx/x1600/sfc.c
+@@ -0,0 +1,109 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* X1600 board clocks and SFC pinmux, shared by TPL and the DM frontend. */
++#include <ingenic_sfc.h>
++#include <asm/io.h>
++#include <linux/bitops.h>
++#include <linux/errno.h>
++#include <linux/iopoll.h>
++#include <linux/kernel.h>
++#include <linux/bitfield.h>
++#include <mach/x1600.h>
++
++#define CPM_CLKGR 0x20
++#define CLKGR_SFC BIT(2)
++#define CPM_SFCCDR 0x74
++#define SFCCDR_BUSY BIT(28)
++#define SFCCDR_CHANGE BIT(29)
++#define SFCCDR_STOP BIT(27)
++#define SFCCDR_MPLL BIT(30)
++#define SFCCDR_SOURCE GENMASK(31, 30)
++#define SFCCDR_DIV GENMASK(7, 0)
++#define GPIO_SHADOW_INT_CLEAR 0x718
++#define GPIO_SHADOW_MASK_CLEAR 0x728
++#define GPIO_SHADOW_PAT1_SET 0x734
++#define GPIO_SHADOW_PAT1_CLEAR 0x738
++#define GPIO_SHADOW_PAT0_CLEAR 0x748
++#define GPIO_SHADOW_LOAD 0x7f0
++#define SFC_DIV_MAX 256
++
++static int sfc_clock_wait(void __iomem *cpm)
++{
++	u32 value;
++
++	return readl_poll_timeout(cpm + CPM_SFCCDR, value,
++				 !(value & SFCCDR_BUSY), 100000);
++}
++
++static void sfc_pins(void __iomem *gpio, u32 mask, u32 bank, bool func2)
++{
++	writel(mask, gpio + GPIO_SHADOW_INT_CLEAR);
++	writel(mask, gpio + GPIO_SHADOW_MASK_CLEAR);
++	writel(mask, gpio +
++	       (func2 ? GPIO_SHADOW_PAT1_SET : GPIO_SHADOW_PAT1_CLEAR));
++	writel(mask, gpio + GPIO_SHADOW_PAT0_CLEAR);
++	writel(bank, gpio + GPIO_SHADOW_LOAD);
++}
++
++void x1600_sfc_pinmux(void __iomem *gpio)
++{
++	/* Linux's X1600 sfc group: PC17..22 function0, PB4 function2. */
++	sfc_pins(gpio, GENMASK(22, 17), 2, false);
++	sfc_pins(gpio, BIT(4), 1, true);
++}
++
++void x1600_sfc_clk_gate(void __iomem *cpm, bool enable)
++{
++	if (enable)
++		clrbits_le32(cpm + CPM_CLKGR, CLKGR_SFC);
++	else
++		setbits_le32(cpm + CPM_CLKGR, CLKGR_SFC);
++}
++
++ulong x1600_sfc_clk_get_rate(void __iomem *cpm, ulong parent)
++{
++	u32 reg = readl(cpm + CPM_SFCCDR);
++
++	if ((reg & SFCCDR_SOURCE) != SFCCDR_MPLL)
++		return -EINVAL;
++	return parent / (FIELD_GET(SFCCDR_DIV, reg) + 1);
++}
++
++ulong x1600_sfc_clk_set_rate(void __iomem *cpm, ulong parent, ulong rate)
++{
++	u32 div;
++	int ret;
++
++	if (!rate || !parent || rate > X1600_SFC_MAX_HZ * X1600_SFC_CLOCK_DIV)
++		return -EINVAL;
++	div = DIV_ROUND_UP(parent, rate);
++	if (!div || div > SFC_DIV_MAX)
++		return -EINVAL;
++	setbits_le32(cpm + CPM_SFCCDR, SFCCDR_CHANGE | SFCCDR_STOP);
++	ret = sfc_clock_wait(cpm);
++	if (ret)
++		return ret;
++	writel(SFCCDR_MPLL | SFCCDR_CHANGE | FIELD_PREP(SFCCDR_DIV, div - 1),
++	       cpm + CPM_SFCCDR);
++	ret = sfc_clock_wait(cpm);
++	if (ret)
++		return ret;
++	return x1600_sfc_clk_get_rate(cpm, parent);
++}
++
++#ifdef CONFIG_TPL_BUILD
++int x1600_sfc_setup(struct ingenic_sfc *sfc, ulong hz)
++{
++	long rate;
++
++	if (!hz || hz > X1600_SFC_MAX_HZ)
++		return -EINVAL;
++	x1600_sfc_clk_gate(X1600_CPM_BASE, true);
++	rate = x1600_sfc_clk_set_rate(X1600_CPM_BASE, X1600_MPLL_RATE,
++				       hz * X1600_SFC_CLOCK_DIV);
++	if (rate < 0)
++		return rate;
++	x1600_sfc_pinmux(X1600_GPIO_BASE);
++	ingenic_sfc_reset(sfc, rate);
++	return 0;
++}
++#endif
+diff --git a/drivers/Makefile b/drivers/Makefile
+index 5bde6b48..85d31be1 100644
+--- a/drivers/Makefile
++++ b/drivers/Makefile
+@@ -39,6 +39,7 @@ obj-$(CONFIG_$(PHASE_)SERIAL) += serial/
+ obj-$(CONFIG_$(PHASE_)SPI) += spi/
+ ifeq ($(CONFIG_$(PHASE_)SPI),)
+ obj-$(CONFIG_$(PHASE_)SPI_SUNXI_SPIF) += spi/sunxi_spif_core.o
++obj-$(CONFIG_$(PHASE_)SPI_INGENIC_SFC) += spi/ingenic_sfc_core.o
+ endif
+ obj-$(CONFIG_$(PHASE_)SPMI) += spmi/
+ obj-$(CONFIG_$(PHASE_)TIMER) += timer/
+@@ -75,7 +76,9 @@ obj-$(CONFIG_SPL_USB_GADGET) += usb/gadget/
+ obj-$(CONFIG_SPL_DM_USB) += usb/common/
+ obj-$(CONFIG_SPL_USB_MTU3) += usb/mtu3/
+ obj-$(CONFIG_SPL_USB_GADGET) += usb/gadget/udc/
+-obj-$(CONFIG_SPL_WATCHDOG) += watchdog/
++ifneq ($(CONFIG_SPL_WATCHDOG)$(CONFIG_SPL_WDT),)
++obj-y += watchdog/
++endif
+ obj-$(CONFIG_SPL_USB_HOST) += usb/host/
+ obj-$(CONFIG_SPL_SATA) += ata/ scsi/
+ obj-$(CONFIG_SPL_LEGACY_BLOCK) += block/
+@@ -138,3 +141,5 @@ obj-$(CONFIG_DM_HWSPINLOCK) += hwspinlock/
+ endif
+ 
+ obj-y += soc/
++
++obj-$(CONFIG_$(PHASE_)WDT_INGENIC_X1600) += watchdog/ingenic_wdt_core.o
+diff --git a/drivers/spi/Kconfig b/drivers/spi/Kconfig
+index 724cdd62..ff937e61 100644
+--- a/drivers/spi/Kconfig
++++ b/drivers/spi/Kconfig
+@@ -53,6 +53,11 @@ config SPI_DIRMAP
+ 
+ if DM_SPI
+ 
++config SPI_INGENIC_SFC
++	bool "Ingenic X1600 SFC SPI-mem controller"
++	depends on SOC_X1600
++	select SPI_MEM
++
+ config ADI_SPI3
+ 	bool "Enable ADI SPI Driver"
+ 	depends on ARCH_SC5XX
+@@ -731,3 +736,7 @@ config SYNQUACER_SPI
+ 	  embedding this HS-SPI IP core.
+ 
+ endif # menu "SPI Support"
++
++config TPL_SPI_INGENIC_SFC
++	bool "Ingenic X1600 non-DM SFC in TPL"
++	depends on SOC_X1600 && TPL
+diff --git a/drivers/spi/Makefile b/drivers/spi/Makefile
+index d64f693d..0c49337d 100644
+--- a/drivers/spi/Makefile
++++ b/drivers/spi/Makefile
+@@ -94,3 +94,9 @@ obj-$(CONFIG_XILINX_SPI) += xilinx_spi.o
+ obj-$(CONFIG_ZYNQ_SPI) += zynq_spi.o
+ obj-$(CONFIG_ZYNQ_QSPI) += zynq_qspi.o
+ obj-$(CONFIG_ZYNQMP_GQSPI) += zynqmp_gqspi.o
++
++ifdef CONFIG_TPL_BUILD
++obj-$(CONFIG_TPL_SPI_INGENIC_SFC) += ingenic_sfc_legacy.o ingenic_sfc_core.o
++else
++obj-$(CONFIG_SPI_INGENIC_SFC) += ingenic_sfc.o ingenic_sfc_core.o
++endif
+diff --git a/drivers/spi/ingenic_sfc.c b/drivers/spi/ingenic_sfc.c
+new file mode 100644
+index 00000000..3fb29537
+--- /dev/null
++++ b/drivers/spi/ingenic_sfc.c
+@@ -0,0 +1,140 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* DM SPI-mem adapter for the shared Ingenic SFC polling engine. */
++#include <clk.h>
++#include <dm.h>
++#include <dm/pinctrl.h>
++#include <mach/x1600.h>
++#include <spi.h>
++#include <spi-mem.h>
++#include <ingenic_sfc.h>
++#include <linux/errno.h>
++
++struct ingenic_sfc_priv {
++	struct ingenic_sfc core;
++	struct clk clk;
++};
++
++static int sfc_speed(struct udevice *dev, uint hz)
++{
++	struct ingenic_sfc_priv *priv = dev_get_priv(dev);
++	long rate;
++
++	if (!hz || hz > X1600_SFC_MAX_HZ)
++		return -EINVAL;
++	rate = clk_set_rate(&priv->clk, hz * X1600_SFC_CLOCK_DIV);
++	if (rate < 0)
++		return rate;
++	ingenic_sfc_reset(&priv->core, rate);
++	return 0;
++}
++
++static int sfc_mode(struct udevice *dev, uint mode)
++{
++	return mode & ~(SPI_RX_DUAL | SPI_RX_QUAD | SPI_TX_DUAL | SPI_TX_QUAD) ?
++		-EOPNOTSUPP : 0;
++}
++
++static bool sfc_supports(struct spi_slave *slave, const struct spi_mem_op *op)
++{
++	unsigned int addr = op->addr.nbytes ? op->addr.buswidth : 1;
++	unsigned int data = op->data.nbytes ? op->data.buswidth : addr;
++
++	/* Hardware modes are 1-1-1, 1-1-2, 1-2-2, 1-1-4 and 1-4-4.
++	 * A mode controls whole phases, not independent bus-width flags.
++	 */
++	if (!spi_mem_default_supports_op(slave, op) || op->cmd.buswidth != 1 ||
++	    op->addr.nbytes > 4 || op->addr.val > 0xffffffff ||
++	    (addr != 1 && addr != 2 && addr != 4) ||
++	    (data != 1 && data != 2 && data != 4) ||
++	    (addr != 1 && data != addr))
++		return false;
++	return !op->dummy.nbytes || (op->dummy.buswidth == addr &&
++		op->dummy.nbytes * 8 / op->dummy.buswidth <= 32);
++}
++
++static int sfc_adjust(struct spi_slave *slave, struct spi_mem_op *op)
++{
++	op->data.nbytes = ingenic_sfc_adjust_size(op->data.dir == SPI_MEM_DATA_OUT ?
++			op->data.buf.out : op->data.buf.in, op->data.nbytes);
++	return 0;
++}
++
++static int sfc_exec(struct spi_slave *slave, const struct spi_mem_op *op)
++{
++	struct ingenic_sfc_priv *priv = dev_get_priv(slave->dev->parent);
++	struct ingenic_sfc_op hw = {
++		.opcode = op->cmd.opcode, .addr_nbytes = op->addr.nbytes,
++		.addr = op->addr.val, .len = op->data.nbytes,
++		.write = op->data.dir == SPI_MEM_DATA_OUT,
++		.buf = op->data.dir == SPI_MEM_DATA_OUT ?
++			(void *)op->data.buf.out : op->data.buf.in,
++	};
++
++	if (!sfc_supports(slave, op))
++		return -EOPNOTSUPP;
++	if (op->dummy.nbytes)
++		hw.dummy_bits = op->dummy.nbytes * 8 / op->dummy.buswidth;
++	if (op->addr.nbytes && op->addr.buswidth == 4)
++		hw.mode = 6;
++	else if (op->addr.nbytes && op->addr.buswidth == 2)
++		hw.mode = 2;
++	else if (op->data.nbytes && op->data.buswidth == 4)
++		hw.mode = 5;
++	else if (op->data.nbytes && op->data.buswidth == 2)
++		hw.mode = 1;
++	return ingenic_sfc_exec(&priv->core, &hw);
++}
++
++static int sfc_probe(struct udevice *dev)
++{
++	struct ingenic_sfc_priv *priv = dev_get_priv(dev);
++	int ret;
++
++	priv->core.base = dev_remap_addr(dev);
++	if (!priv->core.base)
++		return -EINVAL;
++	ret = pinctrl_select_state(dev, "default");
++	if (ret)
++		return ret;
++	ret = clk_get_by_index(dev, 0, &priv->clk);
++	if (ret)
++		return ret;
++	ret = clk_enable(&priv->clk);
++	if (ret)
++		return ret;
++	ret = sfc_speed(dev, 25000000);
++	if (ret)
++		clk_disable(&priv->clk);
++	return ret;
++}
++
++static int sfc_remove(struct udevice *dev)
++{
++	struct ingenic_sfc_priv *priv = dev_get_priv(dev);
++
++	ingenic_sfc_stop(&priv->core);
++	return clk_disable(&priv->clk);
++}
++
++static const struct spi_controller_mem_ops sfc_mem_ops = {
++	.supports_op = sfc_supports,
++	.adjust_op_size = sfc_adjust,
++	.exec_op = sfc_exec,
++};
++
++static const struct dm_spi_ops sfc_ops = {
++	.set_speed = sfc_speed,
++	.set_mode = sfc_mode,
++	.mem_ops = &sfc_mem_ops,
++};
++
++static const struct udevice_id sfc_ids[] = {
++	{ .compatible = "ingenic,x1600-sfc" },
++	{ }
++};
++
++U_BOOT_DRIVER(ingenic_sfc) = {
++	.name = "ingenic_sfc", .id = UCLASS_SPI,
++	.of_match = sfc_ids, .probe = sfc_probe, .remove = sfc_remove,
++	.ops = &sfc_ops, .priv_auto = sizeof(struct ingenic_sfc_priv),
++};
+diff --git a/drivers/spi/ingenic_sfc_core.c b/drivers/spi/ingenic_sfc_core.c
+new file mode 100644
+index 00000000..b2562476
+--- /dev/null
++++ b/drivers/spi/ingenic_sfc_core.c
+@@ -0,0 +1,242 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Polling port of Linux spi-ingenic-sfc.c (X1600 SFC v2).
++ * Copyright (c) 2022 周琰杰 (Zhou Yanjie) <zhouyanjie@wanyeetech.com>
++ * Clock/pin ownership stays outside this shared non-DM register engine.
++ */
++#include <ingenic_sfc.h>
++#include <div64.h>
++#include <time.h>
++#include <cpu_func.h>
++#include <asm/cache.h>
++#include <asm/addrspace.h>
++#include <linux/sizes.h>
++#include <asm/io.h>
++#include <linux/bitfield.h>
++#include <linux/errno.h>
++#include <linux/kernel.h>
++
++#define SFC_GLB 0x00
++#define SFC_DEV_CONF 0x04
++#define SFC_DEV_STA_EXP 0x08
++#define SFC_DEV_STA_MSK 0x10
++#define SFC_CONF 0x14
++#define SFC_LEN 0x2c
++#define SFC_ADDR 0x30
++#define SFC_ADDR_PLUS 0x48
++#define SFC_MEM_ADDR 0x60
++#define SFC_DES_ADDR 0x90
++#define SFC_GLB1 0x94
++#define SFC_TRIG 0x64
++#define SFC_SR 0x68
++#define SFC_SCR 0x6c
++#define SFC_INTC 0x70
++#define SFC_CGE 0x78
++#define SFC_CONF1 0x9c
++#define SFC_PHASES 6
++#define SFC_PHASE_REG(base, n) ((base) + 4 * (n))
++#define SFC_DATA 0x1000
++#define SR_END BIT(4)
++#define SR_RX BIT(2)
++#define SR_TX BIT(3)
++#define SR_ERRORS (BIT(1) | BIT(0))
++#define SR_FIFO GENMASK(22, 16)
++#define STATUS_ALL (SR_END | SR_RX | SR_TX | SR_ERRORS)
++#define TRIG_STOP BIT(1)
++#define TRIG_FLUSH BIT(2)
++#define TRIG_START BIT(0)
++#define GLB_DMA BIT(6)
++#define GLB_WRITE BIT(13)
++#define GLB_THRESHOLD GENMASK(12, 7)
++#define GLB_PHASE_NUM GENMASK(5, 3)
++#define GLB_BURST GENMASK(1, 0)
++#define GLB_BURST_INCR32 3
++#define DEV_CONF_THOLD GENMASK(12, 11)
++#define DEV_CONF_TSETUP GENMASK(10, 9)
++#define DEV_CONF_TSH GENMASK(8, 5)
++#define DEV_CONF_SAMPLE_DELAY GENMASK(20, 16)
++#define DEV_CONF_SAMPLE_180DEG 4
++#define DEV_CONF_CS_HIGH BIT(2)
++#define DEV_CONF_HOLD_HIGH BIT(1)
++#define DEV_CONF_WP_HIGH BIT(0)
++#define CONF_CMD_ENABLE BIT(24)
++#define CONF_DATA_ENABLE BIT(16)
++#define CONF_ADDR_WIDTH GENMASK(28, 26)
++#define CONF_DUMMY_BITS GENMASK(22, 17)
++#define CONF_COMMAND GENMASK(15, 0)
++#define CONF1_MODE GENMASK(7, 4)
++#define SFC_TRANSFER_TIMEOUT_MS 1000
++/* INCR32 is 32 words; partial bursts corrupt the final DMA block. */
++#define DMA_GRANULE 128
++
++void ingenic_sfc_stop(struct ingenic_sfc *sfc)
++{
++	writel(STATUS_ALL, sfc->base + SFC_INTC);
++	writel(TRIG_STOP, sfc->base + SFC_TRIG);
++	readl(sfc->base + SFC_TRIG);
++	writel(TRIG_FLUSH, sfc->base + SFC_TRIG);
++	writel(STATUS_ALL, sfc->base + SFC_SCR);
++	readl(sfc->base + SFC_SR);
++}
++
++static u32 sfc_timing(ulong rate, u32 ns, u32 max)
++{
++	/* DEV_CONF stores half-controller-cycle counts minus one. Use wide
++	 * arithmetic and round up so CS setup/hold/high never undershoot.
++	 */
++	u32 units = DIV_ROUND_UP_ULL((u64)rate * ns * 2, 1000000000);
++
++	return min(units ? units - 1 : 0, max);
++}
++
++void ingenic_sfc_reset(struct ingenic_sfc *sfc, ulong rate)
++{
++	u32 conf = DEV_CONF_CS_HIGH | DEV_CONF_HOLD_HIGH | DEV_CONF_WP_HIGH;
++	u32 ts5 = sfc_timing(rate, 5, 3);
++	int i;
++
++	ingenic_sfc_stop(sfc);
++	/* Idle-high CS/HOLD/WP, mode0, conservative 5/5/20ns timings. */
++	conf |= FIELD_PREP(DEV_CONF_THOLD, ts5);
++	conf |= FIELD_PREP(DEV_CONF_TSETUP, ts5);
++	conf |= FIELD_PREP(DEV_CONF_TSH, sfc_timing(rate, 20, 15));
++	if (rate >= 200000000)
++		conf |= FIELD_PREP(DEV_CONF_SAMPLE_DELAY, DEV_CONF_SAMPLE_180DEG);
++	writel(conf, sfc->base + SFC_DEV_CONF);
++	writel(0, sfc->base + SFC_DEV_STA_EXP);
++	writel(0, sfc->base + SFC_DEV_STA_MSK);
++	for (i = 0; i < SFC_PHASES; i++) {
++		writel(0, sfc->base + SFC_PHASE_REG(SFC_CONF, i));
++		writel(0, sfc->base + SFC_PHASE_REG(SFC_ADDR, i));
++		writel(0, sfc->base + SFC_PHASE_REG(SFC_ADDR_PLUS, i));
++		writel(0, sfc->base + SFC_PHASE_REG(SFC_CONF1, i));
++	}
++	writel(0, sfc->base + SFC_MEM_ADDR);
++	/* Direct-buffer DMA, never the inherited descriptor-list mode. */
++	writel(0, sfc->base + SFC_DES_ADDR);
++	writel(0, sfc->base + SFC_GLB1);
++	writel(0, sfc->base + SFC_CGE);
++}
++
++/* Keep long reads in full DMA bursts; PIO edges fit in the 64-word FIFO. */
++u32 ingenic_sfc_adjust_size(const void *buf, u32 len)
++{
++	ulong addr = (ulong)buf;
++
++	len = min(len, 65536U);
++	if (addr >= CKSEG0 && addr < CKSEG1
++#ifdef CONFIG_TPL_BUILD
++	    && addr >= CKSEG0 + SZ_64K
++#endif
++	   ) {
++		if (addr % ARCH_DMA_MINALIGN)
++			return min(len, (u32)(ARCH_DMA_MINALIGN -
++					    addr % ARCH_DMA_MINALIGN));
++		if (len >= DMA_GRANULE)
++			return len - len % DMA_GRANULE;
++	}
++	return min(len, (u32)DMA_GRANULE);
++}
++
++static bool ingenic_sfc_dma_eligible(const struct ingenic_sfc_op *op)
++{
++	ulong addr = (ulong)op->buf;
++
++#ifdef CONFIG_TPL_BUILD
++	/* The first 64 KiB contains BootROM stack/code in cache-as-RAM.
++	 * DMA can only target actual DRAM; never write back ROM cache lines.
++	 */
++	if (addr >= CKSEG0 && addr < CKSEG0 + SZ_64K)
++		return false;
++#endif
++	/* Only complete cache lines owned by a cached direct-mapped buffer.
++	 * Uncached aliases, short commands and partial bursts use PIO.
++	 */
++	return op->len && !(op->len % DMA_GRANULE) &&
++		!(addr % ARCH_DMA_MINALIGN) && !(op->len % ARCH_DMA_MINALIGN) &&
++		addr >= CKSEG0 && addr < CKSEG1 && op->len <= CKSEG1 - addr;
++}
++
++int ingenic_sfc_exec(struct ingenic_sfc *sfc, const struct ingenic_sfc_op *op)
++{
++	u32 conf, pos = 0;
++	ulong start;
++	int ret = 0;
++	u8 *buf = op->buf;
++	bool dma;
++
++	if (op->addr_nbytes > 4 || op->dummy_bits > 32 ||
++	    (op->len && !buf) || op->mode > 7)
++		return -EINVAL;
++	ingenic_sfc_stop(sfc);
++	dma = ingenic_sfc_dma_eligible(op);
++	if (dma)
++		/* Write back dirty RX lines before DMA as well as TX data. The
++		 * MIPS helper drains both L1 and L2 before the start MMIO write.
++		 */
++		flush_dcache_range((ulong)buf, (ulong)buf + op->len);
++	/* One phase, direction-specific FIFO threshold; all IRQs stay masked. */
++	writel(FIELD_PREP(GLB_THRESHOLD, op->write ? 63 : 31) |
++	       FIELD_PREP(GLB_PHASE_NUM, 1) |
++	       (op->write ? GLB_WRITE : 0) |
++	       (dma ? GLB_DMA | FIELD_PREP(GLB_BURST, GLB_BURST_INCR32) : 0),
++	       sfc->base + SFC_GLB);
++	conf = CONF_CMD_ENABLE | FIELD_PREP(CONF_COMMAND, op->opcode) |
++		FIELD_PREP(CONF_ADDR_WIDTH, op->addr_nbytes) |
++		FIELD_PREP(CONF_DUMMY_BITS, op->dummy_bits);
++	if (op->len)
++		conf |= CONF_DATA_ENABLE;
++	writel(conf, sfc->base + SFC_CONF);
++	writel(FIELD_PREP(CONF1_MODE, op->mode), sfc->base + SFC_CONF1);
++	writel(op->addr, sfc->base + SFC_ADDR);
++	writel(0, sfc->base + SFC_ADDR_PLUS);
++	writel(op->len, sfc->base + SFC_LEN);
++	/* U-Boot's generic dma_map_single returns virtual addresses on MIPS. */
++	writel(dma ? virt_to_phys(buf) : 0, sfc->base + SFC_MEM_ADDR);
++	start = get_timer(0);
++	writel(TRIG_START, sfc->base + SFC_TRIG);
++	for (;;) {
++		u32 sr = readl(sfc->base + SFC_SR);
++		u32 bytes = 0;
++
++		if (sr & SR_ERRORS) {
++			ret = -EIO;
++			break;
++		}
++		if (!dma && !op->write)
++			bytes = min(op->len - pos, (u32)FIELD_GET(SR_FIFO, sr) * 4);
++		else if (!dma && (sr & SR_TX))
++			bytes = min(op->len - pos, 63U * 4);
++		while (bytes) {
++			u32 word = 0, n = min(bytes, 4U), i;
++
++			if (!op->write)
++				word = readl(sfc->base + SFC_DATA);
++			for (i = 0; i < n; i++) {
++				if (op->write)
++					word |= (u32)buf[pos++] << (i * 8);
++				else
++					buf[pos++] = word >> (i * 8);
++			}
++			if (op->write)
++				writel(word, sfc->base + SFC_DATA);
++			bytes -= n;
++		}
++		if (sr & SR_END) {
++			if (!dma && pos != op->len)
++				ret = -EIO;
++			break;
++		}
++		writel(sr & STATUS_ALL, sfc->base + SFC_SCR);
++		if (get_timer(start) >= SFC_TRANSFER_TIMEOUT_MS) {
++			ret = -ETIMEDOUT;
++			break;
++		}
++	}
++	/* SR_END is the internal DMA/SFC terminal event, as in Linux. STOP
++	 * and its readback also quiesce failed transfers before CPU ownership.
++	 */
++	ingenic_sfc_stop(sfc);
++	if (dma && !op->write)
++		invalidate_dcache_range((ulong)buf, (ulong)buf + op->len);
++	return ret;
++}
+diff --git a/drivers/spi/ingenic_sfc_legacy.c b/drivers/spi/ingenic_sfc_legacy.c
+new file mode 100644
+index 00000000..916a68ce
+--- /dev/null
++++ b/drivers/spi/ingenic_sfc_legacy.c
+@@ -0,0 +1,132 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* Non-DM SPI adapter for TPL's standard SPI-NOR and boot-device loaders. */
++#include <malloc.h>
++#include <spi.h>
++#include <spi-mem.h>
++#include <ingenic_sfc.h>
++#include <mach/x1600.h>
++#include <linux/errno.h>
++#include <linux/mtd/spi-nor.h>
++#include <linux/string.h>
++
++#define SFC_HEADER_MAX 8
++#define SFC_TRANSFER_MAX 65536
++
++struct ingenic_sfc_slave {
++	struct spi_slave slave;
++	struct ingenic_sfc core;
++	u8 header[SFC_HEADER_MAX];
++	uint header_len;
++};
++
++static struct ingenic_sfc_slave *to_sfc(struct spi_slave *slave)
++{
++	return container_of(slave, struct ingenic_sfc_slave, slave);
++}
++
++void spi_init(void)
++{
++}
++
++struct spi_slave *spi_setup_slave(uint bus, uint cs, uint hz, uint mode)
++{
++	struct ingenic_sfc_slave *sfc;
++
++	/* SPI-NOR negotiates 1-1-1 or 1-1-4 reads and enables QE. */
++	if (bus || cs || (mode & ~SPI_RX_QUAD) || !hz || hz > X1600_SFC_MAX_HZ)
++		return NULL;
++	sfc = spi_alloc_slave(struct ingenic_sfc_slave, bus, cs);
++	if (!sfc)
++		return NULL;
++	sfc->core.base = X1600_SFC_BASE;
++	if (x1600_sfc_setup(&sfc->core, hz)) {
++		free(sfc);
++		return NULL;
++	}
++	sfc->slave.mode = mode;
++	sfc->slave.max_read_size = SFC_TRANSFER_MAX;
++	sfc->slave.max_write_size = SFC_TRANSFER_MAX;
++	return &sfc->slave;
++}
++
++void spi_free_slave(struct spi_slave *slave)
++{
++	struct ingenic_sfc_slave *sfc = to_sfc(slave);
++
++	ingenic_sfc_stop(&sfc->core);
++	free(sfc);
++}
++
++int spi_claim_bus(struct spi_slave *slave)
++{
++	to_sfc(slave)->header_len = 0;
++	return 0;
++}
++
++void spi_release_bus(struct spi_slave *slave)
++{
++	struct ingenic_sfc_slave *sfc = to_sfc(slave);
++
++	sfc->header_len = 0;
++	ingenic_sfc_stop(&sfc->core);
++}
++
++int spi_xfer(struct spi_slave *slave, uint bitlen, const void *dout,
++	     void *din, ulong flags)
++{
++	struct ingenic_sfc_slave *sfc = to_sfc(slave);
++	struct ingenic_sfc_op op = {};
++	uint len = bitlen / 8, dummy = 0, i;
++
++	if (bitlen % 8 || (flags & ~(SPI_XFER_BEGIN | SPI_XFER_END)) ||
++	    (din && dout) || len > SFC_TRANSFER_MAX)
++		return -EINVAL;
++	if (flags & SPI_XFER_BEGIN) {
++		if (!dout || !len || len > sizeof(sfc->header))
++			return -EINVAL;
++		memcpy(sfc->header, dout, len);
++		sfc->header_len = len;
++		len = 0;
++		dout = NULL;
++	}
++	if (!sfc->header_len)
++		return -EINVAL;
++	if (!(flags & SPI_XFER_END))
++		return flags & SPI_XFER_BEGIN ? 0 : -EOPNOTSUPP;
++
++	op.opcode = sfc->header[0];
++	if (op.opcode == SPINOR_OP_READ_FAST ||
++	    op.opcode == SPINOR_OP_READ_FAST_4B ||
++	    op.opcode == SPINOR_OP_RDSFDP ||
++	    op.opcode == SPINOR_OP_READ_1_1_4 ||
++	    op.opcode == SPINOR_OP_READ_1_1_4_4B)
++		dummy = 1;
++	if (sfc->header_len < 1 + dummy ||
++	    sfc->header_len > 5 + dummy)
++		return -EINVAL;
++	if (op.opcode == SPINOR_OP_READ_1_1_4 ||
++	    op.opcode == SPINOR_OP_READ_1_1_4_4B) {
++		if (!(slave->mode & SPI_RX_QUAD) || !din)
++			return -EOPNOTSUPP;
++		op.mode = 5;
++	}
++	op.addr_nbytes = sfc->header_len - 1 - dummy;
++	for (i = 0; i < op.addr_nbytes; i++)
++		op.addr = (op.addr << 8) | sfc->header[i + 1];
++	op.dummy_bits = dummy * 8;
++	op.buf = din ? din : (void *)dout;
++	op.len = len;
++	op.write = !!dout;
++	sfc->header_len = 0;
++	return ingenic_sfc_exec(&sfc->core, &op);
++}
++
++/* The standard non-DM wrapper delegates hardware-specific chunk constraints. */
++int spi_mem_adjust_op_size(struct spi_slave *slave, struct spi_mem_op *op)
++{
++	if (!op->data.nbytes)
++		return -EINVAL;
++	op->data.nbytes = ingenic_sfc_adjust_size(op->data.dir == SPI_MEM_DATA_OUT ?
++			op->data.buf.out : op->data.buf.in, op->data.nbytes);
++	return 0;
++}
+diff --git a/include/ingenic_sfc.h b/include/ingenic_sfc.h
+new file mode 100644
+index 00000000..6819eaf6
+--- /dev/null
++++ b/include/ingenic_sfc.h
+@@ -0,0 +1,26 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef __INGENIC_SFC_H
++#define __INGENIC_SFC_H
++#include <linux/types.h>
++
++struct ingenic_sfc {
++	void __iomem *base;
++};
++
++struct ingenic_sfc_op {
++	u8 opcode;
++	u8 addr_nbytes;
++	u8 dummy_bits;
++	u8 mode;
++	u32 addr;
++	void *buf;
++	u32 len;
++	bool write;
++};
++
++u32 ingenic_sfc_adjust_size(const void *buf, u32 len);
++void ingenic_sfc_stop(struct ingenic_sfc *sfc);
++void ingenic_sfc_reset(struct ingenic_sfc *sfc, ulong rate);
++int ingenic_sfc_exec(struct ingenic_sfc *sfc, const struct ingenic_sfc_op *op);
++int x1600_sfc_setup(struct ingenic_sfc *sfc, ulong hz);
++#endif

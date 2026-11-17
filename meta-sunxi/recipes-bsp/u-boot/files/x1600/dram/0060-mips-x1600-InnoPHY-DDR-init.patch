@@ -1,0 +1,328 @@
+Subject: [PATCH] ram: ingenic: initialize AX1800 DDR2 through X1600 InnoPHY
+Upstream-Status: Inappropriate [CatPlay X1600 platform support]
+
+diff --git a/arch/mips/mach-jz47xx/x1600/tpl.c b/arch/mips/mach-jz47xx/x1600/tpl.c
+new file mode 100644
+index 00000000..86b06822
+--- /dev/null
++++ b/arch/mips/mach-jz47xx/x1600/tpl.c
+@@ -0,0 +1,319 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * X1600 USB TPL: DDR2 + Innosilicon PHY, returning to the BootROM caller.
++ * Register sequence derived from Ingenic's ddr_innophy_x1600.c:
++ * Copyright (C) 2017 Ingenic Semiconductor Co.,Ltd, Zoro <ykli@ingenic.cn>.
++ * AX1800 DDR2/64 MiB, 350 MHz parameters from the CatPlay vendor port.
++ * Register definitions: X1600 Programming Manual, chapters 3 and 11.
++ */
++#include <init.h>
++#include <asm/global_data.h>
++#include <asm/cache.h>
++#include <linux/delay.h>
++#include <linux/iopoll.h>
++#include <linux/types.h>
++#include <linux/bitops.h>
++#include <asm/io.h>
++#include <x1600_boot.h>
++#include <asm/sections.h>
++#include <linux/string.h>
++
++#define CPM_BASE                 0xb0000000
++#define DDRC_BASE                0xb34f0000
++#define PHY_BASE                 0xb3011000
++#define APB_BASE                 0xb3012000
++
++#define CPM_REG(off)             ((void *)(CPM_BASE + (off)))
++#define DDRC_REG(off)            ((void *)(DDRC_BASE + (off)))
++#define PHY_REG(off)             ((void *)(PHY_BASE + (off)))
++#define APB_REG(off)             ((void *)(APB_BASE + (off)))
++
++/* CPM — X1600 PM, chapter 11. */
++#define CPM_CPCCR               0x000
++#define CPM_CPAPCR              0x010
++#define CPM_CPMPCR              0x014
++#define CPM_CLKGR0              0x020
++#define CPM_CLKGR1              0x028
++#define CPM_DDRCDR              0x02c
++#define CPM_DRCG                0x0d0
++#define CPM_CPCSR               0x0d4
++
++#define CPCCR_SEL_SRC(n)         ((u32)(n) << 30)
++#define CPCCR_SEL_CPLL(n)        ((u32)(n) << 28)
++#define CPCCR_SEL_H0PLL(n)       ((u32)(n) << 26)
++#define CPCCR_SEL_H2PLL(n)       ((u32)(n) << 24)
++#define CPCCR_CE_CPU            BIT(22)
++#define CPCCR_CE_AHB0           BIT(21)
++#define CPCCR_CE_AHB2           BIT(20)
++#define CPCCR_PDIV(n)           ((u32)((n) - 1) << 16)
++#define CPCCR_H2DIV(n)          ((u32)((n) - 1) << 12)
++#define CPCCR_H0DIV(n)          ((u32)((n) - 1) << 8)
++#define CPCCR_L2CDIV(n)         ((u32)((n) - 1) << 4)
++#define CPCCR_CDIV(n)           ((u32)((n) - 1))
++
++#define CPCSR_SRC_MUX           BIT(31)
++#define CPCSR_CPU_MUX           BIT(30)
++#define CPCSR_AHB0_MUX          BIT(29)
++#define CPCSR_AHB2_MUX          BIT(28)
++#define CPCSR_H2DIV_BUSY        BIT(2)
++#define CPCSR_H0DIV_BUSY        BIT(1)
++#define CPCSR_CDIV_BUSY         BIT(0)
++#define CPCSR_ALL_MUX_READY     GENMASK(31, 28)
++#define CPCSR_ALL_DIV_BUSY      GENMASK(2, 0)
++
++#define PLL_M(n)                ((u32)(n) << 20)
++#define PLL_N(n)                ((u32)(n) << 14)
++#define PLL_OD1(n)              ((u32)(n) << 11)
++#define PLL_OD0(n)              ((u32)(n) << 8)
++#define PLL_DSMPD               BIT(7)
++#define PLL_PHASEPD             BIT(6)
++#define PLL_POSTDIVPD           BIT(5)
++#define PLL_VCOPD               BIT(4)
++#define PLL_ON                  BIT(3)
++#define PLL_LOCK                BIT(2)
++#define PLL_ENABLE              BIT(0)
++
++/* AX1800 clock policy, not fixed X1600 silicon constants. */
++#define CPCCR_EXT_PREPARE       0x55700000
++#define CPCCR_EXT_DIVIDERS      0x55794410
++#define CPCCR_RUN_AX1800       0x9a094410
++#define APLL_AX1800            (PLL_M(46) | PLL_N(1) | PLL_OD1(1) | \
++                                PLL_OD0(1) | PLL_DSMPD | PLL_PHASEPD | PLL_ENABLE)
++#define MPLL_AX1800            (PLL_M(175) | PLL_N(3) | PLL_OD1(1) | \
++                                PLL_OD0(1) | PLL_DSMPD | PLL_PHASEPD | PLL_ENABLE)
++
++#define CLKGR0_DDR              BIT(31)
++#define CLKGR1_INTC             BIT(26)
++#define DDRCDR_DCS_MPLL         (2U << 30)
++#define DDRCDR_CE_DDR           BIT(29)
++#define DDRCDR_DDR_BUSY         BIT(28)
++#define DDRCDR_DIV(n)           ((u32)((n) - 1))
++
++/* DDRC — X1600 PM, section 3.5. */
++#define DDRC_DCFG               0x004
++#define DDRC_DCTRL              0x008
++#define DDRC_DLMR               0x00c
++#define DDRC_DREFCNT            0x018
++#define DDRC_DMMAP0             0x024
++#define DDRC_DMMAP1             0x028
++#define DDRC_DTIMING(n)         (0x060 + 4 * ((n) - 1))
++#define DDRC_DREMAP(n)          (0x09c + 4 * ((n) - 1))
++#define DDRC_DDLP               0x0bc
++#define DDRC_AUTOSR_EN          0x304
++
++#define DCTRL_DFI_RST           BIT(23)
++#define DCTRL_CFG_RST           BIT(20)
++#define DCTRL_CKE_PULSE         BIT(1)
++#define DCTRL_RESET             BIT(0)
++/* Bits 20..22 are marked reserved in the X1600 manual; retained as vendor sequence. */
++#define DCTRL_VENDOR_RESET_ALL  (0xfU << 20)
++#define DCTRL_VENDOR_RESET_STEP (0x8U << 20)
++#define DCTRL_CKE_HIGH          DCTRL_CKE_PULSE
++
++#define DDLP_LPEN               BIT(0)
++#define DDLP_FPD                BIT(1)
++#define DDLP_FSR                BIT(2)
++#define AUTOSR_EN_ENABLE        BIT(0)
++
++/* Board/DRAM-specific timings, geometry, mapping and mode commands. */
++#define DCFG_AX1800             0x0a688a40
++#define DMMAP0_AX1800           0x000020fc
++#define DMMAP1_AX1800           0x00002400
++#define DREFCNT_AX1800          0x00540001
++#define DLMR_INIT1_AX1800       0x00000701
++#define DLMR_INIT2_AX1800       0x00b73011
++#define DLMR_INIT3_AX1800       0x00000111
++
++/* DDRP/PHY — X1600 PM, section 3.6 (register offsets are byte-addressed). */
++#define PHY_MEM_CFG             0x004
++#define PHY_TRAIN_CTRL          0x008
++#define PHY_CL                  0x014
++
++#define PHY_AL                  0x018
++#define PHY_CWL                 0x01c
++#define PHY_REG_28              0x028 /* No reliable name at this offset in PM. */
++#define PHY_DQ_WIDTH            0x07c
++#define PHY_PLL_FBDIV           0x080
++#define PHY_PLL_CTRL            0x084 /* PLL power-down / high feedback bit. */
++#define PHY_PLL_PDIV            0x088
++#define PHY_PLL_LOCK            0x108
++#define PHY_CALIB_DONE          0x10c
++#define PHY_CALIB_RESULT_LA     0x1d0
++#define PHY_CALIB_RESULT_RA     0x1d4
++
++#define PHY_MEM_CFG_BSTSEL      BIT(4)
++#define PHY_MEM_CFG_AX1800      0x11 /* DDR2 vendor setting; MEMSEL=1 not described in PM. */
++#define PHY_TRAIN_DSCSE         BIT(1)
++#define PHY_TRAIN_DSACE         BIT(0)
++#define PHY_CL_MASK             GENMASK(3, 0)
++#define PHY_AL_MASK             GENMASK(3, 0)
++#define PHY_CWL_MASK            GENMASK(3, 0)
++#define PHY_DQ_WIDTH_16BIT       3U
++#define PHY_PLL_POWDOWN         BIT(1)
++#define PHY_PLL_LOCKED          BIT(3)
++#define PHY_CALIB_DONE_BOTH      (BIT(1) | BIT(0))
++#define PHY_CALIB_STATUS_MASK    0x13 /* Vendor also tests bit 4; not explained in PM. */
++#define PHY_CALIB_DLL_SHIFT      4
++#define PHY_CALIB_DLL_MASK       7U
++#define PHY_REG28_FIELD_MASK     (7U << 1)
++
++/* DDRC APB interface — X1600 PM, section 3.5.2.34. */
++#define APB_PHY_INIT            0x08c
++#define PHY_INIT_PLL_LOCK       BIT(2)
++#define PHY_INIT_COMPLETE       BIT(1)
++#define PHY_INIT_START          BIT(0)
++
++DECLARE_GLOBAL_DATA_PTR;
++/* Initialized data is available while the BootROM still owns cache-as-RAM. */
++static gd_t tpl_gdata __section(".data") = {};
++
++static int wait_reg(ulong addr, u32 mask, u32 value)
++{
++	u32 reg;
++
++	return readl_poll_timeout((void *)addr, reg, (reg & mask) == value,
++				 100000);
++}
++
++static int clock_init(void)
++{
++	/* Retune APLL only after CPU and bus clocks have moved to EXT. */
++	writel(CPCCR_EXT_PREPARE, CPM_REG(CPM_CPCCR));
++	if (wait_reg(CPM_BASE + CPM_CPCSR,
++		     CPCSR_ALL_MUX_READY | CPCSR_ALL_DIV_BUSY,
++		     CPCSR_ALL_MUX_READY))
++		return -1;
++	clrbits_le32(CPM_REG(CPM_CPAPCR), PLL_ENABLE);
++	/* 24 MHz * 46: CPU 1104 MHz, L2 552 MHz. */
++	writel(APLL_AX1800, CPM_REG(CPM_CPAPCR));
++	if (wait_reg(CPM_BASE + CPM_CPAPCR, PLL_LOCK | PLL_ON,
++		     PLL_LOCK | PLL_ON))
++		return -1;
++	/* Program MPLL before either the bus clocks or DDR select it. */
++	writel(MPLL_AX1800, CPM_REG(CPM_CPMPCR));
++	if (wait_reg(CPM_BASE + CPM_CPMPCR, PLL_ON, PLL_ON))
++		return -1;
++	/* Set dividers on EXT before selecting the production PLL parents. */
++	writel(CPCCR_EXT_DIVIDERS, CPM_REG(CPM_CPCCR));
++	if (wait_reg(CPM_BASE + CPM_CPCSR, CPCSR_ALL_DIV_BUSY, 0))
++		return -1;
++	/* AHB0/2 = MPLL/5, PCLK = MPLL/10; DDR has its own divider. */
++	writel(CPCCR_RUN_AX1800, CPM_REG(CPM_CPCCR));
++	return wait_reg(CPM_BASE + CPM_CPCSR,
++			CPCSR_ALL_MUX_READY, CPCSR_ALL_MUX_READY);
++}
++
++static int ddr_init(void)
++{
++	static const u32 timing[] = {
++		0x030d0606, 0x02100607, 0x20060415,
++		0x16640033, 0xff060405, 0x32100505,
++	};
++	static const u32 remap[] = {
++		0x03020d0c, 0x07060504, 0x0b0a0908, 0x0f0e0100, 0x13121110,
++	};
++	u32 val, a, b;
++	int i;
++
++	if (clock_init())
++		return -1;
++	/* Linux uses INTC/IP2 for peripheral IRQs but does not enable its gate. */
++	clrbits_le32(CPM_REG(CPM_CLKGR1), CLKGR1_INTC);
++	clrbits_le32(CPM_REG(CPM_CLKGR0), CLKGR0_DDR);
++	writel(DDRCDR_DCS_MPLL | DDRCDR_CE_DDR | DDRCDR_DIV(4),
++	       CPM_REG(CPM_DDRCDR));
++	if (wait_reg(CPM_BASE + CPM_DDRCDR, DDRCDR_DDR_BUSY, 0))
++		return -1;
++	/* Keep CPM_DRCG at the ROM setting; vendor reset_dll() uses literal 0xd0. */
++	/* Reset controller even when entered after a running Linux instance. */
++	writel(DCTRL_VENDOR_RESET_ALL, DDRC_REG(DDRC_DCTRL));
++	udelay(5000);
++	writel(DCTRL_VENDOR_RESET_STEP, DDRC_REG(DDRC_DCTRL));
++	udelay(5000);
++	writel(0, DDRC_REG(DDRC_AUTOSR_EN));
++
++	writel(PHY_DQ_WIDTH_16BIT, PHY_REG(PHY_DQ_WIDTH));
++	writel(PHY_MEM_CFG_AX1800, PHY_REG(PHY_MEM_CFG));
++	clrsetbits_le32(PHY_REG(PHY_CL), PHY_CL_MASK, 7);
++	clrsetbits_le32(PHY_REG(PHY_CWL), PHY_CWL_MASK, 6);
++	clrbits_le32(PHY_REG(PHY_AL), PHY_AL_MASK);
++	clrbits_le32(DDRC_REG(DDRC_DCTRL), DCTRL_CFG_RST);
++	clrsetbits_le32(PHY_REG(PHY_PLL_FBDIV), 0xff, 0x10);
++	setbits_le32(PHY_REG(PHY_PLL_CTRL), PHY_PLL_POWDOWN);
++	clrsetbits_le32(PHY_REG(PHY_PLL_PDIV), 0xff, 0x24);
++	udelay(5);
++	clrbits_le32(PHY_REG(PHY_PLL_CTRL), PHY_PLL_POWDOWN);
++	udelay(5);
++	if (wait_reg(PHY_BASE + PHY_PLL_LOCK, PHY_PLL_LOCKED,
++		     PHY_PLL_LOCKED) ||
++	    wait_reg(APB_BASE + APB_PHY_INIT, PHY_INIT_PLL_LOCK,
++		     PHY_INIT_PLL_LOCK))
++		return -1;
++	/* PHY clock-ready must settle before starting the DFI handshake. */
++	udelay(5);
++
++	writel(PHY_INIT_START, APB_REG(APB_PHY_INIT));
++	/* Drain the start write before dropping it across the APB bridge. */
++	readl(APB_REG(APB_PHY_INIT));
++	writel(0, APB_REG(APB_PHY_INIT));
++	if (wait_reg(APB_BASE + APB_PHY_INIT, PHY_INIT_COMPLETE,
++		     PHY_INIT_COMPLETE))
++		return -1;
++	setbits_le32(DDRC_REG(DDRC_DCTRL), DCTRL_DFI_RST);
++	writel(DCFG_AX1800, DDRC_REG(DDRC_DCFG));
++	writel(DCTRL_CKE_HIGH, DDRC_REG(DDRC_DCTRL));
++	writel(DLMR_INIT1_AX1800, DDRC_REG(DDRC_DLMR));
++	udelay(1000);
++	writel(DLMR_INIT2_AX1800, DDRC_REG(DDRC_DLMR));
++	udelay(1000);
++	writel(DLMR_INIT3_AX1800, DDRC_REG(DDRC_DLMR));
++	udelay(1000);
++	for (i = 0; i < 6; i++)
++		writel(timing[i], DDRC_REG(DDRC_DTIMING(i + 1)));
++	writel(DMMAP0_AX1800, DDRC_REG(DDRC_DMMAP0));
++	writel(DMMAP1_AX1800, DDRC_REG(DDRC_DMMAP1));
++	writel(DCTRL_CKE_HIGH, DDRC_REG(DDRC_DCTRL));
++	for (i = 0; i < 5; i++)
++		writel(remap[i], DDRC_REG(DDRC_DREMAP(i + 1)));
++	writel(DREFCNT_AX1800, DDRC_REG(DDRC_DREFCNT));
++	writel(DCTRL_CKE_HIGH, DDRC_REG(DDRC_DCTRL));
++
++	val = (readl(PHY_REG(PHY_TRAIN_CTRL)) & ~PHY_TRAIN_DSCSE) |
++	      PHY_TRAIN_DSACE;
++	writel(val, PHY_REG(PHY_TRAIN_CTRL));
++	if (wait_reg(PHY_BASE + PHY_CALIB_DONE, PHY_CALIB_STATUS_MASK,
++		     PHY_CALIB_DONE_BOTH))
++		return -1;
++	writel(0, PHY_REG(PHY_TRAIN_CTRL));
++	udelay(5000);
++	a = (readl(PHY_REG(PHY_CALIB_RESULT_LA)) >> PHY_CALIB_DLL_SHIFT) &
++	    PHY_CALIB_DLL_MASK;
++	b = (readl(PHY_REG(PHY_CALIB_RESULT_RA)) >> PHY_CALIB_DLL_SHIFT) &
++	    PHY_CALIB_DLL_MASK;
++	val = (a > b ? a : b) + 1;
++	clrsetbits_le32(PHY_REG(PHY_REG_28), PHY_REG28_FIELD_MASK, val << 1);
++	setbits_le32(PHY_REG(PHY_MEM_CFG), BIT(6)); /* Vendor workaround; not in PM. */
++	setbits_le32(DDRC_REG(DDRC_DDLP), DDLP_LPEN | DDLP_FPD | DDLP_FSR);
++	return 0;
++}
++
++void x1600_tpl_main(void)
++{
++	memset(__bss_start, 0, __bss_end - __bss_start);
++	gd = &tpl_gdata;
++	mips_cache_probe();
++	timer_init();
++	x1600_usb_guard_arm();
++	x1600_watchdog_start(30);
++	/* Failure must not return to a host which is about to upload into DRAM. */
++	if (ddr_init())
++		x1600_fel_recover();
++#ifdef CONFIG_X1600_TPL_FLASH
++	gd->ram_base = 0x80000000;
++	gd->ram_size = 64 * 1024 * 1024;
++	/* Standard TPL malloc operates in DRAM, below the SPL load window. */
++	gd->malloc_base = X1600_FLASH_SPL_BASE - 0x10000;
++#else
++	x1600_return_to_rom();
++#endif
++}

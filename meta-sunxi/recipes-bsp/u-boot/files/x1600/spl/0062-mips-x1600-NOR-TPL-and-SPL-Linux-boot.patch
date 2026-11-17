@@ -1,0 +1,149 @@
+Subject: [PATCH] spl: ingenic: load NOR SPL uImage and boot Linux FIT through DM
+Upstream-Status: Inappropriate [CatPlay X1600 platform support]
+
+diff --git a/arch/mips/mach-jz47xx/x1600/flash-linux.c b/arch/mips/mach-jz47xx/x1600/flash-linux.c
+new file mode 100644
+index 00000000..8384f876
+--- /dev/null
++++ b/arch/mips/mach-jz47xx/x1600/flash-linux.c
+@@ -0,0 +1,32 @@
++// SPDX-License-Identifier: GPL-2.0+
++#include <spl.h>
++#include <asm/io.h>
++
++int spl_start_uboot(void)
++{
++	return 0;
++}
++
++struct legacy_img_hdr *spl_get_load_buffer(ssize_t offset, size_t size)
++{
++	return (void *)(0x80800000 + offset);
++}
++
++void spl_board_prepare_for_linux(void)
++{
++	void *uart = (void *)0xb0032000;
++
++	/* The packed kernel's early UART must have a running clock/FIFO. */
++	clrbits_le32((void *)0xb0000020, BIT(16));
++	writeb(0, uart + 4);
++	writeb(0xef, uart + 8);
++	writeb(0xfc, uart + 0x20);
++	writeb(0x83, uart + 0xc);
++	writeb(1, uart);
++	writeb(0, uart + 4);
++	writeb(3, uart + 0xc);
++	writeb(8, uart + 0x24);
++	writeb(0, uart + 0x28);
++	writeb(0x17, uart + 8);
++	writeb(0xa9, uart + 0x1c);
++}
+diff --git a/arch/mips/mach-jz47xx/x1600/flash-spl.lds b/arch/mips/mach-jz47xx/x1600/flash-spl.lds
+new file mode 100644
+index 00000000..e39154a0
+--- /dev/null
++++ b/arch/mips/mach-jz47xx/x1600/flash-spl.lds
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++OUTPUT_ARCH(mips)
++ENTRY(_start)
++SECTIONS {
++	. = CONFIG_SPL_TEXT_BASE;
++	.text : { arch/mips/mach-jz47xx/x1600/start.o(.text*) *(.text*) }
++	.rodata : { *(.rodata*) }
++	.data : { *(.data*) *(.sdata*) }
++	. = ALIGN(8);
++	__u_boot_list : { KEEP(*(SORT(__u_boot_list*))) . = ALIGN(8); }
++	__image_copy_end = .;
++	_image_binary_end = .;
++	. = CONFIG_SPL_BSS_START_ADDR;
++	.bss (NOLOAD) : { __bss_start = .; *(.bss*) *(.sbss*) *(COMMON) __bss_end = .; }
++	ASSERT(__bss_end <= CONFIG_SPL_BSS_START_ADDR + CONFIG_SPL_BSS_MAX_SIZE, "X1600 SPL BSS overflow")
++	/DISCARD/ : { *(.MIPS.abiflags) *(.reginfo) *(.comment) *(.note*) *(.eh_frame*) }
++}
+diff --git a/arch/mips/mach-jz47xx/x1600/spl.c b/arch/mips/mach-jz47xx/x1600/spl.c
+new file mode 100644
+index 00000000..3f9dbcfc
+--- /dev/null
++++ b/arch/mips/mach-jz47xx/x1600/spl.c
+@@ -0,0 +1,40 @@
++// SPDX-License-Identifier: GPL-2.0+
++#include <config.h>
++#include <x1600_boot.h>
++#include <hang.h>
++#include <init.h>
++#include <spl.h>
++#include <asm/global_data.h>
++#include <asm/cache.h>
++#include <asm/sections.h>
++#include <linux/string.h>
++
++DECLARE_GLOBAL_DATA_PTR;
++static gd_t usb_gdata;
++
++void board_init_f(ulong dummy)
++{
++	memset(__bss_start, 0, __bss_end - __bss_start);
++	gd = &usb_gdata;
++	mips_cache_probe();
++	timer_init();
++	x1600_usb_guard_arm();
++	x1600_watchdog_start(30);
++	gd->ram_base = 0x80000000;
++	gd->ram_size = 64 * 1024 * 1024;
++	gd->malloc_base = 0x81910000;
++	gd->malloc_limit = CONFIG_SPL_SYS_MALLOC_F_LEN;
++	if (spl_early_init())
++		hang();
++	board_init_r(NULL, 0);
++}
++
++u32 spl_boot_device(void)
++{
++	return BOOT_DEVICE_SPI;
++}
++
++int board_fit_config_name_match(const char *name)
++{
++	return 0;
++}
+diff --git a/arch/mips/mach-jz47xx/x1600/tpl-flash.c b/arch/mips/mach-jz47xx/x1600/tpl-flash.c
+new file mode 100644
+index 00000000..59f77a60
+--- /dev/null
++++ b/arch/mips/mach-jz47xx/x1600/tpl-flash.c
+@@ -0,0 +1,14 @@
++// SPDX-License-Identifier: GPL-2.0+
++#include <spi_flash.h>
++#include <spl.h>
++#include <x1600_boot.h>
++
++u32 spl_boot_device(void)
++{
++	return BOOT_DEVICE_SPI;
++}
++
++unsigned int spl_spi_get_uboot_offs(struct spi_flash *flash)
++{
++	return X1600_SPL_FLASH_OFFSET;
++}
+diff --git a/include/x1600_boot.h b/include/x1600_boot.h
+new file mode 100644
+index 00000000..584e0444
+--- /dev/null
++++ b/include/x1600_boot.h
+@@ -0,0 +1,13 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef __X1600_BOOT_H
++#define __X1600_BOOT_H
++#include <linux/types.h>
++#define X1600_FLASH_SPL_BASE 0x81800000
++#define X1600_SPL_FLASH_OFFSET 0x5000
++#define X1600_SPL_FLASH_LIMIT (0x20000 - X1600_SPL_FLASH_OFFSET)
++void x1600_usb_guard_arm(void);
++void x1600_watchdog_start(unsigned int seconds);
++void x1600_return_to_rom(void) __attribute__((noreturn));
++void x1600_fel_recover(void) __attribute__((noreturn));
++void x1600_unstash_rom(ulong entry) __attribute__((noreturn));
++#endif

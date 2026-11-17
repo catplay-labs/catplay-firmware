@@ -1,0 +1,188 @@
+Subject: [PATCH] clk: ingenic: expose SFC clock through the driver model
+Upstream-Status: Inappropriate [CatPlay X1600 platform support]
+
+diff --git a/drivers/clk/Kconfig b/drivers/clk/Kconfig
+index 3f39b369..e1baec81 100644
+--- a/drivers/clk/Kconfig
++++ b/drivers/clk/Kconfig
+@@ -303,3 +303,9 @@ source "drivers/clk/thead/Kconfig"
+ source "drivers/clk/uniphier/Kconfig"
+ 
+ endmenu
++
++config CLK_INGENIC_X1600
++	bool "Ingenic X1600 SFC clock"
++	depends on SOC_X1600 && CLK
++	help
++	  Support the SFC CGU gate, mux and divider with its TPL-initialized MPLL.
+diff --git a/drivers/clk/Makefile b/drivers/clk/Makefile
+index 4b241a92..803c47b2 100644
+--- a/drivers/clk/Makefile
++++ b/drivers/clk/Makefile
+@@ -63,3 +63,5 @@ obj-$(CONFIG_MACH_PIC32) += clk_pic32.o
+ obj-$(CONFIG_SANDBOX_CLK_CCF) += clk_sandbox_ccf.o
+ obj-$(CONFIG_SANDBOX) += clk_sandbox.o
+ obj-$(CONFIG_SANDBOX) += clk_sandbox_test.o
++
++obj-$(CONFIG_CLK_INGENIC_X1600) += clk-ingenic-x1600.o
+diff --git a/drivers/clk/clk-ingenic-x1600.c b/drivers/clk/clk-ingenic-x1600.c
+new file mode 100644
+index 00000000..e9fd7205
+--- /dev/null
++++ b/drivers/clk/clk-ingenic-x1600.c
+@@ -0,0 +1,89 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* X1600 CGU SFC gate/mux/divider; boot PLL setup belongs to TPL. */
++#include <clk.h>
++#include <clk-uclass.h>
++#include <dm.h>
++#include <asm/io.h>
++#include <dt-bindings/clock/ingenic,x1600-cgu.h>
++#include <mach/x1600.h>
++
++struct x1600_cgu_priv {
++	void __iomem *base;
++	struct clk parent;
++};
++
++static int x1600_clk_request(struct clk *clk)
++{
++	return clk->id == X1600_CLK_SFC ? 0 : -EINVAL;
++}
++
++static ulong x1600_clk_get_rate(struct clk *clk)
++{
++	struct x1600_cgu_priv *priv = dev_get_priv(clk->dev);
++	long parent = clk_get_rate(&priv->parent);
++
++	if (parent < 0)
++		return parent;
++	return x1600_sfc_clk_get_rate(priv->base, parent);
++}
++
++static ulong x1600_clk_set_rate(struct clk *clk, ulong rate)
++{
++	struct x1600_cgu_priv *priv = dev_get_priv(clk->dev);
++	long parent = clk_get_rate(&priv->parent);
++
++	if (parent < 0)
++		return parent;
++	return x1600_sfc_clk_set_rate(priv->base, parent, rate);
++}
++
++static int x1600_clk_enable(struct clk *clk)
++{
++	struct x1600_cgu_priv *priv = dev_get_priv(clk->dev);
++	int ret = clk_enable(&priv->parent);
++
++	if (ret)
++		return ret;
++	x1600_sfc_clk_gate(priv->base, true);
++	return 0;
++}
++
++static int x1600_clk_disable(struct clk *clk)
++{
++	struct x1600_cgu_priv *priv = dev_get_priv(clk->dev);
++
++	x1600_sfc_clk_gate(priv->base, false);
++	return clk_disable(&priv->parent);
++}
++
++static int x1600_cgu_probe(struct udevice *dev)
++{
++	struct x1600_cgu_priv *priv = dev_get_priv(dev);
++
++	priv->base = dev_remap_addr(dev);
++	if (!priv->base)
++		return -EINVAL;
++	return clk_get_by_name(dev, "mpll", &priv->parent);
++}
++
++static const struct clk_ops x1600_clk_ops = {
++	.request = x1600_clk_request,
++	.get_rate = x1600_clk_get_rate,
++	.set_rate = x1600_clk_set_rate,
++	.enable = x1600_clk_enable,
++	.disable = x1600_clk_disable,
++};
++
++static const struct udevice_id x1600_cgu_ids[] = {
++	{ .compatible = "ingenic,x1600-cgu" },
++	{ }
++};
++
++U_BOOT_DRIVER(x1600_cgu) = {
++	.name = "x1600_cgu",
++	.id = UCLASS_CLK,
++	.of_match = x1600_cgu_ids,
++	.probe = x1600_cgu_probe,
++	.priv_auto = sizeof(struct x1600_cgu_priv),
++	.ops = &x1600_clk_ops,
++};
+diff --git a/include/dt-bindings/clock/ingenic,x1600-cgu.h b/include/dt-bindings/clock/ingenic,x1600-cgu.h
+new file mode 100644
+index 00000000..4eb5b020
+--- /dev/null
++++ b/include/dt-bindings/clock/ingenic,x1600-cgu.h
+@@ -0,0 +1,60 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * This header provides clock numbers for the ingenic,x1600-cgu DT binding.
++ *
++ * They are roughly ordered as:
++ *   - external clocks
++ *   - PLLs
++ *   - muxes/dividers in the order they appear in the x1600 programmers manual
++ *   - gates in order of their bit in the CLKGR* registers
++ */
++
++#ifndef __DT_BINDINGS_CLOCK_X1600_CGU_H__
++#define __DT_BINDINGS_CLOCK_X1600_CGU_H__
++
++#define X1600_CLK_EXCLK			0
++#define X1600_CLK_RTCLK			1
++#define X1600_CLK_12M			2
++#define X1600_CLK_APLL			3
++#define X1600_CLK_EPLL			4
++#define X1600_CLK_MPLL			5
++#define X1600_CLK_SCLKA			6
++#define X1600_CLK_CPUMUX		7
++#define X1600_CLK_CPU			8
++#define X1600_CLK_L2CACHE		9
++#define X1600_CLK_AHB0			10
++#define X1600_CLK_AHB2PMUX		11
++#define X1600_CLK_AHB2			12
++#define X1600_CLK_PCLK			13
++#define X1600_CLK_DDR			14
++#define X1600_CLK_I2S0			15
++#define X1600_CLK_I2S1			16
++#define X1600_CLK_LCDPIXCLK		17
++#define X1600_CLK_MAC			18
++#define X1600_CLK_MSC0			19
++#define X1600_CLK_MSC1			20
++#define X1600_CLK_SSI0			21
++#define X1600_CLK_CIMMCLK		22
++#define X1600_CLK_GATE_CIM	(0 + 3 + 3 + 19 + 21 + 6)
++#define X1600_CLK_GATE_MIPI_CSI	(0 + 3 + 3 + 19 + 21 + 27)
++#define X1600_CLK_EXCLK_DIV512		23
++#define X1600_CLK_RTC			24
++#define X1600_CLK_OTGPHY		25
++#define X1600_CLK_NEMC			26
++#define X1600_CLK_OTG0			27
++#define X1600_CLK_SMB0			28
++#define X1600_CLK_SMB1			29
++#define X1600_CLK_AIC			30
++#define X1600_CLK_SADC			31
++#define X1600_CLK_UART0			32
++#define X1600_CLK_UART1			33
++#define X1600_CLK_UART2			34
++#define X1600_CLK_UART3			35
++#define X1600_CLK_PDMA			36
++#define X1600_CLK_AES			37
++#define X1600_CLK_I2S0_RX		38
++#define X1600_CLK_I2S0_TX		39
++#define X1600_CLK_SFC			40
++#define X1600_CLK_DTRNG		41
++
++#endif /* __DT_BINDINGS_CLOCK_X1600_CGU_H__ */

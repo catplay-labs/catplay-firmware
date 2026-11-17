@@ -1,0 +1,244 @@
+Subject: [PATCH] watchdog: ingenic: share early and driver-model watchdog operations
+Upstream-Status: Inappropriate [CatPlay X1600 platform support]
+
+diff --git a/arch/mips/mach-jz47xx/x1600/recovery.c b/arch/mips/mach-jz47xx/x1600/recovery.c
+new file mode 100644
+index 00000000..7b90363d
+--- /dev/null
++++ b/arch/mips/mach-jz47xx/x1600/recovery.c
+@@ -0,0 +1,33 @@
++// SPDX-License-Identifier: GPL-2.0+
++#include <x1600_boot.h>
++#include <ingenic_wdt.h>
++#include <asm/io.h>
++#include <linux/bitops.h>
++
++#define CPM_CLKGR0 ((void *)0xb0000020)
++#define X1600_WDT_BASE ((void *)0xb0002000)
++
++static struct ingenic_wdt early_wdt = {
++	.base = X1600_WDT_BASE,
++	.clkgr = CPM_CLKGR0,
++};
++
++void x1600_watchdog_start(unsigned int seconds)
++{
++	ingenic_wdt_start(&early_wdt, seconds * 1000ULL);
++}
++
++void __noreturn x1600_return_to_rom(void)
++{
++	/* Intentional USB handoff; BootROM cannot service the watchdog. */
++	ingenic_wdt_stop(&early_wdt);
++	x1600_unstash_rom(0);
++}
++
++void __noreturn x1600_fel_recover(void)
++{
++	x1600_usb_guard_arm();
++	ingenic_wdt_expire_now(&early_wdt);
++	for (;;)
++		__asm__ volatile("wait");
++}
+diff --git a/drivers/watchdog/Kconfig b/drivers/watchdog/Kconfig
+index 58e94634..8716fa46 100644
+--- a/drivers/watchdog/Kconfig
++++ b/drivers/watchdog/Kconfig
+@@ -504,3 +504,17 @@ config WDT_I6300ESB
+ 	  testing watchdog functionality in virtual systems.
+ 
+ endmenu
++
++config WDT_INGENIC_X1600
++	bool "Ingenic X1600 watchdog"
++	depends on SOC_X1600
++	help
++	  Shared non-DM watchdog engine and optional UCLASS_WDT frontend.
++
++config SPL_WDT_INGENIC_X1600
++	bool
++	default y if WDT_INGENIC_X1600 && SPL
++
++config TPL_WDT_INGENIC_X1600
++	bool
++	default y if WDT_INGENIC_X1600 && TPL
+diff --git a/drivers/watchdog/Makefile b/drivers/watchdog/Makefile
+index cfe3f3da..4efa0774 100644
+--- a/drivers/watchdog/Makefile
++++ b/drivers/watchdog/Makefile
+@@ -59,3 +59,7 @@ obj-$(CONFIG_WDT_XILINX) += xilinx_wwdt.o
+ obj-$(CONFIG_WDT_ADI) += adi_wdt.o
+ obj-$(CONFIG_WDT_QCOM) += qcom-wdt.o
+ obj-$(CONFIG_WDT_I6300ESB) += i6300esb-wdt.o
++
++ifdef CONFIG_$(PHASE_)WDT
++obj-$(CONFIG_WDT_INGENIC_X1600) += ingenic_wdt.o
++endif
+diff --git a/drivers/watchdog/ingenic_wdt.c b/drivers/watchdog/ingenic_wdt.c
+new file mode 100644
+index 00000000..af39e33c
+--- /dev/null
++++ b/drivers/watchdog/ingenic_wdt.c
+@@ -0,0 +1,61 @@
++// SPDX-License-Identifier: GPL-2.0+
++#include <dm.h>
++#include <wdt.h>
++#include <ingenic_wdt.h>
++
++static int x1600_wdt_start(struct udevice *dev, u64 ms, ulong flags)
++{
++	return ingenic_wdt_start(dev_get_priv(dev), ms);
++}
++
++static int x1600_wdt_stop(struct udevice *dev)
++{
++	return ingenic_wdt_stop(dev_get_priv(dev));
++}
++
++static int x1600_wdt_reset(struct udevice *dev)
++{
++	return ingenic_wdt_reset(dev_get_priv(dev));
++}
++
++static int x1600_wdt_expire(struct udevice *dev, ulong flags)
++{
++	return ingenic_wdt_expire_now(dev_get_priv(dev));
++}
++
++static int x1600_wdt_timeout(struct udevice *dev, u64 *ms)
++{
++	return ingenic_wdt_get_timeout(dev_get_priv(dev), ms);
++}
++
++static int x1600_wdt_probe(struct udevice *dev)
++{
++	struct ingenic_wdt *wdt = dev_get_priv(dev);
++
++	wdt->base = dev_remap_addr_name(dev, "wdt");
++	wdt->clkgr = dev_remap_addr_name(dev, "clock-gate");
++	/* Probing must preserve the watchdog armed before driver model. */
++	return wdt->base && wdt->clkgr ? 0 : -EINVAL;
++}
++
++static const struct wdt_ops x1600_wdt_ops = {
++	.start = x1600_wdt_start,
++	.stop = x1600_wdt_stop,
++	.reset = x1600_wdt_reset,
++	.expire_now = x1600_wdt_expire,
++	.get_timeout = x1600_wdt_timeout,
++};
++
++static const struct udevice_id x1600_wdt_ids[] = {
++	{ .compatible = "ingenic,x1600-watchdog" },
++	{ }
++};
++
++U_BOOT_DRIVER(x1600_wdt) = {
++	.name = "x1600_wdt",
++	.id = UCLASS_WDT,
++	.of_match = x1600_wdt_ids,
++	.probe = x1600_wdt_probe,
++	.priv_auto = sizeof(struct ingenic_wdt),
++	.ops = &x1600_wdt_ops,
++};
+diff --git a/drivers/watchdog/ingenic_wdt_core.c b/drivers/watchdog/ingenic_wdt_core.c
+new file mode 100644
+index 00000000..4dbf1446
+--- /dev/null
++++ b/drivers/watchdog/ingenic_wdt_core.c
+@@ -0,0 +1,73 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* X1600 watchdog register engine, shared by non-DM startup and DM. */
++#include <ingenic_wdt.h>
++#include <asm/io.h>
++#include <linux/bitfield.h>
++#include <linux/errno.h>
++
++#define WDT_TDR 0x00
++#define WDT_TCER 0x04
++#define WDT_TCNT 0x08
++#define WDT_TCSR 0x0c
++#define TCU_TSSR 0x2c
++#define TCU_TSCR 0x3c
++#define CLKGR_TCU BIT(18)
++#define TCU_STOP_WDT BIT(16)
++#define WDT_ENABLE BIT(0)
++#define WDT_COUNTER_CLEAR BIT(10)
++#define WDT_PRESCALE GENMASK(5, 3)
++#define WDT_PRESCALE_64 3
++#define WDT_CLOCK_RTC BIT(1)
++#define WDT_TICKS_PER_SEC 512
++#define WDT_COUNTER_MAX 65535
++#define WDT_MAX_MS (WDT_COUNTER_MAX * 1000ULL / WDT_TICKS_PER_SEC)
++
++int ingenic_wdt_stop(struct ingenic_wdt *wdt)
++{
++	writel(0, wdt->base + WDT_TCER);
++	writel(TCU_STOP_WDT, wdt->base + TCU_TSSR);
++	readl(wdt->base + WDT_TCER);
++	return 0;
++}
++
++int ingenic_wdt_start(struct ingenic_wdt *wdt, u64 timeout_ms)
++{
++	u32 ticks;
++
++	if (timeout_ms > WDT_MAX_MS)
++		timeout_ms = WDT_MAX_MS;
++	ticks = (timeout_ms * WDT_TICKS_PER_SEC + 999) / 1000;
++	if (!ticks)
++		ticks = 1;
++	clrbits_le32(wdt->clkgr, CLKGR_TCU);
++	writel(TCU_STOP_WDT, wdt->base + TCU_TSCR);
++	writel(0, wdt->base + WDT_TCER);
++	writel(0, wdt->base + WDT_TCNT);
++	writel(ticks, wdt->base + WDT_TDR);
++	writel(WDT_COUNTER_CLEAR | FIELD_PREP(WDT_PRESCALE, WDT_PRESCALE_64) |
++	       WDT_CLOCK_RTC, wdt->base + WDT_TCSR);
++	writel(WDT_ENABLE, wdt->base + WDT_TCER);
++	readl(wdt->base + WDT_TCER);
++	return 0;
++}
++
++int ingenic_wdt_reset(struct ingenic_wdt *wdt)
++{
++	writel(readl(wdt->base + WDT_TCSR) | WDT_COUNTER_CLEAR,
++	       wdt->base + WDT_TCSR);
++	return 0;
++}
++
++int ingenic_wdt_expire_now(struct ingenic_wdt *wdt)
++{
++	return ingenic_wdt_start(wdt, 0);
++}
++
++int ingenic_wdt_get_timeout(struct ingenic_wdt *wdt, u64 *timeout_ms)
++{
++	if (!(readl(wdt->base + WDT_TCER) & WDT_ENABLE))
++		return -ENODATA;
++	*timeout_ms = ((u64)readl(wdt->base + WDT_TDR) * 1000 +
++		      WDT_TICKS_PER_SEC - 1) / WDT_TICKS_PER_SEC;
++	return 0;
++}
+diff --git a/include/ingenic_wdt.h b/include/ingenic_wdt.h
+new file mode 100644
+index 00000000..ed5cae7e
+--- /dev/null
++++ b/include/ingenic_wdt.h
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef __INGENIC_WDT_H
++#define __INGENIC_WDT_H
++#include <linux/types.h>
++
++struct ingenic_wdt {
++	void __iomem *base;
++	void __iomem *clkgr;
++};
++
++int ingenic_wdt_start(struct ingenic_wdt *wdt, u64 timeout_ms);
++int ingenic_wdt_stop(struct ingenic_wdt *wdt);
++int ingenic_wdt_reset(struct ingenic_wdt *wdt);
++int ingenic_wdt_expire_now(struct ingenic_wdt *wdt);
++int ingenic_wdt_get_timeout(struct ingenic_wdt *wdt, u64 *timeout_ms);
++#endif

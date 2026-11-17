@@ -1,0 +1,212 @@
+Subject: [PATCH] board: ingenic: add AX1800 memory and FIT boot support
+Upstream-Status: Inappropriate [CatPlay X1600 platform support]
+
+diff --git a/arch/mips/dts/Makefile b/arch/mips/dts/Makefile
+index 7c4ee8b6..d13aa8aa 100644
+--- a/arch/mips/dts/Makefile
++++ b/arch/mips/dts/Makefile
+@@ -36,6 +36,8 @@ dtb-$(CONFIG_SOC_JR2) += jr2_pcb110.dtb jr2_pcb111.dtb serval2_pcb112.dtb
+ dtb-$(CONFIG_SOC_SERVALT) += servalt_pcb116.dtb
+ dtb-$(CONFIG_SOC_SERVAL) += serval_pcb105.dtb serval_pcb106.dtb
+ 
++dtb-$(CONFIG_SOC_X1600) += x1600-ax1800.dtb
++
+ include $(srctree)/scripts/Makefile.dts
+ 
+ # Add any required device tree compiler flags here
+diff --git a/arch/mips/dts/x1600-ax1800.dts b/arch/mips/dts/x1600-ax1800.dts
+new file mode 100644
+index 00000000..0234e2d9
+--- /dev/null
++++ b/arch/mips/dts/x1600-ax1800.dts
+@@ -0,0 +1,70 @@
++// SPDX-License-Identifier: GPL-2.0+
++/dts-v1/;
++#include <dt-bindings/clock/ingenic,x1600-cgu.h>
++/ {
++	model = "Carlinkit X1600 AIC8800D80";
++	compatible = "carlinkit,x1600-aic8800d80", "ingenic,x1600";
++	#address-cells = <1>;
++	#size-cells = <1>;
++	aliases { serial0 = &uart2; spi0 = &sfc; };
++	chosen { stdout-path = "serial0:115200n8"; };
++	watchdog@10002000 {
++		compatible = "ingenic,x1600-watchdog";
++		reg = <0x10002000 0x40>, <0x10000020 0x4>;
++		reg-names = "wdt", "clock-gate";
++		u-boot,noautostart;
++		bootph-all;
++	};
++	uart2: serial@10032000 {
++		compatible = "ingenic,jz4780-uart";
++		reg = <0x10032000 0x100>;
++		reg-shift = <2>;
++		reg-io-width = <4>;
++		clock-frequency = <24000000>;
++	};
++	mpll: clock-mpll {
++		compatible = "fixed-clock";
++		#clock-cells = <0>;
++		clock-frequency = <1400000000>;
++		bootph-all;
++	};
++	cgu: clock-controller@10000000 {
++		compatible = "ingenic,x1600-cgu";
++		reg = <0x10000000 0x100>;
++		#clock-cells = <1>;
++		clocks = <&mpll>;
++		clock-names = "mpll";
++		bootph-all;
++	};
++	pinctrl: pin-controller@10010000 {
++		compatible = "ingenic,x1600-pinctrl";
++		reg = <0x10010000 0x1000>;
++		bootph-all;
++		sfc_pins: sfc-pins {
++			function = "sfc";
++			groups = "sfc";
++			bootph-all;
++		};
++	};
++	sfc: spi@13440000 {
++		compatible = "ingenic,x1600-sfc";
++		reg = <0x13440000 0x10000>;
++		clocks = <&cgu X1600_CLK_SFC>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&sfc_pins>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++		bootph-all;
++		flash@0 {
++			compatible = "jedec,spi-nor";
++			reg = <0>;
++			spi-max-frequency = <70000000>;
++			spi-rx-bus-width = <4>;
++			bootph-all;
++		};
++	};
++	memory@0 {
++		device_type = "memory";
++		reg = <0 0x04000000>;
++	};
++};
+diff --git a/board/ingenic/ax1800/Kconfig b/board/ingenic/ax1800/Kconfig
+new file mode 100644
+index 00000000..be6525ff
+--- /dev/null
++++ b/board/ingenic/ax1800/Kconfig
+@@ -0,0 +1,24 @@
++if TARGET_X1600_AX1800
++config SYS_BOARD
++	default "ax1800"
++config SYS_VENDOR
++	default "ingenic"
++config SYS_CONFIG_NAME
++	default "x1600_ax1800"
++endif
++
++config X1600_TPL_FLASH
++	bool "Load the DRAM SPL uImage from NOR in TPL"
++	depends on TARGET_X1600_AX1800 && TPL
++	select TPL_SPI_INGENIC_SFC
++	select TPL_CRC32
++	select TPL_LIBGENERIC_SUPPORT
++	select TPL_FRAMEWORK
++	select TPL_SPI
++	select TPL_SPI_FLASH_SUPPORT
++	select TPL_SPI_LOAD
++	select TPL_LEGACY_IMAGE_FORMAT
++	select TPL_LEGACY_IMAGE_CRC_CHECK
++	select TPL_SYS_MALLOC_F
++	select TPL_SYS_MALLOC_SIMPLE
++	select TPL_LIBCOMMON_SUPPORT
+diff --git a/board/ingenic/ax1800/Makefile b/board/ingenic/ax1800/Makefile
+new file mode 100644
+index 00000000..bcca1a9f
+--- /dev/null
++++ b/board/ingenic/ax1800/Makefile
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0+
++obj-y += board.o
+diff --git a/board/ingenic/ax1800/board.c b/board/ingenic/ax1800/board.c
+new file mode 100644
+index 00000000..a86516b3
+--- /dev/null
++++ b/board/ingenic/ax1800/board.c
+@@ -0,0 +1,65 @@
++// SPDX-License-Identifier: GPL-2.0+
++#include <config.h>
++#include <init.h>
++#include <dm.h>
++#include <wdt.h>
++#include <hang.h>
++#include <x1600_boot.h>
++#include <asm/global_data.h>
++#include <asm/io.h>
++#include <linux/bitops.h>
++
++DECLARE_GLOBAL_DATA_PTR;
++
++int dram_init(void)
++{
++	gd->ram_size = 64 * 1024 * 1024;
++	return 0;
++}
++
++#if !defined(CONFIG_XPL_BUILD)
++int board_early_init_f(void)
++{
++	x1600_usb_guard_arm();
++	x1600_watchdog_start(30);
++	/* UART2 is also used by the Linux self-decompressor. */
++	clrbits_le32((void *)0xb0000020, BIT(16));
++	writeb(16, (void *)0xb0032024);
++	writew(0, (void *)0xb0032028);
++	return 0;
++}
++
++int board_early_init_r(void)
++{
++	return 0;
++}
++
++int board_late_init(void)
++{
++	struct udevice *wdt;
++	int ret = uclass_get_device(UCLASS_WDT, 0, &wdt);
++
++	return ret ? ret : wdt_start(wdt, 30000, 0);
++}
++
++void board_quiesce_devices(void)
++{
++	struct udevice *wdt;
++
++	x1600_usb_guard_arm();
++
++	if (uclass_get_device(UCLASS_WDT, 0, &wdt) ||
++	    wdt_start(wdt, 10000, 0))
++		x1600_fel_recover();
++}
++#endif
++
++void arch_hang(void)
++{
++	x1600_fel_recover();
++}
++
++void board_boot_failure(void)
++{
++	x1600_fel_recover();
++}
+diff --git a/include/configs/x1600_ax1800.h b/include/configs/x1600_ax1800.h
+new file mode 100644
+index 00000000..aa511434
+--- /dev/null
++++ b/include/configs/x1600_ax1800.h
+@@ -0,0 +1,5 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef __X1600_AX1800_H
++#define __X1600_AX1800_H
++#define CFG_SYS_SDRAM_BASE 0x80000000
++#endif

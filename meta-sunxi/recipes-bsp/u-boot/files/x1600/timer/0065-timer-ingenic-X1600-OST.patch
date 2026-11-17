@@ -1,0 +1,72 @@
+Subject: [PATCH] timer: ingenic: use standard OST time and delay APIs
+Upstream-Status: Inappropriate [CatPlay X1600 platform support]
+
+diff --git a/arch/mips/mach-jz47xx/x1600/timer.c b/arch/mips/mach-jz47xx/x1600/timer.c
+new file mode 100644
+index 00000000..4dfd6118
+--- /dev/null
++++ b/arch/mips/mach-jz47xx/x1600/timer.c
+@@ -0,0 +1,40 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* X1600 OST channel 2, using the standard non-DM U-Boot timer API. */
++#include <init.h>
++#include <time.h>
++#include <asm/io.h>
++#include <linux/bitops.h>
++
++#define X1600_CPM_CLKGR ((void __iomem *)0xb0000020)
++#define CLKGR_OST BIT(20)
++#define X1600_OST_BASE ((void __iomem *)0xb2000000)
++#define OST_CTRL 0x00
++#define OST_ENABLE 0x08
++#define OST_COUNT2 0x20
++#define OST_MASK 0x34
++#define OST_CLEAR 0x38
++#define OST_DIV4 BIT(2)
++#define OST_ENABLE_CH2 BIT(0)
++#define OST_MASK_ALL (BIT(0) | BIT(1))
++#define OST_RATE 6000000UL
++
++int timer_init(void)
++{
++	clrbits_le32(X1600_CPM_CLKGR, CLKGR_OST);
++	writel(OST_ENABLE_CH2, X1600_OST_BASE + OST_CLEAR);
++	writel(OST_DIV4, X1600_OST_BASE + OST_CTRL);
++	writel(OST_ENABLE_CH2, X1600_OST_BASE + OST_ENABLE);
++	writel(OST_MASK_ALL, X1600_OST_BASE + OST_MASK);
++	return 0;
++}
++
++ulong notrace get_tbclk(void)
++{
++	/* AX1800 EXTAL24MHz divided by4, independent of CPU/DDR retuning. */
++	return OST_RATE;
++}
++
++ulong notrace timer_read_counter(void)
++{
++	return readl(X1600_OST_BASE + OST_COUNT2);
++}
+diff --git a/arch/mips/Kconfig b/arch/mips/Kconfig
+--- a/arch/mips/Kconfig
++++ b/arch/mips/Kconfig
+@@ -286,7 +286,7 @@
+ 
+ config SYS_MIPS_TIMER_FREQ
+ 	int "Fixed MIPS CPU timer frequency in Hz"
+-	depends on HAS_FIXED_TIMER_FREQUENCY
++	depends on HAS_FIXED_TIMER_FREQUENCY && !SOC_X1600
+ 	help
+ 	  Configures a fixed CPU timer frequency.
+ 
+diff --git a/arch/mips/mach-jz47xx/x1600/Makefile b/arch/mips/mach-jz47xx/x1600/Makefile
+--- a/arch/mips/mach-jz47xx/x1600/Makefile
++++ b/arch/mips/mach-jz47xx/x1600/Makefile
+@@ -1,6 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0+
+ extra-$(CONFIG_XPL_BUILD) += start.o
+-obj-y += rom-return.o recovery.o fel-guard.o
++obj-y += rom-return.o recovery.o timer.o fel-guard.o
+ ifdef CONFIG_TPL_BUILD
+ obj-y += tpl.o
+ obj-$(CONFIG_X1600_TPL_FLASH) += tpl-flash.o

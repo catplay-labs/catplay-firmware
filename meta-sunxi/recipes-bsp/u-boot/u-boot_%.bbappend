@@ -389,3 +389,5 @@ do_deploy:v821() {
     install -Dm0644 "${B}/v821-main/u-boot-initial-env" "${DEPLOYDIR}/${MACHINE}-u-boot-proper.env"
 }
 FILES:${PN}:append:v821 = " ${libdir}/u-boot-v821"
+
+require u-boot-x1600.inc

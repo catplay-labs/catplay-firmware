@@ -1,0 +1,287 @@
+Subject: [PATCH] mips: ingenic: add X1600 platform and returning ROM entry
+Upstream-Status: Inappropriate [CatPlay X1600 platform support]
+
+diff --git a/arch/mips/Makefile b/arch/mips/Makefile
+index 453c7885..7c1c7576 100644
+--- a/arch/mips/Makefile
++++ b/arch/mips/Makefile
+@@ -5,6 +5,7 @@ head-y := arch/mips/cpu/start.o
+ ifeq ($(CONFIG_XPL_BUILD),y)
+ head-$(CONFIG_ARCH_JZ47XX) := arch/mips/mach-jz47xx/start.o
+ head-$(CONFIG_SOC_MT7621) := arch/mips/mach-mtmips/mt7621/spl/start.o
++head-$(CONFIG_SOC_X1600) := arch/mips/mach-jz47xx/x1600/start.o
+ endif
+ 
+ ifeq ($(CONFIG_TPL_BUILD),y)
+diff --git a/arch/mips/cpu/Makefile b/arch/mips/cpu/Makefile
+index 6df7bb4e..462e3734 100644
+--- a/arch/mips/cpu/Makefile
++++ b/arch/mips/cpu/Makefile
+@@ -2,7 +2,9 @@
+ 
+ extra-y	= start.o
+ 
++ifndef CONFIG_SOC_X1600
+ obj-y += time.o
++endif
+ obj-y += interrupts.o
+ obj-y += cpu.o
+ 
+diff --git a/arch/mips/cpu/start.S b/arch/mips/cpu/start.S
+index a95c95bc..d533ef91 100644
+--- a/arch/mips/cpu/start.S
++++ b/arch/mips/cpu/start.S
+@@ -70,6 +70,12 @@
+ 	.endm
+ 
+ ENTRY(_start)
++#if defined(CONFIG_TARGET_X1600_AX1800) && !defined(CONFIG_XPL_BUILD)
++	/* Retain the ROM caller before the generic startup resets its ABI. */
++	la t9, x1600_stash_rom
++	jalr t8, t9
++	 nop
++#endif
+ 	/*
+ 	 * U-Boot entry point.
+ 	 * Do not add instructions to the branch delay slot! Some SoC's
+diff --git a/arch/mips/mach-jz47xx/Kconfig b/arch/mips/mach-jz47xx/Kconfig
+index 858173e7..7aa247f3 100644
+--- a/arch/mips/mach-jz47xx/Kconfig
++++ b/arch/mips/mach-jz47xx/Kconfig
+@@ -14,6 +14,11 @@ config SOC_JZ4780
+ 
+ choice
+ 	prompt "Board select"
++	default TARGET_JZ4780_CI20
++
++config TARGET_X1600_AX1800
++	bool "AX1800 X1600 USB recovery"
++	select SOC_X1600
+ 
+ config TARGET_JZ4780_CI20
+ 	bool "Creator CI20 Reference Board"
+@@ -22,5 +27,16 @@ config TARGET_JZ4780_CI20
+ endchoice
+ 
+ source "board/imgtec/ci20/Kconfig"
++source "board/ingenic/ax1800/Kconfig"
++
++config SOC_X1600
++	bool
++	select SPL_SPRINTF if SPL
++	select SPL_STRTO if SPL
++	select MIPS_L2_CACHE
++	select SUPPORT_LITTLE_ENDIAN
++	select SUPPORTS_CPU_MIPS32_R2
++	select SUPPORT_TPL
++	select SYS_CACHE_SHIFT_5
+ 
+ endmenu
+diff --git a/arch/mips/mach-jz47xx/Makefile b/arch/mips/mach-jz47xx/Makefile
+index 5621a09b..fdae4acf 100644
+--- a/arch/mips/mach-jz47xx/Makefile
++++ b/arch/mips/mach-jz47xx/Makefile
+@@ -1,5 +1,8 @@
+ # SPDX-License-Identifier: GPL-2.0+
+ 
++ifeq ($(CONFIG_SOC_JZ4780),y)
+ extra-$(CONFIG_XPL_BUILD)	:= start.o
++endif
+ 
+ obj-$(CONFIG_SOC_JZ4780)	+= jz4780/
++obj-$(CONFIG_SOC_X1600)	+= x1600/
+diff --git a/arch/mips/mach-jz47xx/include/mach/x1600.h b/arch/mips/mach-jz47xx/include/mach/x1600.h
+new file mode 100644
+index 00000000..2a9affda
+--- /dev/null
++++ b/arch/mips/mach-jz47xx/include/mach/x1600.h
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef __MACH_X1600_H
++#define __MACH_X1600_H
++#include <linux/types.h>
++#define X1600_CPM_BASE ((void __iomem *)0xb0000000)
++#define X1600_GPIO_BASE ((void __iomem *)0xb0010000)
++#define X1600_SFC_BASE ((void __iomem *)0xb3440000)
++#define X1600_MPLL_RATE 1400000000UL
++#define X1600_SFC_MAX_HZ 70000000UL
++#define X1600_SFC_CLOCK_DIV 4
++
++ulong x1600_sfc_clk_set_rate(void __iomem *cpm, ulong parent, ulong rate);
++ulong x1600_sfc_clk_get_rate(void __iomem *cpm, ulong parent);
++void x1600_sfc_clk_gate(void __iomem *cpm, bool enable);
++void x1600_sfc_pinmux(void __iomem *gpio);
++#endif
+diff --git a/arch/mips/mach-jz47xx/x1600/Makefile b/arch/mips/mach-jz47xx/x1600/Makefile
+new file mode 100644
+index 00000000..17a975d0
+--- /dev/null
++++ b/arch/mips/mach-jz47xx/x1600/Makefile
+@@ -0,0 +1,14 @@
++# SPDX-License-Identifier: GPL-2.0+
++extra-$(CONFIG_XPL_BUILD) += start.o
++obj-y += rom-return.o recovery.o fel-guard.o
++ifdef CONFIG_TPL_BUILD
++obj-y += tpl.o
++obj-$(CONFIG_X1600_TPL_FLASH) += tpl-flash.o
++else
++obj-$(CONFIG_SPL_BUILD) += spl.o
++obj-$(CONFIG_SPL_OS_BOOT) += flash-linux.o
++endif
++
++ifneq ($(CONFIG_SPI_INGENIC_SFC)$(CONFIG_TPL_SPI_INGENIC_SFC),)
++obj-y += sfc.o
++endif
+diff --git a/arch/mips/mach-jz47xx/x1600/fel-guard.c b/arch/mips/mach-jz47xx/x1600/fel-guard.c
+new file mode 100644
+index 00000000..665b3986
+--- /dev/null
++++ b/arch/mips/mach-jz47xx/x1600/fel-guard.c
+@@ -0,0 +1,13 @@
++// SPDX-License-Identifier: GPL-2.0+
++#include <x1600_boot.h>
++#include <asm/io.h>
++
++#define CPM_SLPC ((void *)0xb00000cc)
++#define X1600_FEL_REQUEST 0x42575302
++
++/* Only Linux's orderly reboot notifier may replace this request with 0x1. */
++void x1600_usb_guard_arm(void)
++{
++	writel(X1600_FEL_REQUEST, CPM_SLPC);
++	readl(CPM_SLPC);
++}
+diff --git a/arch/mips/mach-jz47xx/x1600/rom-return.S b/arch/mips/mach-jz47xx/x1600/rom-return.S
+new file mode 100644
+index 00000000..866f8142
+--- /dev/null
++++ b/arch/mips/mach-jz47xx/x1600/rom-return.S
+@@ -0,0 +1,64 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#include <asm/regdef.h>
++	.set noreorder
++
++/* Startup-only leaf: call with jalr t8,t9 to retain the ROM's ra. */
++	.globl x1600_stash_rom
++x1600_stash_rom:
++	la t0, x1600_rom_context
++	sw ra, 0(t0)
++	sw sp, 4(t0)
++	sw gp, 8(t0)
++	sw s0, 12(t0)
++	sw s1, 16(t0)
++	sw s2, 20(t0)
++	sw s3, 24(t0)
++	sw s4, 28(t0)
++	sw s5, 32(t0)
++	sw s6, 36(t0)
++	sw s7, 40(t0)
++	sw fp, 44(t0)
++	mfc0 t1, $12
++	sw t1, 48(t0)
++	mfc0 t1, $13
++	sw t1, 52(t0)
++	sync
++	jr t8
++	 nop
++
++/* Restore the ROM ABI, then jump to a0, or return to ROM when a0 is zero. */
++	.globl x1600_unstash_rom
++x1600_unstash_rom:
++	move t9, a0
++	la t0, x1600_rom_context
++	lw ra, 0(t0)
++	lw sp, 4(t0)
++	lw gp, 8(t0)
++	lw s0, 12(t0)
++	lw s1, 16(t0)
++	lw s2, 20(t0)
++	lw s3, 24(t0)
++	lw s4, 28(t0)
++	lw s5, 32(t0)
++	lw s6, 36(t0)
++	lw s7, 40(t0)
++	lw fp, 44(t0)
++	lw t1, 48(t0)
++	mtc0 t1, $12
++	lw t1, 52(t0)
++	mtc0 t1, $13
++	ehb
++	bnez t9, .Ljump
++	 nop
++	move t9, ra
++.Ljump:
++	jr t9
++	 move v0, zero
++
++/* TPL uses ROM cache-as-RAM; .data survives SPL BSS clearing and relocation. */
++	.section .data.x1600_rom_context, "aw", @progbits
++	.balign 32
++	.type x1600_rom_context, @object
++x1600_rom_context:
++	.space 64
++	.size x1600_rom_context, . - x1600_rom_context
+diff --git a/arch/mips/mach-jz47xx/x1600/start.S b/arch/mips/mach-jz47xx/x1600/start.S
+new file mode 100644
+index 00000000..e70b2e56
+--- /dev/null
++++ b/arch/mips/mach-jz47xx/x1600/start.S
+@@ -0,0 +1,35 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#include <config.h>
++#include <asm/regdef.h>
++
++	.set noreorder
++	.globl _start
++_start:
++	la t9, x1600_stash_rom
++	jalr t8, t9
++	 nop
++#ifdef CONFIG_TPL_BUILD
++	/* START1 supplies the ROM stack; reserve its O32 call argument area. */
++	addiu sp, sp, -32
++	jal x1600_tpl_main
++	 nop
++#ifdef CONFIG_X1600_TPL_FLASH
++	/* DDR is ready; use the DRAM stack for the standard TPL framework. */
++	li sp, CONFIG_CUSTOM_SYS_INIT_SP_ADDR - 32
++	move a0, zero
++	move a1, zero
++	jal board_init_r
++	 nop
++#endif
++	j x1600_fel_recover
++	 nop
++#else
++	li sp, CONFIG_CUSTOM_SYS_INIT_SP_ADDR
++	/* BootROM leaves Cause.DC set; Linux needs its CP0 Count enabled. */
++	mtc0 zero, $13
++	ehb
++	jal board_init_f
++	 nop
++	j x1600_fel_recover
++	 nop
++#endif
+diff --git a/arch/mips/mach-jz47xx/x1600/usb-tpl.lds b/arch/mips/mach-jz47xx/x1600/usb-tpl.lds
+new file mode 100644
+index 00000000..83330ffa
+--- /dev/null
++++ b/arch/mips/mach-jz47xx/x1600/usb-tpl.lds
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++OUTPUT_ARCH(mips)
++ENTRY(_start)
++SECTIONS {
++	. = CONFIG_TPL_TEXT_BASE;
++	.text : { arch/mips/mach-jz47xx/x1600/start.o(.text*) *(.text*) }
++	.rodata : { *(.rodata*) }
++	.data : { *(.data*) *(.sdata*) }
++	. = ALIGN(8);
++	__u_boot_list : { KEEP(*(SORT(__u_boot_list*))) . = ALIGN(8); }
++	__image_copy_end = .;
++	_image_binary_end = .;
++	.bss (NOLOAD) : { __bss_start = .; *(.bss*) *(.sbss*) *(COMMON) __bss_end = .; }
++	ASSERT(_image_binary_end <= CONFIG_TPL_TEXT_BASE + CONFIG_TPL_MAX_SIZE, "X1600 TPL exceeds NOR payload budget")
++	ASSERT(__bss_end <= 0x80006800, "X1600 USB TPL exceeds 20 KiB cache budget")
++	/DISCARD/ : { *(.MIPS.abiflags) *(.reginfo) *(.comment) *(.note*) *(.eh_frame*) }
++}

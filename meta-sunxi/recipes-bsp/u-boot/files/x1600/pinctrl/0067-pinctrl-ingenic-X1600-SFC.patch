@@ -1,0 +1,96 @@
+Subject: [PATCH] pinctrl: ingenic: configure X1600 SFC pins through driver model
+Upstream-Status: Inappropriate [CatPlay X1600 platform support]
+
+diff --git a/drivers/pinctrl/Kconfig b/drivers/pinctrl/Kconfig
+index 04785a92..800918c1 100644
+--- a/drivers/pinctrl/Kconfig
++++ b/drivers/pinctrl/Kconfig
+@@ -454,3 +454,10 @@ source "drivers/pinctrl/uniphier/Kconfig"
+ source "drivers/pinctrl/starfive/Kconfig"
+ 
+ endmenu
++
++config PINCTRL_INGENIC_X1600
++	bool "Ingenic X1600 pin controller"
++	depends on SOC_X1600 && PINCTRL_FULL
++	select PINCTRL_GENERIC
++	help
++	  Configure the X1600 SFC pin group using the GPIO shadow registers.
+diff --git a/drivers/pinctrl/Makefile b/drivers/pinctrl/Makefile
+index 23219626..d475d25f 100644
+--- a/drivers/pinctrl/Makefile
++++ b/drivers/pinctrl/Makefile
+@@ -44,3 +44,5 @@ obj-$(CONFIG_$(PHASE_)PINCTRL_TEGRA)	+= tegra/
+ obj-$(CONFIG_PINCTRL_TH1520)		+= pinctrl-th1520.o
+ obj-$(CONFIG_PINCTRL_UNIPHIER)		+= uniphier/
+ obj-$(CONFIG_$(PHASE_)PINCTRL_ZYNQMP)	+= pinctrl-zynqmp.o
++
++obj-$(CONFIG_PINCTRL_INGENIC_X1600) += pinctrl-ingenic-x1600.o
+diff --git a/drivers/pinctrl/pinctrl-ingenic-x1600.c b/drivers/pinctrl/pinctrl-ingenic-x1600.c
+new file mode 100644
+index 00000000..3e9b3392
+--- /dev/null
++++ b/drivers/pinctrl/pinctrl-ingenic-x1600.c
+@@ -0,0 +1,62 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* X1600 SFC pin group, shared with the non-DM TPL setup. */
++#include <dm.h>
++#include <dm/pinctrl.h>
++#include <asm/io.h>
++#include <mach/x1600.h>
++
++struct x1600_pinctrl_priv {
++	void __iomem *base;
++};
++
++static int x1600_groups_count(struct udevice *dev)
++{
++	return 1;
++}
++
++static const char *x1600_group_name(struct udevice *dev, unsigned selector)
++{
++	return selector ? NULL : "sfc";
++}
++
++static int x1600_pinmux_group(struct udevice *dev, unsigned group,
++			    unsigned function)
++{
++	struct x1600_pinctrl_priv *priv = dev_get_priv(dev);
++
++	if (group || function)
++		return -EINVAL;
++	x1600_sfc_pinmux(priv->base);
++	return 0;
++}
++
++static int x1600_pinctrl_probe(struct udevice *dev)
++{
++	struct x1600_pinctrl_priv *priv = dev_get_priv(dev);
++
++	priv->base = dev_remap_addr(dev);
++	return priv->base ? 0 : -EINVAL;
++}
++
++static const struct pinctrl_ops x1600_pinctrl_ops = {
++	.get_groups_count = x1600_groups_count,
++	.get_group_name = x1600_group_name,
++	.get_functions_count = x1600_groups_count,
++	.get_function_name = x1600_group_name,
++	.pinmux_group_set = x1600_pinmux_group,
++	.set_state = pinctrl_generic_set_state,
++};
++
++static const struct udevice_id x1600_pinctrl_ids[] = {
++	{ .compatible = "ingenic,x1600-pinctrl" },
++	{ }
++};
++
++U_BOOT_DRIVER(x1600_pinctrl) = {
++	.name = "x1600_pinctrl",
++	.id = UCLASS_PINCTRL,
++	.of_match = x1600_pinctrl_ids,
++	.probe = x1600_pinctrl_probe,
++	.priv_auto = sizeof(struct x1600_pinctrl_priv),
++	.ops = &x1600_pinctrl_ops,
++};
