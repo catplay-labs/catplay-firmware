@@ -149,6 +149,7 @@ require linux-sunxi-letux.inc
 SRC_URI:append:x1600-aic8800d80 = " \
     file://x1600/0001-mips-ingenic-add-AX1800M-DTB-target.patch \
     file://x1600/0002-mips-reduce-appended-DTB-padding.patch \
+    file://drivers/watchdog/0003-watchdog-ingenic-inherit-active-X1600-boot-timer.patch \
     file://x1600-aic8800d80_defconfig \
     file://arch/mips/boot/dts/ingenic/carlinkit-mini-ultra-nor.dts \
 "

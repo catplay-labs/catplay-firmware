@@ -1,0 +1,380 @@
+Subject: [PATCH] watchdog: ingenic: inherit an active X1600 boot timer
+Upstream-Status: Pending
+
+Keep the boot watchdog clock and deadline intact during TCU registration.
+Adopt an armed X1600 timer through the watchdog core, keeping one clock
+reference and using the counter-clear strobe for timeout updates.
+
+--- a/drivers/clk/ingenic/tcu.c
++++ b/drivers/clk/ingenic/tcu.c
+@@ -53,6 +53,7 @@
+ 	bool allow_missing_tcu_clk;
+ 	bool has_prescale;
+ 	bool jz4740_regs;
++	bool preserve_running_wdt;
+ 	const struct ingenic_tcu_clk_info *clk_info;
+ 	const char *wdt_rtc_parent;
+ 	enum tcu_clk_parent parent_rtc;
+@@ -95,11 +96,32 @@
+ 	return 0;
+ }
+ 
++/* Negative errors must not be interpreted as permission to stop the guard. */
++static int ingenic_tcu_wdt_running(struct ingenic_tcu_clk *tcu_clk)
++{
++	unsigned int tcer;
++	int ret;
++
++	if (!tcu_clk->tcu->soc_info->preserve_running_wdt ||
++	    tcu_clk->idx != TCU_CLK_WDT)
++		return 0;
++
++	ret = regmap_read(tcu_clk->tcu->map, TCU_REG_WDT_TCER, &tcer);
++	if (ret)
++		return ret;
++
++	return !!(tcer & TCU_WDT_TCER_TCEN);
++}
++
+ static void ingenic_tcu_disable(struct clk_hw *hw)
+ {
+ 	struct ingenic_tcu_clk *tcu_clk = to_tcu_clk(hw);
+ 	const struct ingenic_tcu_clk_info *info = tcu_clk->info;
+ 	struct ingenic_tcu *tcu = tcu_clk->tcu;
++
++	/* Probe unwind may release its reference while hardware is still armed. */
++	if (ingenic_tcu_wdt_running(tcu_clk))
++		return;
+ 
+ 	if (tcu->soc_info->jz4740_regs)
+ 		regmap_write(tcu->map, TCU_REG_TSSR, BIT(info->gate_bit));
+@@ -356,7 +378,8 @@
+ 		[TCU_PARENT_EXT] = "ext",
+ 	};
+ 	struct ingenic_tcu_clk *tcu_clk;
+-	int err;
++	bool was_enabled;
++	int running, err;
+ 
+ 	if (idx == TCU_CLK_WDT && tcu->soc_info->wdt_rtc_parent) {
+ 		init.parent_names = wdt_parents;
+@@ -372,15 +395,27 @@
+ 	tcu_clk->info = info;
+ 	tcu_clk->tcu = tcu;
+ 
+-	/* Reset channel and clock divider, set default parent */
+-	ingenic_tcu_enable_regs(&tcu_clk->hw);
+-	if (tcu->soc_info->jz4740_regs) {
++	was_enabled = ingenic_tcu_enable_regs(&tcu_clk->hw);
++	running = ingenic_tcu_wdt_running(tcu_clk);
++	if (running < 0) {
++		if (!was_enabled)
++			ingenic_tcu_disable_regs(&tcu_clk->hw);
++		kfree(tcu_clk);
++		return running;
++	}
++
++	if (running) {
++		/* Keep the bootloader's parent, divider and gate until adoption. */
++		init.flags |= CLK_IGNORE_UNUSED;
++	} else if (tcu->soc_info->jz4740_regs) {
++		/* Reset inactive channels and select their default parent. */
+ 		regmap_update_bits(tcu->map, info->tcsr_reg, 0xffff, BIT(parent));
+ 	} else {
+ 		regmap_update_bits(tcu->map, info->tcsr_reg,
+ 				   0xffff & ~TCU_JZ4730_TCSR_EN, parent);
+ 	}
+-	ingenic_tcu_disable_regs(&tcu_clk->hw);
++	if (!running || !was_enabled)
++		ingenic_tcu_disable_regs(&tcu_clk->hw);
+ 
+ 	err = clk_hw_register(NULL, &tcu_clk->hw);
+ 	if (err) {
+@@ -456,6 +491,7 @@
+ };
+ 
+ static const struct ingenic_soc_info x1600_soc_info = {
++	.preserve_running_wdt = true,
+ 	.wdt_rtc_parent = "rtc_ercs",
+ 	.num_channels = 8,
+ 	.has_ost = false, /* X1600 has OST, but it does not belong to TCU */
+--- a/drivers/watchdog/jz4740_wdt.c
++++ b/drivers/watchdog/jz4740_wdt.c
+@@ -10,6 +10,7 @@
+ #include <linux/mfd/ingenic-tcu.h>
+ #include <linux/mfd/syscon.h>
+ #include <linux/module.h>
++#include <linux/math64.h>
+ #include <linux/moduleparam.h>
+ #include <linux/types.h>
+ #include <linux/kernel.h>
+@@ -55,6 +56,7 @@
+ 	struct clk *clk;
+ 	unsigned long clk_rate;
+ 	bool has_counter_clear;
++	bool clk_enabled;
+ 	const struct jz_wdt_soc_info *soc_info;
+ };
+ 
+@@ -69,6 +71,66 @@
+ 	return regmap_write(drvdata->map, drvdata->soc_info->counter, 0);
+ }
+ 
++/* X1600 adoption owns the same reference later used by start/restart. */
++static int jz4740_wdt_enable_clock(struct jz4740_wdt_drvdata *drvdata)
++{
++	int ret;
++
++	if (drvdata->has_counter_clear && drvdata->clk_enabled)
++		return 0;
++
++	ret = clk_prepare_enable(drvdata->clk);
++	if (!ret && drvdata->has_counter_clear)
++		drvdata->clk_enabled = true;
++	return ret;
++}
++
++static void jz4740_wdt_disable_clock(struct jz4740_wdt_drvdata *drvdata)
++{
++	if (!drvdata->has_counter_clear || drvdata->clk_enabled)
++		clk_disable_unprepare(drvdata->clk);
++	drvdata->clk_enabled = false;
++}
++
++static int jz4740_wdt_set_timeout_x1600(struct watchdog_device *wdt_dev,
++				      unsigned int new_timeout)
++{
++	struct jz4740_wdt_drvdata *drvdata = watchdog_get_drvdata(wdt_dev);
++	const struct jz_wdt_soc_info *soc_info = drvdata->soc_info;
++	u64 ticks = (u64)drvdata->clk_rate * new_timeout;
++	unsigned int tcer;
++	int ret, restore_ret;
++
++	/* A zero period is intentional for the restart operation. */
++	if (!drvdata->clk_rate || ticks > U16_MAX)
++		return -EINVAL;
++
++	ret = regmap_read(drvdata->map, soc_info->enable, &tcer);
++	if (ret)
++		return ret;
++	ret = regmap_write(drvdata->map, soc_info->enable, 0);
++	if (ret)
++		return ret;
++
++	ret = regmap_write(drvdata->map, TCU_REG_WDT_TDR, ticks);
++	if (!ret)
++		ret = jz4740_wdt_ping(wdt_dev);
++
++	/* Always restore the armed state, including a failed reprogramming. */
++	if (tcer & soc_info->enable_start) {
++		restore_ret = regmap_write(drvdata->map, soc_info->enable,
++					   soc_info->enable_start);
++		if (!ret)
++			ret = restore_ret;
++	}
++	if (ret)
++		return ret;
++
++	wdt_dev->timeout = new_timeout;
++	wdt_dev->max_hw_heartbeat_ms = div_u64(ticks * 1000, drvdata->clk_rate);
++	return 0;
++}
++
+ static int jz4730_wdt_set_timeout(struct watchdog_device *wdt_dev,
+ 				  unsigned int new_timeout)
+ {
+@@ -103,6 +165,9 @@
+ 	u16 timeout_value = (u16)(drvdata->clk_rate * new_timeout);
+ 	unsigned int tcer;
+ 
++	if (drvdata->has_counter_clear)
++		return jz4740_wdt_set_timeout_x1600(wdt_dev, new_timeout);
++
+ 	regmap_read(drvdata->map, soc_info->enable, &tcer);
+ 	regmap_write(drvdata->map, soc_info->enable, 0);
+ 
+@@ -120,31 +185,45 @@
+ {
+ 	struct jz4740_wdt_drvdata *drvdata = watchdog_get_drvdata(wdt_dev);
+ 	const struct jz_wdt_soc_info *soc_info = drvdata->soc_info;
++	bool had_clock = drvdata->clk_enabled;
+ 	unsigned int tcer;
+ 	int ret;
+ 
+-	ret = clk_prepare_enable(drvdata->clk);
+-	if (ret)
+-		return ret;
+-
+-	regmap_read(drvdata->map, soc_info->enable, &tcer);
+-
+-	jz4740_wdt_set_timeout(wdt_dev, wdt_dev->timeout);
+-
+-	/* Start watchdog if it wasn't started already */
+-	if (!(tcer & soc_info->enable_start))
+-		regmap_write(drvdata->map, soc_info->enable, soc_info->enable_start);
+-
++	ret = jz4740_wdt_enable_clock(drvdata);
++	if (ret)
++		return ret;
++
++	ret = regmap_read(drvdata->map, soc_info->enable, &tcer);
++	if (ret)
++		goto err_clock;
++	ret = jz4740_wdt_set_timeout(wdt_dev, wdt_dev->timeout);
++	if (ret)
++		goto err_clock;
++
++	if (!(tcer & soc_info->enable_start)) {
++		ret = regmap_write(drvdata->map, soc_info->enable,
++				   soc_info->enable_start);
++		if (ret)
++			goto err_clock;
++	}
+ 	return 0;
++
++err_clock:
++	if (!had_clock)
++		jz4740_wdt_disable_clock(drvdata);
++	return ret;
+ }
+ 
+ static int jz4740_wdt_stop(struct watchdog_device *wdt_dev)
+ {
+ 	struct jz4740_wdt_drvdata *drvdata = watchdog_get_drvdata(wdt_dev);
+ 	const struct jz_wdt_soc_info *soc_info = drvdata->soc_info;
+-
+-	regmap_write(drvdata->map, soc_info->enable, 0);
+-	clk_disable_unprepare(drvdata->clk);
++	int ret;
++
++	ret = regmap_write(drvdata->map, soc_info->enable, 0);
++	if (ret)
++		return ret;
++	jz4740_wdt_disable_clock(drvdata);
+ 
+ 	return 0;
+ }
+@@ -155,8 +234,7 @@
+ 	struct jz4740_wdt_drvdata *drvdata = watchdog_get_drvdata(wdt_dev);
+ 
+ 	wdt_dev->timeout = 0;
+-	drvdata->soc_info->ops->start(wdt_dev);
+-	return 0;
++	return drvdata->soc_info->ops->start(wdt_dev);
+ }
+ 
+ static const struct watchdog_info jz4740_wdt_info = {
+@@ -206,12 +284,36 @@
+ MODULE_DEVICE_TABLE(of, jz4740_wdt_of_matches);
+ #endif
+ 
++static int jz4740_wdt_adopt(struct jz4740_wdt_drvdata *drvdata)
++{
++	struct watchdog_device *wdt = &drvdata->wdt;
++	unsigned int tdr;
++	int ret;
++
++	ret = regmap_read(drvdata->map, TCU_REG_WDT_TDR, &tdr);
++	if (ret)
++		return ret;
++	if (!tdr || tdr > U16_MAX || !drvdata->clk_rate)
++		return -EINVAL;
++
++	wdt->timeout = DIV_ROUND_UP(tdr, drvdata->clk_rate);
++	wdt->max_hw_heartbeat_ms = div_u64((u64)tdr * 1000,
++					 drvdata->clk_rate);
++	if (!wdt->max_hw_heartbeat_ms)
++		return -EINVAL;
++
++	/* Keep TDR and its clock unchanged, but renew the inherited deadline. */
++	return jz4740_wdt_ping(wdt);
++}
++
+ static int jz4740_wdt_probe(struct platform_device *pdev)
+ {
+ 	const struct jz_wdt_soc_info *soc_info;
+ 	struct device *dev = &pdev->dev;
+ 	struct jz4740_wdt_drvdata *drvdata;
+ 	struct watchdog_device *jz4740_wdt;
++	unsigned int tcer;
++	bool running = false;
+ 	long rate;
+ 	int ret;
+ 
+@@ -235,14 +337,37 @@
+ 		return PTR_ERR(drvdata->clk);
+ 	}
+ 
+-	/* Set smallest clock possible */
+-	rate = clk_round_rate(drvdata->clk, 1);
+-	if (rate < 0)
+-		return rate;
+-
+-	ret = clk_set_rate(drvdata->clk, rate);
+-	if (ret)
+-		return ret;
++	drvdata->map = device_node_to_regmap(dev->parent->of_node);
++	if (IS_ERR(drvdata->map)) {
++		dev_err(dev, "regmap not found\n");
++		return PTR_ERR(drvdata->map);
++	}
++
++	if (drvdata->has_counter_clear) {
++		ret = regmap_read(drvdata->map, soc_info->enable, &tcer);
++		if (ret)
++			return ret;
++		running = tcer & soc_info->enable_start;
++	}
++
++	if (running) {
++		ret = jz4740_wdt_enable_clock(drvdata);
++		if (ret)
++			return ret;
++		rate = clk_get_rate(drvdata->clk);
++	} else {
++		/* Change the clock only when there is no inherited X1600 timer. */
++		rate = clk_round_rate(drvdata->clk, 1);
++		if (rate < 0)
++			return rate;
++		ret = clk_set_rate(drvdata->clk, rate);
++		if (ret)
++			return ret;
++	}
++	if (drvdata->has_counter_clear && (rate <= 0 || rate > U16_MAX)) {
++		ret = -EINVAL;
++		goto err_clock;
++	}
+ 
+ 	drvdata->clk_rate = rate;
+ 	jz4740_wdt = &drvdata->wdt;
+@@ -257,13 +382,23 @@
+ 	watchdog_set_nowayout(jz4740_wdt, nowayout);
+ 	watchdog_set_drvdata(jz4740_wdt, drvdata);
+ 
+-	drvdata->map = device_node_to_regmap(dev->parent->of_node);
+-	if (IS_ERR(drvdata->map)) {
+-		dev_err(dev, "regmap not found\n");
+-		return PTR_ERR(drvdata->map);
+-	}
+-
+-	return devm_watchdog_register_device(dev, &drvdata->wdt);
++	if (running) {
++		ret = jz4740_wdt_adopt(drvdata);
++		if (ret)
++			goto err_clock;
++		set_bit(WDOG_HW_RUNNING, &jz4740_wdt->status);
++	}
++
++	ret = devm_watchdog_register_device(dev, jz4740_wdt);
++	if (!ret)
++		return 0;
++	if (running)
++		clear_bit(WDOG_HW_RUNNING, &jz4740_wdt->status);
++err_clock:
++	if (running)
++		/* X1600 TCU preserves the armed timer on reference release. */
++		jz4740_wdt_disable_clock(drvdata);
++	return ret;
+ }
+ 
+ static struct platform_driver jz4740_wdt_driver = {
