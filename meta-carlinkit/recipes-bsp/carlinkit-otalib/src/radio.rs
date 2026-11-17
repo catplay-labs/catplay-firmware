@@ -1,10 +1,6 @@
-use core::{fmt, mem, ptr, time::Duration};
+use core::{ffi::CStr, fmt, mem, ptr, time::Duration};
 
 use crate::nostd::SmallFd;
-
-const SYSFS_PATH: &str = "/sys/bus/sdio/devices/mmc0:0001:1/device\0";
-const SYSFS_PATH_V851: &str = "/sys/bus/sdio/devices/mmc0:6721:1/device\0";
-const SYSFS_PATH_ULTRA: &str = "/sys/bus/sdio/devices/mmc1:390b:1/device\0";
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Radio {
@@ -191,22 +187,46 @@ impl fmt::Display for Radio {
 }
 
 pub fn id_radio() -> Radio {
-    let mut buf = [0u8; 32];
-    let fd = SmallFd::open_readonly(SYSFS_PATH)
-        .or_else(|_| SmallFd::open_readonly(SYSFS_PATH_V851))
-        .or_else(|_| SmallFd::open_readonly(SYSFS_PATH_ULTRA));
-    let Ok(fd) = fd else {
+    // RCA is assigned during card initialization and is not a stable identity.
+    // Only function 1 is used for radio identification on supported platforms.
+    id_radio_glob(c"/sys/bus/sdio/devices/mmc*:1/device")
+}
+
+struct RadioDevices(libc::glob_t);
+
+impl Drop for RadioDevices {
+    fn drop(&mut self) {
+        unsafe { libc::globfree(&mut self.0) };
+    }
+}
+
+fn id_radio_glob(pattern: &CStr) -> Radio {
+    let mut devices = RadioDevices(unsafe { mem::zeroed() });
+    if unsafe { libc::glob(pattern.as_ptr(), 0, None, &mut devices.0) } != 0 {
         return Radio::Offline;
-    };
+    }
 
-    let len = fd.read(&mut buf);
-    let Ok(len) = len else {
-        return Radio::Offline;
-    };
+    let mut result = Radio::Offline;
+    for index in 0..devices.0.gl_pathc {
+        let path = unsafe { CStr::from_ptr(*devices.0.gl_pathv.add(index)) };
+        let Ok(path) = path.to_str() else { continue };
+        let Ok(fd) = SmallFd::open_readonly(path) else {
+            continue;
+        };
+        let mut buf = [0u8; 32];
+        let Ok(len) = fd.read(&mut buf) else { continue };
+        let Ok(id) = core::str::from_utf8(&buf[..len]) else {
+            continue;
+        };
+        result = radio_from_device_id(id.trim());
+        if result != Radio::Unknown {
+            return result;
+        }
+    }
+    result
+}
 
-    let slice = &buf[..len];
-    let s = unsafe { core::str::from_utf8_unchecked(slice) }.trim();
-
+fn radio_from_device_id(s: &str) -> Radio {
     match s {
         "0xb822" => Radio::RTL8822BS,
         "0xc822" => Radio::RTL8822CS,
@@ -221,5 +241,91 @@ pub fn id_radio() -> Radio {
 
         "0x0082" => Radio::AIC8800D80, // Only Ultra
         _ => Radio::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        ffi::CString,
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    struct Devices(PathBuf);
+    impl Devices {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(std::format!(
+                "otalib-sdio-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn add(&self, name: &str, id: &str) {
+            let path = self.0.join(name);
+            fs::create_dir(&path).unwrap();
+            fs::write(path.join("device"), id).unwrap();
+        }
+        fn detect(&self) -> Radio {
+            let pattern = CString::new(std::format!("{}/mmc*:1/device", self.0.display())).unwrap();
+            id_radio_glob(&pattern)
+        }
+    }
+    impl Drop for Devices {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn discovers_radio_independently_of_host_and_rca() {
+        for name in ["mmc1:390b:1", "mmc1:9c85:1", "mmc7:abcd:1"] {
+            let devices = Devices::new();
+            devices.add(name, "0x0082\n");
+            assert_eq!(devices.detect(), Radio::AIC8800D80, "{name}");
+        }
+    }
+
+    #[test]
+    fn skips_secondary_functions_and_non_mmc_devices() {
+        let devices = Devices::new();
+        for name in [
+            "mmc1:9c85:2",
+            "mmc1:9c85:10",
+            "mmc1:9c85:11",
+            "other:9c85:1",
+        ] {
+            devices.add(name, "0x0082\n");
+        }
+        assert_eq!(devices.detect(), Radio::Offline);
+        devices.add("mmc3:1234:1", "0xb733\n");
+        assert_eq!(devices.detect(), Radio::RTL8733BS);
+    }
+
+    #[test]
+    fn continues_past_unknown_and_missing_attributes() {
+        let devices = Devices::new();
+        devices.add("mmc0:1111:1", "0xffff\n");
+        fs::create_dir(devices.0.join("mmc1:2222:1")).unwrap();
+        assert_eq!(devices.detect(), Radio::Unknown);
+        devices.add("mmc2:3333:1", "0x4335\n");
+        assert_eq!(devices.detect(), Radio::BCM4335);
+    }
+
+    #[test]
+    fn empty_or_missing_bus_is_offline() {
+        let devices = Devices::new();
+        assert_eq!(devices.detect(), Radio::Offline);
+        let pattern = CString::new(std::format!(
+            "{}/missing/mmc*:1/device",
+            devices.0.display()
+        ))
+        .unwrap();
+        assert_eq!(id_radio_glob(&pattern), Radio::Offline);
     }
 }
