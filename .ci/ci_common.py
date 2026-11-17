@@ -1,5 +1,6 @@
 """S3 rendezvous and consistent SQLite snapshots for one CI hashserv session."""
 import gzip
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -68,14 +69,14 @@ class Store:
 
 
 def validate_database(filename):
-    with sqlite3.connect(f'{Path(filename).resolve().as_uri()}?mode=ro', uri=True) as db:
+    with closing(sqlite3.connect(f'{Path(filename).resolve().as_uri()}?mode=ro', uri=True)) as db:
         if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
             raise RuntimeError('Invalid hashserv SQLite database')
 
 
 def backup_database(source, destination):
-    with sqlite3.connect(f'{Path(source).resolve().as_uri()}?mode=ro', uri=True,
-                         timeout=30) as original, sqlite3.connect(destination) as backup:
+    with closing(sqlite3.connect(f'{Path(source).resolve().as_uri()}?mode=ro', uri=True,
+                                 timeout=30)) as original, closing(sqlite3.connect(destination)) as backup:
         original.backup(backup)
     validate_database(destination)
 
