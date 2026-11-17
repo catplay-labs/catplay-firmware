@@ -9,8 +9,7 @@ SRC_URI += " \
     file://flash.py \
     file://reboot2recovery.py \
     file://recov.py \
-    file://trampoline.py \
-    file://uimage.py \
+    file://recovery_fit.py \
     file://uploader.py \
     file://wizard.py \
 "
@@ -22,8 +21,7 @@ C2A_FLASHER_FILES = " \
     flash.py \
     reboot2recovery.py \
     recov.py \
-    trampoline.py \
-    uimage.py \
+    recovery_fit.py \
     uploader.py \
     wizard.py \
 "

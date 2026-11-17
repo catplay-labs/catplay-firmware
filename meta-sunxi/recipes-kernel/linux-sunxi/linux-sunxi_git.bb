@@ -160,5 +160,17 @@ do_patch:append:x1600-aic8800d80() {
         ${S}/arch/mips/boot/dts/ingenic/carlinkit-mini-ultra-nor.dts
 }
 
+# Generate before compiling either the external or built-in board DTB.
+python do_x1600_bootargs() {
+    if "x1600-aic8800d80" not in (d.getVar("MACHINEOVERRIDES") or "").split(":"):
+        return
+    import json
+    from pathlib import Path
+    header = Path(d.getVar("S")) / "arch/mips/boot/dts/ingenic/c2a-x1600-bootargs.h"
+    header.write_text("/* Generated from machine C2A_APPEND. */\n#define C2A_BOOTARGS " +
+                      json.dumps(d.getVar("C2A_APPEND") or "") + "\n")
+}
+addtask x1600_bootargs after do_patch before do_configure
+
 # Keep the ARM32 LTO unlock last in the patch series.
 SRC_URI:append = " file://arch/arm/0002-arm-enable-catplay-clang-lto.patch"

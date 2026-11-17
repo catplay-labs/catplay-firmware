@@ -1,6 +1,7 @@
 /dts-v1/;
 
 #include "x1600.dtsi"
+#include "c2a-x1600-bootargs.h"
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/interrupt-controller/irq.h>
@@ -96,9 +97,7 @@
 
 	chosen {
 		stdout-path = "serial2:3000000n8";
-#if 0	// u-boot and optionally CONFIG_CMDLINE should provide something application specific
-		bootargs = "mem=64M@0x0 rootfstype=ext4 root=/dev/mmcblk0p2 rw earlycon console=ttyS2,115200 ignore_loglevel rootwait";
-#endif
+		bootargs = C2A_BOOTARGS;
 	};
 
 	reserved-memory {

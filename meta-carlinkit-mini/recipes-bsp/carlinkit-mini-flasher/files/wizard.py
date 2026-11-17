@@ -25,11 +25,8 @@ PRESETS = {
     "wooboobox": "192.168.1.101",
     "carlinkit": "192.168.50.100",
 }
-RECOVERY_FILES = (
-    "../ax1800_spi_nor_burner_u-boot-spl.bin",
-    "../x1600-aic8800d80-recov.uzImage.bin",
-    "../x1600-aic8800d80-recov.initrd.bin",
-)
+BUNDLE_PREFIX = "../x1600-aic8800d80-recov"
+
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -46,7 +43,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--refresh", action="store_true", help="Enter USB boot mode via USB vendor request")
     parser.add_argument("--no-flash", action="store_true", help="Skip firmware flash")
+    stage = parser.add_mutually_exclusive_group()
+    stage.add_argument("--staging", action="store_true", help="Boot TPL reading SPL and kernel from NOR, without flashing")
+    stage.add_argument("--staging-proper", action="store_true", help="Boot USB proper reading the kernel from NOR, without flashing")
+    parser.add_argument("--tpl", default=BUNDLE_PREFIX + "-u-boot-tpl.bin")
+    parser.add_argument("--fit", default=BUNDLE_PREFIX + ".fitImage")
+    parser.add_argument("--uboot", default=BUNDLE_PREFIX + "-u-boot-proper.bin")
+    parser.add_argument("--staging-tpl", default=BUNDLE_PREFIX + "-u-boot-flash-tpl.bin")
+    parser.add_argument("--staging-uboot", default=BUNDLE_PREFIX + "-u-boot-staging-proper.bin")
     args = parser.parse_args(argv)
+    if args.already_recov and (args.staging or args.staging_proper):
+        parser.error("--already-recov cannot be combined with --staging or --staging-proper")
     if not (args.preset or args.refresh or args.already_fel or args.already_recov):
         parser.error("--preset is required unless --refresh, --already-fel or --already-recov is used")
     return args
@@ -94,11 +101,17 @@ def main(argv: list[str] | None = None) -> int:
                 return rc
 
         if not args.already_recov:
-            rc = run_step("recov.py", list(RECOVERY_FILES), usb_access=True)
+            if args.staging:
+                loader_args = ["--staging", "--tpl", args.staging_tpl]
+            elif args.staging_proper:
+                loader_args = ["--staging-proper", "--tpl", args.tpl, "--proper", args.staging_uboot]
+            else:
+                loader_args = ["--tpl", args.tpl, "--kernel", args.fit, "--proper", args.uboot]
+            rc = run_step("recovery_fit.py", loader_args, usb_access=True)
             if rc != 0:
                 return rc
 
-        if not args.no_flash:
+        if not args.no_flash and not (args.staging or args.staging_proper):
             return run_step("flash.py", ["--host", "192.168.51.2", "--fw", args.fw])
         return 0
     except KeyboardInterrupt:
