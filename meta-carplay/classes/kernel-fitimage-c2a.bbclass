@@ -13,6 +13,8 @@ uboot_prep_kimage() {
 
     if [ "${ARCH}" = "riscv" ]; then
         IMG_SRC="${B}/arch/riscv/boot/Image"
+    elif [ "${ARCH}" = "mips" ]; then
+        IMG_SRC="${B}/arch/mips/boot/vmlinuz.bin"
     else
         IMG_SRC="${B}/arch/arm/boot/zImage"
     fi
